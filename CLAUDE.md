@@ -16,7 +16,7 @@ MCP server + CLI for shared context between AI agents (Sido and Claude Code) via
 - `bridge-meta` category enables agents to suggest improvements to the bridge itself
 
 ### Supabase project
-- Project ID: cmngzsojiyyboickvehr
+- Project ID: kikerkfuhhinziucbyxs
 - Table: shared_context (public schema)
 
 ### Integration points
