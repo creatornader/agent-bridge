@@ -39,3 +39,22 @@ create policy "Allow insert access"
 create policy "Allow update access"
   on shared_context for update
   using (true);
+
+-- Atomic ack function (avoids fetch-then-update race condition)
+create or replace function ack_context(entry_ids bigint[], agent_name text)
+returns integer
+language plpgsql
+security definer
+set search_path = public
+as $$
+declare
+  affected integer;
+begin
+  update shared_context
+  set acked_by = array_append(acked_by, agent_name)
+  where id = any(entry_ids)
+    and not (acked_by @> array[agent_name]);
+  get diagnostics affected = row_count;
+  return affected;
+end;
+$$;

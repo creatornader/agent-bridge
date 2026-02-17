@@ -162,50 +162,15 @@ cmd_ack() {
     exit 1
   fi
 
-  local acked=0
-  IFS=',' read -ra id_array <<< "$ids"
-  for id in "${id_array[@]}"; do
-    # Fetch current acked_by
-    local current
-    current=$(sb_request GET "/shared_context?id=eq.${id}&select=acked_by")
-    local current_array
-    current_array=$(echo "$current" | python3 -c "
-import sys, json
-rows = json.load(sys.stdin)
-if rows:
-    print(json.dumps(rows[0].get('acked_by', [])))
-else:
-    print('[]')
-")
+  # Convert comma-separated IDs to JSON array
+  local json_ids
+  json_ids=$(echo "$ids" | python3 -c "import sys; print('[' + ','.join(sys.stdin.read().strip().split(',')) + ']')")
 
-    # Check if already acked
-    local already
-    already=$(echo "$current_array" | python3 -c "
-import sys, json
-arr = json.load(sys.stdin)
-print('yes' if '${agent}' in arr else 'no')
-")
+  local result
+  result=$(sb_request POST "/rpc/ack_context" \
+    -d "{\"entry_ids\": ${json_ids}, \"agent_name\": \"${agent}\"}")
 
-    if [[ "$already" == "yes" ]]; then
-      acked=$((acked + 1))
-      continue
-    fi
-
-    # Append agent to array
-    local new_array
-    new_array=$(echo "$current_array" | python3 -c "
-import sys, json
-arr = json.load(sys.stdin)
-arr.append('${agent}')
-print(json.dumps(arr))
-")
-
-    sb_request PATCH "/shared_context?id=eq.${id}" \
-      -d "{\"acked_by\": ${new_array}}" > /dev/null
-    acked=$((acked + 1))
-  done
-
-  echo "{\"acknowledged\": ${acked}, \"agent\": \"${agent}\"}"
+  echo "{\"acknowledged\": ${result}, \"agent\": \"${agent}\"}"
 }
 
 cmd_status() {

@@ -197,30 +197,15 @@ export async function startServer() {
             "ids (number[]) and agent (string) are required"
           );
         }
-        let acked = 0;
-        for (const id of ids) {
-          // Append agent to acked_by array using Supabase RPC-style update
-          // PostgREST doesn't support array_append directly, so we fetch-then-update
-          const rows = (await supabaseRequest(
-            `/shared_context?id=eq.${id}&select=acked_by`
-          )) as Array<{ acked_by: string[] }>;
-          if (rows.length === 0) continue;
-          const current = rows[0].acked_by || [];
-          if (current.includes(agent)) {
-            acked++;
-            continue;
-          }
-          await supabaseRequest(`/shared_context?id=eq.${id}`, {
-            method: "PATCH",
-            body: JSON.stringify({ acked_by: [...current, agent] }),
-          });
-          acked++;
-        }
+        const data = await supabaseRequest("/rpc/ack_context", {
+          method: "POST",
+          body: JSON.stringify({ entry_ids: ids, agent_name: agent }),
+        });
         return {
           content: [
             {
               type: "text",
-              text: JSON.stringify({ acknowledged: acked, agent }),
+              text: JSON.stringify({ acknowledged: data, agent }),
             },
           ],
         };
