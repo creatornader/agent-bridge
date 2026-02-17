@@ -1,0 +1,233 @@
+#!/usr/bin/env bash
+# agent-bridge — CLI for shared context between AI agents
+# Uses curl to hit Supabase REST API directly.
+# Config: ~/.agent-bridge/config (AGENT_BRIDGE_URL, AGENT_BRIDGE_KEY)
+
+set -euo pipefail
+
+CONFIG_FILE="${HOME}/.agent-bridge/config"
+
+if [[ ! -f "$CONFIG_FILE" ]]; then
+  echo "Error: Config file not found at $CONFIG_FILE" >&2
+  echo "Create it with AGENT_BRIDGE_URL and AGENT_BRIDGE_KEY" >&2
+  exit 1
+fi
+
+# shellcheck source=/dev/null
+source "$CONFIG_FILE"
+
+if [[ -z "${AGENT_BRIDGE_URL:-}" || -z "${AGENT_BRIDGE_KEY:-}" ]]; then
+  echo "Error: AGENT_BRIDGE_URL and AGENT_BRIDGE_KEY must be set in $CONFIG_FILE" >&2
+  exit 1
+fi
+
+REST_URL="${AGENT_BRIDGE_URL}/rest/v1"
+
+sb_request() {
+  local method="$1" path="$2"
+  shift 2
+  curl -s -X "$method" "${REST_URL}${path}" \
+    -H "apikey: ${AGENT_BRIDGE_KEY}" \
+    -H "Authorization: Bearer ${AGENT_BRIDGE_KEY}" \
+    -H "Content-Type: application/json" \
+    -H "Prefer: return=representation" \
+    "$@"
+}
+
+usage() {
+  cat <<'EOF'
+agent-bridge — shared context between AI agents
+
+Commands:
+  post    Post a context entry
+  get     Read context entries
+  ack     Acknowledge entries
+  status  Health check
+
+Post:
+  agent-bridge post --source sido --category operational "Morning briefing delivered"
+  agent-bridge post --source sido --category bridge-meta "get_context should support multi-category filter"
+  agent-bridge post --source claude-code --category config-change --project whop-app "Updated API route"
+
+Get:
+  agent-bridge get
+  agent-bridge get --since 24h
+  agent-bridge get --unacked-by sido
+  agent-bridge get --category bridge-meta
+  agent-bridge get --source claude-code --limit 5
+
+Ack:
+  agent-bridge ack --ids 1,2,3 --agent sido
+
+Status:
+  agent-bridge status
+EOF
+}
+
+cmd_post() {
+  local source="" category="" content="" priority="info" project="" metadata="{}"
+
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --source)   source="$2"; shift 2 ;;
+      --category) category="$2"; shift 2 ;;
+      --priority) priority="$2"; shift 2 ;;
+      --project)  project="$2"; shift 2 ;;
+      --metadata) metadata="$2"; shift 2 ;;
+      -*)         echo "Unknown option: $1" >&2; exit 1 ;;
+      *)          content="$1"; shift ;;
+    esac
+  done
+
+  if [[ -z "$source" || -z "$category" || -z "$content" ]]; then
+    echo "Error: --source, --category, and content are required" >&2
+    exit 1
+  fi
+
+  local body
+  body=$(cat <<ENDJSON
+{
+  "source": "${source}",
+  "category": "${category}",
+  "content": $(printf '%s' "$content" | python3 -c 'import sys,json; print(json.dumps(sys.stdin.read()))'),
+  "priority": "${priority}",
+  "project": $(if [[ -n "$project" ]]; then echo "\"${project}\""; else echo "null"; fi),
+  "metadata": ${metadata}
+}
+ENDJSON
+  )
+
+  sb_request POST "/shared_context" -d "$body"
+  echo ""
+}
+
+cmd_get() {
+  local since="" source="" category="" project="" unacked_by="" limit="20"
+
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --since)      since="$2"; shift 2 ;;
+      --source)     source="$2"; shift 2 ;;
+      --category)   category="$2"; shift 2 ;;
+      --project)    project="$2"; shift 2 ;;
+      --unacked-by) unacked_by="$2"; shift 2 ;;
+      --limit)      limit="$2"; shift 2 ;;
+      -*)           echo "Unknown option: $1" >&2; exit 1 ;;
+      *)            shift ;;
+    esac
+  done
+
+  local params="order=created_at.desc&limit=${limit}"
+
+  if [[ -n "$since" ]]; then
+    # Support relative times like "24h", "7d", "1h"
+    if [[ "$since" =~ ^[0-9]+[hd]$ ]]; then
+      local num="${since%[hd]}"
+      local unit="${since: -1}"
+      local seconds
+      if [[ "$unit" == "h" ]]; then
+        seconds=$((num * 3600))
+      else
+        seconds=$((num * 86400))
+      fi
+      since=$(date -u -v-"${seconds}"S +"%Y-%m-%dT%H:%M:%SZ" 2>/dev/null || \
+              date -u -d "-${seconds} seconds" +"%Y-%m-%dT%H:%M:%SZ" 2>/dev/null)
+    fi
+    params="${params}&created_at=gte.${since}"
+  fi
+
+  [[ -n "$source" ]]     && params="${params}&source=eq.${source}"
+  [[ -n "$category" ]]   && params="${params}&category=eq.${category}"
+  [[ -n "$project" ]]    && params="${params}&project=eq.${project}"
+  [[ -n "$unacked_by" ]] && params="${params}&acked_by=not.cs.%7B${unacked_by}%7D"
+
+  sb_request GET "/shared_context?${params}"
+  echo ""
+}
+
+cmd_ack() {
+  local ids="" agent=""
+
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --ids)   ids="$2"; shift 2 ;;
+      --agent) agent="$2"; shift 2 ;;
+      -*)      echo "Unknown option: $1" >&2; exit 1 ;;
+      *)       shift ;;
+    esac
+  done
+
+  if [[ -z "$ids" || -z "$agent" ]]; then
+    echo "Error: --ids and --agent are required" >&2
+    exit 1
+  fi
+
+  local acked=0
+  IFS=',' read -ra id_array <<< "$ids"
+  for id in "${id_array[@]}"; do
+    # Fetch current acked_by
+    local current
+    current=$(sb_request GET "/shared_context?id=eq.${id}&select=acked_by")
+    local current_array
+    current_array=$(echo "$current" | python3 -c "
+import sys, json
+rows = json.load(sys.stdin)
+if rows:
+    print(json.dumps(rows[0].get('acked_by', [])))
+else:
+    print('[]')
+")
+
+    # Check if already acked
+    local already
+    already=$(echo "$current_array" | python3 -c "
+import sys, json
+arr = json.load(sys.stdin)
+print('yes' if '${agent}' in arr else 'no')
+")
+
+    if [[ "$already" == "yes" ]]; then
+      acked=$((acked + 1))
+      continue
+    fi
+
+    # Append agent to array
+    local new_array
+    new_array=$(echo "$current_array" | python3 -c "
+import sys, json
+arr = json.load(sys.stdin)
+arr.append('${agent}')
+print(json.dumps(arr))
+")
+
+    sb_request PATCH "/shared_context?id=eq.${id}" \
+      -d "{\"acked_by\": ${new_array}}" > /dev/null
+    acked=$((acked + 1))
+  done
+
+  echo "{\"acknowledged\": ${acked}, \"agent\": \"${agent}\"}"
+}
+
+cmd_status() {
+  local result
+  result=$(sb_request GET "/shared_context?limit=1&select=id")
+  if [[ $? -eq 0 ]]; then
+    echo '{"status": "ok", "message": "Agent Bridge is connected to Supabase"}'
+  else
+    echo '{"status": "error", "message": "Cannot reach Supabase"}' >&2
+    exit 1
+  fi
+}
+
+# Main
+COMMAND="${1:-}"
+shift || true
+
+case "$COMMAND" in
+  post)   cmd_post "$@" ;;
+  get)    cmd_get "$@" ;;
+  ack)    cmd_ack "$@" ;;
+  status) cmd_status ;;
+  -h|--help|help|"") usage ;;
+  *)      echo "Unknown command: $COMMAND" >&2; usage; exit 1 ;;
+esac
