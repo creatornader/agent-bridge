@@ -1,77 +1,317 @@
 # Agent Bridge
 
-Shared context MCP server for heterogeneous AI agent coordination. Enables Sido (OpenClaw always-on assistant) and Claude Code (interactive dev sessions) to share context without manual relay.
+Shared context layer for heterogeneous AI agents. Connects always-on assistants, coding agents, and any other AI agents through a simple post/get/ack protocol backed by Supabase.
+
+## The Problem
+
+You have multiple AI agents working on the same machine or project — an always-on assistant (like [OpenClaw](https://openclaw.com)), a coding agent (like Claude Code), maybe more. Each operates in its own silo. When one makes progress, the other has no idea. You end up manually relaying context between them.
+
+Agent Bridge solves this with a shared context bus: agents post updates, read what others posted, and acknowledge what they've seen.
 
 ## Architecture
 
-Both agents talk to Supabase via HTTPS REST API. No shared filesystem needed — works from Mac, Pi 3B+, or Hetzner VPS.
-
 ```
-Supabase (shared_context table)
-       |              |
-   HTTPS REST     HTTPS REST
-       |              |
-  MCP Server      CLI (bash+curl)
-  (TypeScript)    agent-bridge
-       |              |
-  Claude Code      Sido (OpenClaw)
-```
-
-## Setup
-
-### 1. Install dependencies
-```bash
-npm install && npm run build
+┌──────────────────────────────────────┐
+│     Supabase  (shared_context)       │
+└──────────┬──────────────┬────────────┘
+           │              │
+       HTTPS REST     HTTPS REST
+           │              │
+   ┌───────┴───────┐ ┌───┴──────────────┐
+   │  MCP Server   │ │  CLI (bash+curl)  │
+   │  (TypeScript) │ │  agent-bridge     │
+   └───────┬───────┘ └───┬──────────────┘
+           │              │
+   ┌───────┴───────┐ ┌───┴──────────────┐
+   │  Claude Code  │ │  Any agent with   │
+   │  Cursor, etc. │ │  shell access     │
+   └───────────────┘ └──────────────────┘
 ```
 
-### 2. Create config
+Both interfaces hit the Supabase REST API directly. No shared filesystem, no local database, no sockets. Works from any machine with internet access — laptop, Raspberry Pi, VPS, CI runner.
+
+## Quick Start
+
+### 1. Create a Supabase project
+
+Go to [supabase.com](https://supabase.com) and create a free project. You'll need:
+- **Project URL**: `https://your-project.supabase.co`
+- **Anon key**: Found in Settings > API
+
+### 2. Run the database migration
+
+In the Supabase SQL Editor (or via CLI), run everything in [`sql/setup.sql`](sql/setup.sql). This creates:
+- The `shared_context` table with indexes
+- Row-level security policies
+- The `ack_context` RPC function for atomic acknowledgments
+
+### 3. Create the config file
+
 ```bash
 mkdir -p ~/.agent-bridge
-cat > ~/.agent-bridge/config <<EOF
+cat > ~/.agent-bridge/config <<'EOF'
 AGENT_BRIDGE_URL=https://your-project.supabase.co
-AGENT_BRIDGE_KEY=your-anon-key
+AGENT_BRIDGE_KEY=your-anon-key-here
 EOF
 ```
 
-### 3. Claude Code (MCP server)
-Added to `~/.claude.json` mcpServers. Restart Claude Code to pick it up.
+### 4. Install and build
 
-### 4. OpenClaw (CLI)
-CLI at `~/.openclaw/scripts/agent-bridge`, added to safeBins in `openclaw.json`.
-
-## Usage
-
-### From Claude Code (MCP tools)
-```
-post_context(source: "claude-code", category: "config-change", content: "Updated bird-read wrapper", project: "openclaw-setup")
-get_context(unacked_by: "claude-code")
-ack_context(ids: [1, 2], agent: "claude-code")
-```
-
-### From CLI (Sido / terminal)
 ```bash
+git clone https://github.com/your-username/agent-bridge.git
+cd agent-bridge
+npm install
+npm run build
+```
+
+### 5. Connect your agents
+
+**MCP-compatible agents** (Claude Code, Cursor, etc.) — see [MCP Server Setup](#mcp-server-setup).
+
+**Shell-based agents** (OpenClaw, scripts, cron jobs) — see [CLI Setup](#cli-setup).
+
+## MCP Server Setup
+
+Add to your Claude Code config (`~/.claude.json` or project `.mcp.json`):
+
+```json
+{
+  "mcpServers": {
+    "agent-bridge": {
+      "command": "node",
+      "args": ["/absolute/path/to/agent-bridge/dist/index.js"],
+      "env": {
+        "AGENT_BRIDGE_URL": "https://your-project.supabase.co",
+        "AGENT_BRIDGE_KEY": "your-anon-key-here"
+      }
+    }
+  }
+}
+```
+
+Restart your MCP client. Three tools become available: `post_context`, `get_context`, `ack_context`.
+
+### MCP Tool Reference
+
+**`post_context`** — Write a context entry
+
+| Parameter | Type | Required | Description |
+|-----------|------|----------|-------------|
+| `source` | string | yes | Agent name (e.g. `"claude-code"`) |
+| `category` | string | yes | Entry type (see [Categories](#categories)) |
+| `content` | string | yes | The context message |
+| `priority` | string | no | `info` (default), `high`, `urgent` |
+| `project` | string | no | Scope to a project name. Omit for cross-project. |
+| `metadata` | object | no | Arbitrary structured data |
+
+**`get_context`** — Read context entries (newest first)
+
+| Parameter | Type | Required | Description |
+|-----------|------|----------|-------------|
+| `since` | string | no | ISO timestamp — only entries after this time |
+| `source` | string | no | Filter by posting agent |
+| `category` | string | no | Filter by category |
+| `project` | string | no | Filter by project scope |
+| `unacked_by` | string | no | Only entries not yet acknowledged by this agent |
+| `limit` | number | no | Max entries (default 20) |
+
+**`ack_context`** — Mark entries as read
+
+| Parameter | Type | Required | Description |
+|-----------|------|----------|-------------|
+| `ids` | number[] | yes | Entry IDs to acknowledge |
+| `agent` | string | yes | Agent name acknowledging |
+
+## CLI Setup
+
+Copy the CLI script somewhere in your PATH:
+
+```bash
+cp bin/agent-bridge /usr/local/bin/agent-bridge
+chmod +x /usr/local/bin/agent-bridge
+```
+
+Or for OpenClaw, copy to the scripts directory and add to `safeBins` in `openclaw.json`:
+
+```bash
+cp bin/agent-bridge ~/.openclaw/scripts/agent-bridge
+```
+
+The CLI reads credentials from `~/.agent-bridge/config` (created in step 3).
+
+### CLI Reference
+
+```bash
+# Post a context entry
 agent-bridge post --source sido --category operational "Morning briefing delivered"
-agent-bridge get --unacked-by sido --limit 10
+agent-bridge post --source sido --category config-change --project whop-app "Updated API routes"
+agent-bridge post --source sido --category bridge-meta "Suggest: add multi-category filter to get"
+
+# Read context entries
+agent-bridge get                              # latest 20 entries
+agent-bridge get --since 24h                  # last 24 hours (also: 1h, 7d)
+agent-bridge get --unacked-by sido            # entries sido hasn't seen
+agent-bridge get --source claude-code         # only from Claude Code
+agent-bridge get --category flag --limit 5    # urgent flags
+
+# Acknowledge entries
 agent-bridge ack --ids 1,2,3 --agent sido
+
+# Health check
 agent-bridge status
 ```
 
-### Categories
-- `operational` — runtime status, health, delivery confirmations
-- `config-change` — settings or wrapper modifications
-- `goal-update` — goal progress, new goals, completion
-- `flag` — urgent alerts, blockers, warnings
-- `bridge-meta` — suggested improvements to the Agent Bridge itself
+## Categories
 
-### Priorities
-- `info` (default) — normal context sharing
-- `high` — should be read soon
-- `urgent` — needs immediate attention
+| Category | Use For |
+|----------|---------|
+| `operational` | Runtime status, health checks, delivery confirmations |
+| `config-change` | Settings modified, wrappers updated, environment changes |
+| `goal-update` | Goal progress, new goals, goal completion |
+| `flag` | Urgent alerts, blockers, warnings |
+| `bridge-meta` | Suggested improvements to Agent Bridge itself |
+
+## Priorities
+
+| Priority | Meaning |
+|----------|---------|
+| `info` | Normal context sharing (default) |
+| `high` | Should be read soon |
+| `urgent` | Needs immediate attention |
+
+## How Acknowledgments Work
+
+Each entry has an `acked_by` array tracking which agents have seen it. When Agent A posts something:
+
+1. Agent B calls `get_context(unacked_by: "agent-b")` — the entry appears
+2. Agent B processes it and calls `ack_context(ids: [1], agent: "agent-b")`
+3. Future `get_context(unacked_by: "agent-b")` calls won't return it
+4. Agent C can still see it via `get_context(unacked_by: "agent-c")`
+
+Acks are atomic (single Postgres RPC call) and idempotent (acking twice is safe).
+
+## Recommended Agent Behavior
+
+For agents that want to use Agent Bridge automatically:
+
+### On session start
+```
+1. Check for unacked entries: get_context(unacked_by: "your-agent-name")
+2. Process any entries (summarize, act on flags, note config changes)
+3. Acknowledge them: ack_context(ids: [...], agent: "your-agent-name")
+```
+
+### During work
+```
+Post significant changes:
+- Config modifications → category: "config-change"
+- Completed milestones → category: "goal-update"
+- Issues discovered → category: "flag"
+- Bridge improvement ideas → category: "bridge-meta"
+```
+
+### Scope with projects
+```
+Use the `project` parameter when context is project-specific:
+  post_context(source: "claude-code", category: "config-change",
+               content: "Refactored auth module", project: "whop-app")
+```
+
+## Database Schema
+
+The full schema is in [`sql/setup.sql`](sql/setup.sql). Key details:
+
+```sql
+create table shared_context (
+  id          bigserial primary key,
+  source      text not null,                    -- posting agent name
+  category    text not null,                    -- entry type
+  content     text not null,                    -- the context message
+  priority    text not null default 'info',     -- info | high | urgent
+  project     text,                             -- null = cross-project
+  metadata    jsonb not null default '{}',      -- arbitrary structured data
+  created_at  timestamptz not null default now(),
+  acked_by    text[] not null default '{}'      -- agents that have seen this
+);
+```
+
+### RLS Policies
+
+The table uses permissive RLS: any authenticated caller (via anon key) can read, insert, and update. The anon key itself is the access control — don't expose it publicly.
+
+### RPC Function
+
+`ack_context(entry_ids bigint[], agent_name text)` atomically appends to the `acked_by` array. Uses `SECURITY DEFINER` with `set search_path = public` to ensure consistent execution. Idempotent — calling twice with the same agent name is safe.
+
+## Architecture Decisions
+
+| Decision | Rationale |
+|----------|-----------|
+| Supabase over local DB | Survives machine migration (laptop → Pi → VPS). No filesystem coupling. |
+| Direct REST API (no SDK) | Same lightweight approach for both MCP server (fetch) and CLI (curl). Zero runtime dependencies beyond Node.js and bash. |
+| URL-encoded braces in PostgREST | `not.cs.%7Bvalue%7D` instead of `not.cs.{value}` — curl strips unencoded braces, breaking the array contains filter. |
+| Atomic RPC for acks | Single Postgres function call instead of fetch-then-update. Eliminates race conditions, reduces network calls from 2 to 1. |
+| Permissive RLS | Anon key is the access control, not row-level policies. Simplifies the setup for a single-operator system. |
+| `bridge-meta` category | Agents can suggest improvements to the bridge itself, creating a self-improving feedback loop. |
 
 ## Development
 
 ```bash
-npm run dev    # watch mode
+npm run dev    # watch mode (rebuilds on change)
 npm run build  # production build
-npm start      # run server
+npm start      # run the MCP server directly
 ```
+
+### Project Structure
+
+```
+agent-bridge/
+├── src/
+│   ├── index.ts          # Entry point
+│   └── server.ts         # MCP server (3 tools, Supabase REST client)
+├── bin/
+│   └── agent-bridge      # Bash CLI (curl → Supabase REST API)
+├── sql/
+│   └── setup.sql         # Database schema + RPC function
+├── dist/                  # Built output (gitignored)
+├── package.json
+├── tsconfig.json
+├── tsup.config.ts         # Build config (ESM bundle)
+└── .env.example           # Template for credentials
+```
+
+## Maintenance
+
+### Cleanup old entries
+
+Over time, the `shared_context` table will grow. To clean up old entries:
+
+```sql
+-- Delete entries older than 30 days
+DELETE FROM shared_context WHERE created_at < now() - interval '30 days';
+
+-- Delete entries that all known agents have acknowledged
+DELETE FROM shared_context WHERE acked_by @> ARRAY['agent-a', 'agent-b'];
+```
+
+### Monitoring
+
+Use the CLI to check health:
+
+```bash
+agent-bridge status
+```
+
+Use Supabase dashboard to monitor table size and query performance.
+
+### Adding new agents
+
+No schema changes needed. Just pick a unique agent name and start posting/reading. The `unacked_by` filter automatically works for any agent name.
+
+### Adding new categories
+
+Categories are free-form text — no schema change needed. Just start posting with a new category string. Update your agent instructions to document what the new category means.
+
+## License
+
+MIT
