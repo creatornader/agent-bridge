@@ -1,3 +1,11 @@
 node_modules/
 dist/
 .env
+
+# Claude Code
+.claude/
+
+# claude-mem auto-generated CLAUDE.md files
+# Only track root CLAUDE.md (add exceptions below for justified sub-directory docs).
+**/CLAUDE.md
+!/CLAUDE.md
