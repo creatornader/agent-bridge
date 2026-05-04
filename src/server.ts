@@ -84,6 +84,11 @@ export async function startServer() {
               type: "object",
               description: "Arbitrary structured data",
             },
+            atrib_receipt_id: {
+              type: "string",
+              description:
+                "Optional. Signed atrib record receipt_id for the wrapper that signed this post_context call. Set automatically by the agent-bridge-atrib wrapper; consumers reading the row use this as the informed_by anchor for cross-repo causal edges.",
+            },
           },
           required: ["source", "category", "content"],
         },
@@ -151,7 +156,7 @@ export async function startServer() {
 
     switch (name) {
       case "post_context": {
-        const body = {
+        const body: Record<string, unknown> = {
           source: args?.source,
           category: args?.category,
           content: args?.content,
@@ -159,6 +164,11 @@ export async function startServer() {
           project: args?.project || null,
           metadata: args?.metadata || {},
         };
+        // Optional cross-tool causal anchor; written when the wrapper signs
+        // this call before forwarding (see agent-bridge-atrib).
+        if (typeof args?.atrib_receipt_id === "string" && args.atrib_receipt_id.length > 0) {
+          body.atrib_receipt_id = args.atrib_receipt_id;
+        }
         const data = await supabaseRequest("/shared_context", {
           method: "POST",
           body: JSON.stringify(body),
