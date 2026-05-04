@@ -19,6 +19,8 @@ if (!SUPABASE_URL || !SUPABASE_KEY) {
 
 const REST_URL = `${SUPABASE_URL}/rest/v1`;
 
+import { normalizeReceiptId } from "./atrib-receipt.js";
+
 const headers = {
   apikey: SUPABASE_KEY,
   Authorization: `Bearer ${SUPABASE_KEY}`,
@@ -165,9 +167,11 @@ export async function startServer() {
           metadata: args?.metadata || {},
         };
         // Optional cross-tool causal anchor; written when the wrapper signs
-        // this call before forwarding (see agent-bridge-atrib).
-        if (typeof args?.atrib_receipt_id === "string" && args.atrib_receipt_id.length > 0) {
-          body.atrib_receipt_id = args.atrib_receipt_id;
+        // this call before forwarding (see agent-bridge-atrib). Format-validated
+        // so unexpected producers cannot pollute the column with garbage.
+        const receiptId = normalizeReceiptId(args?.atrib_receipt_id);
+        if (receiptId) {
+          body.atrib_receipt_id = receiptId;
         }
         const data = await supabaseRequest("/shared_context", {
           method: "POST",
