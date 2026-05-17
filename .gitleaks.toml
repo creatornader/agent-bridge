@@ -1,0 +1,23 @@
+# gitleaks config for agent-bridge.
+#
+# Test-fixture allowlist: gitleaks flags high-entropy test tokens as
+# generic-api-key findings even though the values are not secrets.
+# Specifically, atrib §1.5.2 propagation tokens carry a record_hash +
+# creator_key — both public protocol metadata, never sensitive — but
+# their base64url form trips gitleaks's entropy detector.
+
+[extend]
+useDefault = true
+
+[allowlist]
+description = "Test fixtures + public protocol tokens"
+paths = [
+    '''test/.*\.test\.ts''',
+    '''test/.*\.spec\.ts''',
+]
+# Inline allowlist for the specific propagation-token fixture used in
+# normalizeReceiptId tests. The token is the public form of a record on
+# log.atrib.dev (record_hash.creator_key), not a credential.
+regexes = [
+    '''OL9GMj6QjKD55xWpOB6AvYIf-2--Ivh3Al6XuorYh3k\.haoZK4D1AXmy_r05GJP4CZGOv0zh0iK1l7ls1FA8oZI''',
+]
