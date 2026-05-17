@@ -1,0 +1,17 @@
+# Configuration for the `typos` typo checker.
+# https://github.com/crate-ci/typos
+
+[default]
+extend-ignore-re = [
+    "[A-Za-z0-9_-]{32,}",
+    "\\b[0-9a-f]{8,}\\b",
+    "#[a-z0-9][a-z0-9-]*",
+]
+
+[files]
+extend-exclude = [
+    "node_modules/",
+    "dist/",
+    "package-lock.json",
+    "pnpm-lock.yaml",
+]

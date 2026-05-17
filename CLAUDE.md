@@ -4,17 +4,17 @@ MCP server + CLI for shared context between AI agents via Supabase.
 
 ### Key files
 
-- `src/server.ts` — MCP server with 3 tools: post_context, get_context, ack_context
-- `src/index.ts` — Entry point
-- `bin/agent-bridge` — Bash CLI using curl to Supabase REST API
-- `sql/setup.sql` — Supabase schema (shared_context table + RLS + RPC)
+- `src/server.ts`: MCP server with 3 tools: post_context, get_context, ack_context
+- `src/index.ts`: Entry point
+- `bin/agent-bridge`: Bash CLI using curl to Supabase REST API
+- `sql/setup.sql`: Supabase schema (shared_context table + RLS + RPC)
 
 ### Architecture decisions
 
-- Direct fetch to Supabase REST API (no @supabase/supabase-js) — keeps both MCP server and CLI using the same lightweight approach
-- URL-encoded braces in PostgREST array contains filter (`%7B`/`%7D` instead of `{`/`}`) — curl strips unencoded braces
-- Permissive RLS (read all, insert all, update all) — the anon key is the access control, not row-level policies
-- `ack_context` uses a Postgres RPC function (`security definer`, `set search_path`) for atomic `array_append` — avoids race conditions and reduces network calls from 2 to 1
+- Direct fetch to Supabase REST API (no @supabase/supabase-js): keeps both MCP server and CLI using the same lightweight approach
+- URL-encoded braces in PostgREST array contains filter (`%7B`/`%7D` instead of `{`/`}`): curl strips unencoded braces
+- Permissive RLS (read all, insert all, update all): the anon key is the access control, not row-level policies
+- `ack_context` uses a Postgres RPC function (`security definer`, `set search_path`) for atomic `array_append`: avoids race conditions and reduces network calls from 2 to 1
 - `bridge-meta` category enables agents to suggest improvements to the bridge itself
 
 ### Supabase project

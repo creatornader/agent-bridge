@@ -4,7 +4,7 @@ Shared context layer for heterogeneous AI agents. Connects always-on assistants,
 
 ## The Problem
 
-You have multiple AI agents working on the same machine or project — an always-on assistant (like [OpenClaw](https://openclaw.com)), a coding agent (like Claude Code), maybe more. Each operates in its own silo. When one makes progress, the other has no idea. You end up manually relaying context between them.
+You have multiple AI agents working on the same machine or project: an always-on assistant (like [OpenClaw](https://openclaw.com)), a coding agent (like Claude Code), maybe more. Each operates in its own silo. When one makes progress, the other has no idea. You end up manually relaying context between them.
 
 Agent Bridge solves this with a shared context bus: agents post updates, read what others posted, and acknowledge what they've seen.
 
@@ -28,7 +28,7 @@ Agent Bridge solves this with a shared context bus: agents post updates, read wh
    └───────────────┘ └──────────────────┘
 ```
 
-Both interfaces hit the Supabase REST API directly. No shared filesystem, no local database, no sockets. Works from any machine with internet access — laptop, Raspberry Pi, VPS, CI runner.
+Both interfaces hit the Supabase REST API directly. No shared filesystem, no local database, no sockets. Works from any machine with internet access: laptop, Raspberry Pi, VPS, CI runner.
 
 ## Quick Start
 
@@ -66,9 +66,9 @@ npm run build
 
 ### 5. Connect your agents
 
-**MCP-compatible agents** (Claude Code, Cursor, etc.) — see [MCP Server Setup](#mcp-server-setup).
+**MCP-compatible agents** (Claude Code, Cursor, etc.): see [MCP Server Setup](#mcp-server-setup).
 
-**Shell-based agents** (OpenClaw, scripts, cron jobs) — see [CLI Setup](#cli-setup).
+**Shell-based agents** (OpenClaw, scripts, cron jobs): see [CLI Setup](#cli-setup).
 
 ## MCP Server Setup
 
@@ -93,7 +93,7 @@ Restart your MCP client. Three tools become available: `post_context`, `get_cont
 
 ### MCP Tool Reference
 
-**`post_context`** — Write a context entry
+**`post_context`**: Write a context entry
 
 | Parameter | Type | Required | Description |
 |-----------|------|----------|-------------|
@@ -104,18 +104,18 @@ Restart your MCP client. Three tools become available: `post_context`, `get_cont
 | `project` | string | no | Scope to a project name. Omit for cross-project. |
 | `metadata` | object | no | Arbitrary structured data |
 
-**`get_context`** — Read context entries (newest first)
+**`get_context`**: Read context entries (newest first)
 
 | Parameter | Type | Required | Description |
 |-----------|------|----------|-------------|
-| `since` | string | no | ISO timestamp — only entries after this time |
+| `since` | string | no | ISO timestamp: only entries after this time |
 | `source` | string | no | Filter by posting agent |
 | `category` | string | no | Filter by category |
 | `project` | string | no | Filter by project scope |
 | `unacked_by` | string | no | Only entries not yet acknowledged by this agent |
 | `limit` | number | no | Max entries (default 20) |
 
-**`ack_context`** — Mark entries as read
+**`ack_context`**: Mark entries as read
 
 | Parameter | Type | Required | Description |
 |-----------|------|----------|-------------|
@@ -183,7 +183,7 @@ agent-bridge status
 
 Each entry has an `acked_by` array tracking which agents have seen it. When Agent A posts something:
 
-1. Agent B calls `get_context(unacked_by: "agent-b")` — the entry appears
+1. Agent B calls `get_context(unacked_by: "agent-b")`: the entry appears
 2. Agent B processes it and calls `ack_context(ids: [1], agent: "agent-b")`
 3. Future `get_context(unacked_by: "agent-b")` calls won't return it
 4. Agent C can still see it via `get_context(unacked_by: "agent-c")`
@@ -237,11 +237,11 @@ create table shared_context (
 
 ### RLS Policies
 
-The table uses permissive RLS: any authenticated caller (via anon key) can read, insert, and update. The anon key itself is the access control — don't expose it publicly.
+The table uses permissive RLS: any authenticated caller (via anon key) can read, insert, and update. The anon key itself is the access control: don't expose it publicly.
 
 ### RPC Function
 
-`ack_context(entry_ids bigint[], agent_name text)` atomically appends to the `acked_by` array. Uses `SECURITY DEFINER` with `set search_path = public` to ensure consistent execution. Idempotent — calling twice with the same agent name is safe.
+`ack_context(entry_ids bigint[], agent_name text)` atomically appends to the `acked_by` array. Uses `SECURITY DEFINER` with `set search_path = public` to ensure consistent execution. Idempotent: calling twice with the same agent name is safe.
 
 ## Architecture Decisions
 
@@ -249,7 +249,7 @@ The table uses permissive RLS: any authenticated caller (via anon key) can read,
 |----------|-----------|
 | Supabase over local DB | Survives machine migration (laptop → Pi → VPS). No filesystem coupling. |
 | Direct REST API (no SDK) | Same lightweight approach for both MCP server (fetch) and CLI (curl). Zero runtime dependencies beyond Node.js and bash. |
-| URL-encoded braces in PostgREST | `not.cs.%7Bvalue%7D` instead of `not.cs.{value}` — curl strips unencoded braces, breaking the array contains filter. |
+| URL-encoded braces in PostgREST | `not.cs.%7Bvalue%7D` instead of `not.cs.{value}`: curl strips unencoded braces, breaking the array contains filter. |
 | Atomic RPC for acks | Single Postgres function call instead of fetch-then-update. Eliminates race conditions, reduces network calls from 2 to 1. |
 | Permissive RLS | Anon key is the access control, not row-level policies. Simplifies the setup for a single-operator system. |
 | `bridge-meta` category | Agents can suggest improvements to the bridge itself, creating a self-improving feedback loop. |
@@ -310,7 +310,7 @@ No schema changes needed. Just pick a unique agent name and start posting/readin
 
 ### Adding new categories
 
-Categories are free-form text — no schema change needed. Just start posting with a new category string. Update your agent instructions to document what the new category means.
+Categories are free-form text: no schema change needed. Just start posting with a new category string. Update your agent instructions to document what the new category means.
 
 ## License
 

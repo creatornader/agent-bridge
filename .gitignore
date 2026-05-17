@@ -9,3 +9,8 @@ dist/
 # Only track root CLAUDE.md (add exceptions below for justified sub-directory docs).
 **/CLAUDE.md
 !/CLAUDE.md
+thoughts/
+docs/handoffs/
+docs/superpowers/
+.remember/
+.atrib/

@@ -1,0 +1,41 @@
+name: security-scan
+
+# Lightweight security scanning for agent-bridge.
+#
+# Runs on every push + PR to main:
+#   - typos:    spelling check across all tracked files
+#   - gitleaks: pattern-based credential scanner (catches Supabase
+#               anon keys, generic API keys, etc.)
+#
+# Ported from atrib's heavier security-scan workflow with the
+# CVE-scan and TruffleHog tiers stripped (overkill for this size).
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  schedule:
+    - cron: '0 9 * * 0'
+
+permissions:
+  contents: read
+
+jobs:
+  typos:
+    name: typos (spelling check)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - uses: crate-ci/typos@v1.46.1
+
+  gitleaks:
+    name: gitleaks (credential scan)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+      - uses: gitleaks/gitleaks-action@v2
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
