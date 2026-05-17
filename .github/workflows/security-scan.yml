@@ -30,12 +30,22 @@ jobs:
       - uses: crate-ci/typos@v1.46.1
 
   gitleaks:
+    # Direct gitleaks invocation rather than gitleaks-action wrapper.
+    # The wrapper's push-event mode scans BEFORE^..HEAD, which breaks
+    # after a force-push (BEFORE is now an unreachable commit hash).
+    # Direct scan against the full tree is force-push-resilient and
+    # equivalent in practice for a repo this size.
     name: gitleaks (credential scan)
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v6
         with:
           fetch-depth: 0
-      - uses: gitleaks/gitleaks-action@v2
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      - name: Install gitleaks
+        run: |
+          GITLEAKS_VERSION=8.24.3
+          curl -sSL "https://github.com/gitleaks/gitleaks/releases/download/v${GITLEAKS_VERSION}/gitleaks_${GITLEAKS_VERSION}_linux_x64.tar.gz" \
+            | tar -xz -C /usr/local/bin gitleaks
+          gitleaks version
+      - name: Scan full tree + history
+        run: gitleaks detect --redact --verbose --exit-code 1 --no-banner
