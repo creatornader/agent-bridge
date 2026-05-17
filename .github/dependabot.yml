@@ -28,3 +28,19 @@ updates:
       npm-deps:
         patterns:
           - "*"
+
+  # pre-commit ecosystem (Layer 1 of the pin-drift fix, 2026-05-17).
+  # Tracks rev: fields in .pre-commit-config.yaml — primarily
+  # creatornader/textleaks + creatornader/oss-twin hooks. Without this,
+  # internal tool releases don't auto-PR into consumer repos and pins
+  # drift silently. Audit at: ~/.claude/scripts/oss-pin-audit.sh
+  - package-ecosystem: "pre-commit"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+    commit-message:
+      prefix: "chore(deps)"
+    groups:
+      pre-commit:
+        patterns:
+          - "*"
