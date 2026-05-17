@@ -14,11 +14,11 @@ First tagged release. Marks the point where agent-bridge has shipped its initial
 - Bash CLI at `bin/agent-bridge` for shell-based agent integrations.
 - SQL schema (`sql/setup.sql`) with the `shared_context` table, permissive RLS (anon key is the access control), and the `ack_context_atomic` RPC for race-free acknowledgement via `array_append`.
 - Optional `atrib_receipt_id` column for callers that wrap writes behind an atrib signing layer. The column is format-validated and optional; agent-bridge does not require atrib integration.
-- Integration with the public-OSS-prep stack: leakguard pre-commit hook, oss-twin structural mirror gate, oss-security-scan reusable CI workflow.
+- Integration with the public-OSS-prep stack: textleaks pre-commit hook, oss-twin structural mirror gate, oss-security-scan reusable CI workflow.
 
 ### Security
 
 - gitleaks + trufflehog + osv-scanner via the reusable workflow at `creatornader/oss-security-scan@v0.1.0`.
-- Narrative-leak detection in CI + on commit via `creatornader/leakguard@v0.1.1`.
+- Narrative-leak detection in CI + on commit via `creatornader/textleaks@v0.2.0` (renamed from leakguard).
 
 [0.1.0]: https://github.com/creatornader/agent-bridge/releases/tag/v0.1.0

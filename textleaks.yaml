@@ -1,6 +1,6 @@
-# agent-bridge's leakguard config.
+# agent-bridge's textleaks config.
 #
-# Extends the starter catalog shipped by leakguard. Patterns here are
+# Extends the starter catalog shipped by textleaks. Patterns here are
 # ADDED to the starter's patterns.
 
 version: 1
@@ -9,7 +9,7 @@ ignore_paths:
   - README.md
   - .pre-commit-config.yaml
   - .oss-twin.yaml
-  - leakguard.yaml
+  - textleaks.yaml
   - .gitignore
   - .github/workflows/security-scan.yml
   - .github/dependabot.yml

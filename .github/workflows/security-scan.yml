@@ -7,7 +7,7 @@ name: security-scan
 # is gated to the scheduled run (Sunday 09:00 UTC) so PRs and pushes
 # stay fast.
 #
-# pre-commit job runs leakguard + oss-twin-check at PR time as the
+# pre-commit job runs textleaks + oss-twin-check at PR time as the
 # CI-side enforcement of the local hooks in .pre-commit-config.yaml.
 #
 # All run: blocks use no github.event.* inputs.
@@ -34,7 +34,7 @@ jobs:
       run-osv-scanner: ${{ github.event_name == 'schedule' }}
 
   pre-commit:
-    name: pre-commit (leakguard + oss-twin-check)
+    name: pre-commit (textleaks + oss-twin-check)
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v6
