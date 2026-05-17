@@ -9,6 +9,6 @@ repos:
     hooks:
       - id: textleaks
   - repo: https://github.com/creatornader/oss-twin
-    rev: v0.1.0
+    rev: v0.1.1
     hooks:
       - id: oss-twin-check
