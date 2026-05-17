@@ -1,0 +1,90 @@
+name: dependabot-auto-merge
+
+# Auto-merge for Dependabot PRs that meet conservative trust criteria.
+#
+# Criteria (must ALL hold):
+#   1. Author is dependabot[bot]
+#   2. Update type is one of:
+#        - semver-patch (any dep)
+#        - semver-minor for direct dev-dependency
+#        - indirect (transitive) at any level
+#   3. Package is NOT on MANUAL_REVIEW_PACKAGES denylist
+#
+# Safety: this only flips the auto-merge flag on the PR. The actual
+# gate is branch protection required_status_checks — if any required
+# check fails, the PR sits in "Auto-merge enabled, waiting for checks"
+# forever (or until someone disables auto-merge or fixes the failure).
+# Auto-merge cannot bypass required checks.
+#
+# Denylist rationale: pool-workers 0.5->0.16 is a known breaking change
+# requiring vitest.config.ts rewrite (see memory: pool-workers-016-breaking).
+# Auto-merging it would break the worker test suite even if CI passes
+# the immediate pin bump.
+
+on: pull_request_target
+
+permissions:
+  contents: write
+  pull-requests: write
+
+jobs:
+  auto-merge:
+    runs-on: ubuntu-latest
+    if: github.actor == 'dependabot[bot]'
+    steps:
+      - name: Get Dependabot metadata
+        id: metadata
+        uses: dependabot/fetch-metadata@v2
+        with:
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Decide whether to auto-merge
+        id: decide
+        env:
+          UPDATE_TYPE: ${{ steps.metadata.outputs.update-type }}
+          DEPENDENCY_TYPE: ${{ steps.metadata.outputs.dependency-type }}
+          DEPENDENCY_NAMES: ${{ steps.metadata.outputs.dependency-names }}
+        run: |
+          MANUAL_REVIEW_PACKAGES="@cloudflare/vitest-pool-workers"
+
+          # Check denylist
+          for pkg in $MANUAL_REVIEW_PACKAGES; do
+            if echo "$DEPENDENCY_NAMES" | grep -qF "$pkg"; then
+              echo "decision=manual" >> "$GITHUB_OUTPUT"
+              echo "reason=package $pkg is on manual-review allowlist" >> "$GITHUB_OUTPUT"
+              exit 0
+            fi
+          done
+
+          # Auto-merge criteria
+          if [ "$UPDATE_TYPE" = "version-update:semver-patch" ]; then
+            echo "decision=auto" >> "$GITHUB_OUTPUT"
+            echo "reason=patch update" >> "$GITHUB_OUTPUT"
+          elif [ "$UPDATE_TYPE" = "version-update:semver-minor" ] && [ "$DEPENDENCY_TYPE" = "direct:development" ]; then
+            echo "decision=auto" >> "$GITHUB_OUTPUT"
+            echo "reason=minor update on dev dep" >> "$GITHUB_OUTPUT"
+          elif [ "$DEPENDENCY_TYPE" = "indirect" ]; then
+            echo "decision=auto" >> "$GITHUB_OUTPUT"
+            echo "reason=indirect (transitive) dependency" >> "$GITHUB_OUTPUT"
+          else
+            echo "decision=manual" >> "$GITHUB_OUTPUT"
+            echo "reason=type=$UPDATE_TYPE dep=$DEPENDENCY_TYPE outside auto-merge criteria" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Enable auto-merge
+        if: steps.decide.outputs.decision == 'auto'
+        env:
+          PR_URL: ${{ github.event.pull_request.html_url }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          REASON: ${{ steps.decide.outputs.reason }}
+        run: |
+          echo "Enabling auto-merge: $REASON"
+          gh pr merge --auto --squash "$PR_URL"
+
+      - name: Log manual-review decision
+        if: steps.decide.outputs.decision == 'manual'
+        env:
+          REASON: ${{ steps.decide.outputs.reason }}
+        run: |
+          echo "Skipping auto-merge: $REASON"
+
