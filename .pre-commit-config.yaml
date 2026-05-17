@@ -1,0 +1,14 @@
+# Pre-commit hooks for agent-bridge.
+#
+# Install: pip install pre-commit && pre-commit install
+# Run all hooks against the whole tree: pre-commit run --all-files
+
+repos:
+  - repo: https://github.com/creatornader/leakguard
+    rev: v0.1.1
+    hooks:
+      - id: leakguard
+  - repo: https://github.com/creatornader/oss-twin
+    rev: v0.1.0
+    hooks:
+      - id: oss-twin-check

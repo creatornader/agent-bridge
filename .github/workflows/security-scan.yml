@@ -1,23 +1,16 @@
 name: security-scan
 
-# Multi-tier security scanning for agent-bridge.
+# Security scanning for agent-bridge.
 #
-# Tier 1 (every push + PR):
-#   - typos:     spelling check across all tracked files
-#   - gitleaks:  pattern-based credential scanner with project allowlist
-#                for the §1.5.2 propagation-token test fixture (public
-#                protocol metadata, not a credential)
-#   - TruffleHog: verified-secrets scanner with live API confirmation
-#                 (catches a class pattern matching misses)
+# Caller for the reusable workflow at creatornader/oss-security-scan,
+# which runs typos + gitleaks + trufflehog + osv-scanner. OSV-Scanner
+# is gated to the scheduled run (Sunday 09:00 UTC) so PRs and pushes
+# stay fast.
 #
-# Tier 2 (schedule-only, deeper scans):
-#   - OSV-Scanner: transitive-dep CVE check across the OSV database.
-#                  Runs Sunday 09:00 UTC. Complements gitleaks
-#                  (credentials) + TruffleHog (live secrets) by covering
-#                  the third surface: known CVEs in lockfiles. Overlaps
-#                  Dependabot but uses a different database.
+# pre-commit job runs leakguard + oss-twin-check at PR time as the
+# CI-side enforcement of the local hooks in .pre-commit-config.yaml.
 #
-# Workflow ported from atrib's security-scan.yml for cross-repo consistency.
+# All run: blocks use no github.event.* inputs.
 
 on:
   push:
@@ -25,81 +18,27 @@ on:
   pull_request:
     branches: [main]
   schedule:
-    # Sunday 09:00 UTC — full security sweep (matches atrib cadence).
     - cron: '0 9 * * 0'
 
 permissions:
   contents: read
+  actions: read
+  security-events: write
 
 jobs:
-  typos:
-    name: typos (spelling check)
+  scan:
+    uses: creatornader/oss-security-scan/.github/workflows/oss-security-scan.yml@v0.1.0
+    with:
+      gitleaks-version: '8.30.1'
+      gitleaks-config: '.gitleaks.toml'
+      run-osv-scanner: ${{ github.event_name == 'schedule' }}
+
+  pre-commit:
+    name: pre-commit (leakguard + oss-twin-check)
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v6
-
-      # crate-ci/typos action; reads _typos.toml at repo root for
-      # project-specific config (project terms allowlist, file excludes).
-      - uses: crate-ci/typos@v1.46.1
-
-  gitleaks:
-    name: gitleaks (credential pattern scan)
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v6
+      - uses: actions/setup-python@v6
         with:
-          fetch-depth: 0  # full history so gitleaks scans every commit
-
-      # We invoke gitleaks directly rather than via gitleaks-action@v2
-      # for two reasons:
-      # 1. The action's bundled gitleaks binary (8.24.3 as of 2026-05)
-      #    does not honor [[allowlists]] semantics correctly. 8.30+
-      #    restores correct behavior.
-      # 2. The action's push-event mode scans BEFORE^..HEAD where
-      #    BEFORE = github.event.before. After a force-push that
-      #    rewrites history, BEFORE points to an orphaned commit,
-      #    causing the scan to fail with "unknown revision."
-      # Direct full-tree invocation is force-push-resilient.
-      #
-      # Inputs to this step are all CI-controlled constants: a literal
-      # release URL, a literal version, github.workspace (the runner
-      # path), and a checked-in config file. No user-controlled
-      # github.event.* fields flow into either run: command. Per the
-      # github.blog injection guide.
-      - name: Install gitleaks 8.30.1
-        env:
-          GITLEAKS_VERSION: 8.30.1
-        run: |
-          curl -sSfL "https://github.com/gitleaks/gitleaks/releases/download/v${GITLEAKS_VERSION}/gitleaks_${GITLEAKS_VERSION}_linux_x64.tar.gz" \
-            | tar -xz -C /tmp gitleaks
-          sudo mv /tmp/gitleaks /usr/local/bin/gitleaks
-          gitleaks version
-      - name: Run gitleaks (project config)
-        env:
-          GITLEAKS_CONFIG_PATH: ${{ github.workspace }}/.gitleaks.toml
-        run: gitleaks git --no-banner -c "$GITLEAKS_CONFIG_PATH"
-
-  trufflehog:
-    name: TruffleHog (verified-secrets scan)
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v6
-        with:
-          fetch-depth: 0
-
-      - uses: trufflesecurity/trufflehog@main
-        with:
-          path: ./
-          extra_args: --results=verified,unknown
-
-  osv-scanner:
-    name: OSV-Scanner (CVE scan, scheduled)
-    # Reusable workflow from google/osv-scanner-action. Runs full repo
-    # scan + uploads SARIF to GHAS Code Scanning. Code Scanning is free
-    # for public repos.
-    if: github.event_name == 'schedule'
-    uses: google/osv-scanner-action/.github/workflows/osv-scanner-reusable.yml@v2.3.8
-    permissions:
-      actions: read
-      security-events: write
-      contents: read
+          python-version: '3.12'
+      - uses: pre-commit/action@v3.0.1

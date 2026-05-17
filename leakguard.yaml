@@ -1,0 +1,36 @@
+# agent-bridge's leakguard config.
+#
+# Extends the starter catalog shipped by leakguard. Patterns here are
+# ADDED to the starter's patterns.
+
+version: 1
+
+ignore_paths:
+  - README.md
+  - .pre-commit-config.yaml
+  - .oss-twin.yaml
+  - leakguard.yaml
+  - .gitignore
+  - .github/workflows/security-scan.yml
+  - .github/dependabot.yml
+  - CLAUDE.md
+
+classes:
+  - id: cross-project-codenames
+    patterns:
+      - '\bsahbi\b'
+      - '\bnagala\b'
+      - '\bsecond-brain\b'
+      - '\batrib-internal\b'
+      - '\batrib-private\b'
+      - '\bcomuser\b'
+      - '\bagent-bridge-atrib\b'
+
+  - id: operator-paths
+    patterns:
+      - '\bnaderhelmy\b'
+      - '/Users/naderhelmy/'
+
+  - id: private-wrapper-services
+    patterns:
+      - '\bagent-bridge-atrib\b'

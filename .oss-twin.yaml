@@ -1,0 +1,21 @@
+# oss-twin config for agent-bridge.
+#
+# Declares the relationship between the public agent-bridge repo and
+# its private mirror at agent-bridge-internal.
+
+version: 1
+
+mirror:
+  path: ../agent-bridge-internal
+  remote: git@github.com:creatornader/agent-bridge-internal.git
+  visibility: private
+
+private_paths:
+  - docs/handoffs/
+  - docs/internal/
+  - .remember/
+  - thoughts/
+
+mirror_scaffold:
+  - docs/
+  - docs/snapshots/

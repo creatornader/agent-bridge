@@ -80,7 +80,7 @@ export async function startServer() {
             project: {
               type: "string",
               description:
-                "Scope to a project (e.g. whop-app, sahbi). Omit for cross-project.",
+                "Scope to a project (e.g. project-a, project-b). Omit for cross-project.",
             },
             metadata: {
               type: "object",
@@ -89,7 +89,7 @@ export async function startServer() {
             atrib_receipt_id: {
               type: "string",
               description:
-                "Optional. Signed atrib record receipt_id for the wrapper that signed this post_context call. Set automatically by the agent-bridge-atrib wrapper; consumers reading the row use this as the informed_by anchor for cross-repo causal edges.",
+                "Optional. Signed atrib record receipt_id for the wrapper that signed this post_context call. Set automatically by an atrib-signing wrapper; consumers reading the row use this as the informed_by anchor for cross-process causal edges.",
             },
           },
           required: ["source", "category", "content"],
@@ -166,9 +166,9 @@ export async function startServer() {
           project: args?.project || null,
           metadata: args?.metadata || {},
         };
-        // Optional cross-tool causal anchor; written when the wrapper signs
-        // this call before forwarding (see agent-bridge-atrib). Format-validated
-        // so unexpected producers cannot pollute the column with garbage.
+        // Optional cross-tool causal anchor; written when an atrib-signing
+        // wrapper signs this call before forwarding. Format-validated so
+        // unexpected producers cannot pollute the column with garbage.
         const receiptId = normalizeReceiptId(args?.atrib_receipt_id);
         if (receiptId) {
           body.atrib_receipt_id = receiptId;
