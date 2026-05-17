@@ -24,8 +24,8 @@ MCP server + CLI for shared context between AI agents via Supabase.
 
 ### Integration points
 
-- Claude Code: MCP server in `~/.claude.json` mcpServers
-- OpenClaw: CLI at `~/.openclaw/scripts/agent-bridge`, in safeBins
+- Any MCP-compatible client: register `agent-bridge` as an MCP server in your client's config
+- Any CLI-driven agent: invoke `bin/agent-bridge` to post or read context
 - Config: `~/.agent-bridge/config` (AGENT_BRIDGE_URL, AGENT_BRIDGE_KEY)
 
 ### Dev commands
