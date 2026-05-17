@@ -1,14 +1,23 @@
 name: security-scan
 
-# Lightweight security scanning for agent-bridge.
+# Multi-tier security scanning for agent-bridge.
 #
-# Runs on every push + PR to main:
-#   - typos:    spelling check across all tracked files
-#   - gitleaks: pattern-based credential scanner (catches Supabase
-#               anon keys, generic API keys, etc.)
+# Tier 1 (every push + PR):
+#   - typos:     spelling check across all tracked files
+#   - gitleaks:  pattern-based credential scanner with project allowlist
+#                for the §1.5.2 propagation-token test fixture (public
+#                protocol metadata, not a credential)
+#   - TruffleHog: verified-secrets scanner with live API confirmation
+#                 (catches a class pattern matching misses)
 #
-# Ported from atrib's heavier security-scan workflow with the
-# CVE-scan and TruffleHog tiers stripped (overkill for this size).
+# Tier 2 (schedule-only, deeper scans):
+#   - OSV-Scanner: transitive-dep CVE check across the OSV database.
+#                  Runs Sunday 09:00 UTC. Complements gitleaks
+#                  (credentials) + TruffleHog (live secrets) by covering
+#                  the third surface: known CVEs in lockfiles. Overlaps
+#                  Dependabot but uses a different database.
+#
+# Workflow ported from atrib's security-scan.yml for cross-repo consistency.
 
 on:
   push:
@@ -16,6 +25,7 @@ on:
   pull_request:
     branches: [main]
   schedule:
+    # Sunday 09:00 UTC — full security sweep (matches atrib cadence).
     - cron: '0 9 * * 0'
 
 permissions:
@@ -27,25 +37,69 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v6
+
+      # crate-ci/typos action; reads _typos.toml at repo root for
+      # project-specific config (project terms allowlist, file excludes).
       - uses: crate-ci/typos@v1.46.1
 
   gitleaks:
-    # Direct gitleaks invocation rather than gitleaks-action wrapper.
-    # The wrapper's push-event mode scans BEFORE^..HEAD, which breaks
-    # after a force-push (BEFORE is now an unreachable commit hash).
-    # Direct scan against the full tree is force-push-resilient and
-    # equivalent in practice for a repo this size.
-    name: gitleaks (credential scan)
+    name: gitleaks (credential pattern scan)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          fetch-depth: 0  # full history so gitleaks scans every commit
+
+      # We invoke gitleaks directly rather than via gitleaks-action@v2
+      # for two reasons:
+      # 1. The action's bundled gitleaks binary (8.24.3 as of 2026-05)
+      #    does not honor [[allowlists]] semantics correctly. 8.30+
+      #    restores correct behavior.
+      # 2. The action's push-event mode scans BEFORE^..HEAD where
+      #    BEFORE = github.event.before. After a force-push that
+      #    rewrites history, BEFORE points to an orphaned commit,
+      #    causing the scan to fail with "unknown revision."
+      # Direct full-tree invocation is force-push-resilient.
+      #
+      # Inputs to this step are all CI-controlled constants: a literal
+      # release URL, a literal version, github.workspace (the runner
+      # path), and a checked-in config file. No user-controlled
+      # github.event.* fields flow into either run: command. Per the
+      # github.blog injection guide.
+      - name: Install gitleaks 8.30.1
+        env:
+          GITLEAKS_VERSION: 8.30.1
+        run: |
+          curl -sSfL "https://github.com/gitleaks/gitleaks/releases/download/v${GITLEAKS_VERSION}/gitleaks_${GITLEAKS_VERSION}_linux_x64.tar.gz" \
+            | tar -xz -C /tmp gitleaks
+          sudo mv /tmp/gitleaks /usr/local/bin/gitleaks
+          gitleaks version
+      - name: Run gitleaks (project config)
+        env:
+          GITLEAKS_CONFIG_PATH: ${{ github.workspace }}/.gitleaks.toml
+        run: gitleaks git --no-banner -c "$GITLEAKS_CONFIG_PATH"
+
+  trufflehog:
+    name: TruffleHog (verified-secrets scan)
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v6
         with:
           fetch-depth: 0
-      - name: Install gitleaks
-        run: |
-          GITLEAKS_VERSION=8.30.1
-          curl -sSL "https://github.com/gitleaks/gitleaks/releases/download/v${GITLEAKS_VERSION}/gitleaks_${GITLEAKS_VERSION}_linux_x64.tar.gz" \
-            | tar -xz -C /usr/local/bin gitleaks
-          gitleaks version
-      - name: Scan full tree + history
-        run: gitleaks detect --redact --verbose --exit-code 1 --no-banner
+
+      - uses: trufflesecurity/trufflehog@main
+        with:
+          path: ./
+          extra_args: --results=verified,unknown
+
+  osv-scanner:
+    name: OSV-Scanner (CVE scan, scheduled)
+    # Reusable workflow from google/osv-scanner-action. Runs full repo
+    # scan + uploads SARIF to GHAS Code Scanning. Code Scanning is free
+    # for public repos.
+    if: github.event_name == 'schedule'
+    uses: google/osv-scanner-action/.github/workflows/osv-scanner-reusable.yml@v2.3.8
+    permissions:
+      actions: read
+      security-events: write
+      contents: read
