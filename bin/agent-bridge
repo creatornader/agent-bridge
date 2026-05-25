@@ -48,6 +48,7 @@ Post:
   agent-bridge post --source sido --category operational "Morning briefing delivered"
   agent-bridge post --source sido --category bridge-meta "get_context should support multi-category filter"
   agent-bridge post --source claude-code --category config-change --project whop-app "Updated API route"
+  agent-bridge post --source codex --category goal-update --target-agent sido --thread-id loop-5 "Ready for handoff"
 
 Get:
   agent-bridge get
@@ -66,16 +67,31 @@ EOF
 
 cmd_post() {
   local source="" category="" content="" priority="info" project="" metadata="{}"
+  local message_id="" target_agents="" thread_id="" reply_to_id="" kind=""
+  local payload_mime="text/plain" payload_ref="" payload_ciphertext=""
+  local informed_by="" expires_at="" atrib_receipt_id=""
 
   while [[ $# -gt 0 ]]; do
     case "$1" in
-      --source)   source="$2"; shift 2 ;;
-      --category) category="$2"; shift 2 ;;
-      --priority) priority="$2"; shift 2 ;;
-      --project)  project="$2"; shift 2 ;;
-      --metadata) metadata="$2"; shift 2 ;;
-      -*)         echo "Unknown option: $1" >&2; exit 1 ;;
-      *)          content="$1"; shift ;;
+      --source)             source="$2"; shift 2 ;;
+      --category)           category="$2"; shift 2 ;;
+      --priority)           priority="$2"; shift 2 ;;
+      --project)            project="$2"; shift 2 ;;
+      --metadata)           metadata="$2"; shift 2 ;;
+      --message-id)         message_id="$2"; shift 2 ;;
+      --target-agent)       target_agents="${target_agents:+$target_agents,}$2"; shift 2 ;;
+      --target-agents)      target_agents="$2"; shift 2 ;;
+      --thread-id)          thread_id="$2"; shift 2 ;;
+      --reply-to-id)        reply_to_id="$2"; shift 2 ;;
+      --kind)               kind="$2"; shift 2 ;;
+      --payload-mime)       payload_mime="$2"; shift 2 ;;
+      --payload-ref)        payload_ref="$2"; shift 2 ;;
+      --payload-ciphertext) payload_ciphertext="$2"; shift 2 ;;
+      --informed-by)        informed_by="$2"; shift 2 ;;
+      --expires-at)         expires_at="$2"; shift 2 ;;
+      --atrib-receipt-id)   atrib_receipt_id="$2"; shift 2 ;;
+      -*)                   echo "Unknown option: $1" >&2; exit 1 ;;
+      *)                    content="$1"; shift ;;
     esac
   done
 
@@ -85,16 +101,132 @@ cmd_post() {
   fi
 
   local body
-  body=$(cat <<ENDJSON
-{
-  "source": "${source}",
-  "category": "${category}",
-  "content": $(printf '%s' "$content" | python3 -c 'import sys,json; print(json.dumps(sys.stdin.read()))'),
-  "priority": "${priority}",
-  "project": $(if [[ -n "$project" ]]; then echo "\"${project}\""; else echo "null"; fi),
-  "metadata": ${metadata}
+  body=$(
+    BRIDGE_SOURCE="$source" \
+    BRIDGE_CATEGORY="$category" \
+    BRIDGE_CONTENT="$content" \
+    BRIDGE_PRIORITY="$priority" \
+    BRIDGE_PROJECT="$project" \
+    BRIDGE_METADATA="$metadata" \
+    BRIDGE_MESSAGE_ID="$message_id" \
+    BRIDGE_TARGET_AGENTS="$target_agents" \
+    BRIDGE_THREAD_ID="$thread_id" \
+    BRIDGE_REPLY_TO_ID="$reply_to_id" \
+    BRIDGE_KIND="$kind" \
+    BRIDGE_PAYLOAD_MIME="$payload_mime" \
+    BRIDGE_PAYLOAD_REF="$payload_ref" \
+    BRIDGE_PAYLOAD_CIPHERTEXT="$payload_ciphertext" \
+    BRIDGE_INFORMED_BY="$informed_by" \
+    BRIDGE_EXPIRES_AT="$expires_at" \
+    BRIDGE_ATRIB_RECEIPT_ID="$atrib_receipt_id" \
+    python3 <<'PY'
+import json
+import os
+import re
+import uuid
+from datetime import datetime, timezone
+
+RECORD_HASH_RE = re.compile(r"^sha256:[a-f0-9]{64}$", re.I)
+RECEIPT_RE = re.compile(r"^[A-Za-z0-9_-]{43}\\.[A-Za-z0-9_-]{43}$")
+
+def clean(value):
+    value = (value or "").strip()
+    return value or None
+
+def clean_list(value):
+    out = []
+    seen = set()
+    for item in (value or "").split(","):
+        item = item.strip()
+        if item and item not in seen:
+            seen.add(item)
+            out.append(item)
+    return out or None
+
+def clean_hashes(value):
+    out = []
+    seen = set()
+    for item in (value or "").split(","):
+        item = item.strip().lower()
+        if RECORD_HASH_RE.match(item) and item not in seen:
+            seen.add(item)
+            out.append(item)
+    return out or None
+
+def clean_time(value):
+    value = clean(value)
+    if not value:
+        return None
+    try:
+        normalized = value.replace("Z", "+00:00")
+        return datetime.fromisoformat(normalized).astimezone(timezone.utc).isoformat().replace("+00:00", "Z")
+    except ValueError:
+        return None
+
+metadata_raw = os.environ.get("BRIDGE_METADATA") or "{}"
+try:
+    metadata = json.loads(metadata_raw)
+    if not isinstance(metadata, dict):
+        metadata = {}
+except json.JSONDecodeError:
+    metadata = {}
+
+source = os.environ["BRIDGE_SOURCE"]
+category = os.environ["BRIDGE_CATEGORY"]
+kind = clean(os.environ.get("BRIDGE_KIND")) or category
+
+envelope = {
+    "schema": "agent-bridge.message-envelope.v1",
+    "message_id": clean(os.environ.get("BRIDGE_MESSAGE_ID")) or str(uuid.uuid4()),
+    "source_agent": source,
+    "kind": kind,
+    "priority": clean(os.environ.get("BRIDGE_PRIORITY")) or "info",
+    "payload_mime": clean(os.environ.get("BRIDGE_PAYLOAD_MIME")) or "text/plain",
 }
-ENDJSON
+
+for key, env_name in [
+    ("project", "BRIDGE_PROJECT"),
+    ("thread_id", "BRIDGE_THREAD_ID"),
+    ("reply_to_id", "BRIDGE_REPLY_TO_ID"),
+    ("payload_ref", "BRIDGE_PAYLOAD_REF"),
+    ("payload_ciphertext", "BRIDGE_PAYLOAD_CIPHERTEXT"),
+]:
+    value = clean(os.environ.get(env_name))
+    if value:
+        envelope[key] = value
+
+receipt = clean(os.environ.get("BRIDGE_ATRIB_RECEIPT_ID"))
+if receipt and RECEIPT_RE.match(receipt):
+    envelope["atrib_receipt_id"] = receipt
+
+targets = clean_list(os.environ.get("BRIDGE_TARGET_AGENTS"))
+if targets:
+    envelope["target_agents"] = targets
+
+hashes = clean_hashes(os.environ.get("BRIDGE_INFORMED_BY"))
+if hashes:
+    envelope["informed_by"] = hashes
+
+expires_at = clean_time(os.environ.get("BRIDGE_EXPIRES_AT"))
+if expires_at:
+    envelope["expires_at"] = expires_at
+
+metadata["message_envelope"] = envelope
+
+body = {
+    "source": source,
+    "category": category,
+    "content": os.environ["BRIDGE_CONTENT"],
+    "priority": clean(os.environ.get("BRIDGE_PRIORITY")) or "info",
+    "project": clean(os.environ.get("BRIDGE_PROJECT")),
+    "metadata": metadata,
+}
+
+if receipt and RECEIPT_RE.match(receipt):
+    body["atrib_receipt_id"] = receipt
+
+print(json.dumps(body))
+PY
   )
 
   sb_request POST "/shared_context" -d "$body"

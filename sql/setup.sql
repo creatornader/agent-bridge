@@ -9,6 +9,7 @@ create table shared_context (
   priority text not null default 'info',
   project text,
   metadata jsonb not null default '{}',
+  atrib_receipt_id text,
   created_at timestamptz not null default now(),
   acked_by text[] not null default '{}'
 );
@@ -24,6 +25,8 @@ create table shared_context (
 create index idx_ctx_created on shared_context(created_at desc);
 create index idx_ctx_source on shared_context(source);
 create index idx_ctx_category on shared_context(category);
+create index idx_ctx_atrib_receipt on shared_context(atrib_receipt_id)
+  where atrib_receipt_id is not null;
 
 -- RLS: allow anon key to read all rows and insert/update
 alter table shared_context enable row level security;
@@ -58,3 +61,8 @@ begin
   return affected;
 end;
 $$;
+
+comment on column shared_context.atrib_receipt_id is
+  'Optional signed atrib record receipt_id (record_hash "." creator_key, base64url) ' ||
+  'emitted by an atrib-signing wrapper at insert time. ' ||
+  'Consumers use this as the informed_by anchor for cross-process causal edges.';

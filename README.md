@@ -42,6 +42,7 @@ Go to [supabase.com](https://supabase.com) and create a free project. You'll nee
 
 In the Supabase SQL Editor (or via CLI), run everything in [`sql/setup.sql`](sql/setup.sql). This creates:
 - The `shared_context` table with indexes
+- The optional `atrib_receipt_id` column for signed bridge-write receipts
 - Row-level security policies
 - The `ack_context` RPC function for atomic acknowledgments
 
@@ -103,6 +104,18 @@ Restart your MCP client. Three tools become available: `post_context`, `get_cont
 | `priority` | string | no | `info` (default), `high`, `urgent` |
 | `project` | string | no | Scope to a project name. Omit for cross-project. |
 | `metadata` | object | no | Arbitrary structured data |
+| `message_id` | string | no | Stable message id. Generated when omitted. |
+| `target_agents` | string[] | no | Target agent names. Omit for broadcast. |
+| `thread_id` | string | no | Conversation or workstream id. |
+| `reply_to_id` | string | no | Parent message id for replies. |
+| `kind` | string | no | Message kind. Defaults to `category`. |
+| `payload_mime` | string | no | Payload type. Defaults to `text/plain`. |
+| `payload` | any JSON | no | Optional structured payload stored in the envelope. |
+| `payload_ref` | string | no | Optional pointer to a large or encrypted payload. |
+| `payload_ciphertext` | string | no | Optional inline encrypted payload. |
+| `informed_by` | string[] | no | atrib record hashes this message depends on. |
+| `expires_at` | string | no | Optional ISO timestamp retention boundary. |
+| `atrib_receipt_id` | string | no | Signed atrib receipt. Usually set by a wrapper. |
 
 **`get_context`**: Read context entries (newest first)
 
@@ -114,6 +127,9 @@ Restart your MCP client. Three tools become available: `post_context`, `get_cont
 | `project` | string | no | Filter by project scope |
 | `unacked_by` | string | no | Only entries not yet acknowledged by this agent |
 | `limit` | number | no | Max entries (default 20) |
+| `target_agent` | string | no | Include broadcast entries plus entries targeted to this agent |
+| `thread_id` | string | no | Filter by envelope thread id |
+| `kind` | string | no | Filter by envelope kind |
 
 **`ack_context`**: Mark entries as read
 
@@ -146,6 +162,7 @@ The CLI reads credentials from `~/.agent-bridge/config` (created in step 3).
 agent-bridge post --source sido --category operational "Morning briefing delivered"
 agent-bridge post --source sido --category config-change --project whop-app "Updated API routes"
 agent-bridge post --source sido --category bridge-meta "Suggest: add multi-category filter to get"
+agent-bridge post --source codex --category goal-update --target-agent sido --thread-id loop-5 "Ready for handoff"
 
 # Read context entries
 agent-bridge get                              # latest 20 entries
@@ -170,6 +187,32 @@ agent-bridge status
 | `goal-update` | Goal progress, new goals, goal completion |
 | `flag` | Urgent alerts, blockers, warnings |
 | `bridge-meta` | Suggested improvements to Agent Bridge itself |
+
+## Agent Message Envelope
+
+Every MCP `post_context` call now writes a stable envelope into `metadata.message_envelope`. The CLI does the same for `post`. Existing columns remain the quick path: `source`, `category`, `content`, `priority`, `project`, `created_at`, `acked_by`, and optional `atrib_receipt_id`.
+
+Envelope fields are transport-neutral:
+
+| Field | Meaning |
+|-------|---------|
+| `schema` | Envelope schema id, currently `agent-bridge.message-envelope.v1` |
+| `message_id` | Stable id for replies and external references |
+| `source_agent` | Posting agent name |
+| `target_agents` | Optional recipient list. Missing means broadcast. |
+| `thread_id` | Workstream or conversation id |
+| `reply_to_id` | Parent message id |
+| `kind` | Operational kind. Defaults to `category`. |
+| `priority` | `info`, `high`, or `urgent` |
+| `payload_mime` | Type of the content or payload |
+| `payload` | Optional structured payload |
+| `payload_ref` | Optional blob pointer |
+| `payload_ciphertext` | Optional encrypted payload |
+| `atrib_receipt_id` | Signed bridge-write receipt |
+| `informed_by` | atrib record hashes this message depends on |
+| `expires_at` | Optional retention boundary |
+
+The envelope lives in JSON metadata so new fields do not require a database migration. `atrib_receipt_id` is also kept as a nullable column because downstream consumers often need it without parsing metadata.
 
 ## Priorities
 
@@ -230,6 +273,7 @@ create table shared_context (
   priority    text not null default 'info',     -- info | high | urgent
   project     text,                             -- null = cross-project
   metadata    jsonb not null default '{}',      -- arbitrary structured data
+  atrib_receipt_id text,                        -- optional signed atrib receipt
   created_at  timestamptz not null default now(),
   acked_by    text[] not null default '{}'      -- agents that have seen this
 );
@@ -253,6 +297,8 @@ The table uses permissive RLS: any authenticated caller (via anon key) can read,
 | Atomic RPC for acks | Single Postgres function call instead of fetch-then-update. Eliminates race conditions, reduces network calls from 2 to 1. |
 | Permissive RLS | Anon key is the access control, not row-level policies. Simplifies the setup for a single-operator system. |
 | `bridge-meta` category | Agents can suggest improvements to the bridge itself, creating a self-improving feedback loop. |
+| Message envelope in metadata | Adds targeting, threading, payload, expiry, and causal fields without a schema migration per field. |
+| Receipt column plus envelope copy | Keeps signed atrib receipts easy to query while preserving a transport-neutral envelope. |
 
 ## Development
 
