@@ -25,6 +25,7 @@ import {
   filterContextRows,
   mergeEnvelopeMetadata,
 } from "./message-envelope.js";
+import { resolvePostSource } from "./source-identity.js";
 
 const headers = {
   apikey: SUPABASE_KEY,
@@ -67,7 +68,8 @@ export async function startServer() {
           properties: {
             source: {
               type: "string",
-              description: 'Agent posting this entry (e.g. "claude-code", "sido")',
+              description:
+                "Agent posting this entry. Must match AGENT_BRIDGE_AGENT when configured.",
             },
             category: {
               type: "string",
@@ -236,10 +238,20 @@ export async function startServer() {
 
     switch (name) {
       case "post_context": {
+        let source: string | undefined;
+        try {
+          source = resolvePostSource(args?.source, process.env.AGENT_BRIDGE_AGENT);
+        } catch (e) {
+          throw new McpError(
+            ErrorCode.InvalidParams,
+            e instanceof Error ? e.message : "source identity mismatch"
+          );
+        }
+        const postArgs = { ...(args ?? {}), source };
         const receiptId = normalizeReceiptId(args?.atrib_receipt_id);
-        const envelope = buildMessageEnvelope(args, receiptId);
+        const envelope = buildMessageEnvelope(postArgs, receiptId);
         const body: Record<string, unknown> = {
-          source: args?.source,
+          source,
           category: args?.category,
           content: args?.content,
           priority: args?.priority || "info",

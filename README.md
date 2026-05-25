@@ -83,7 +83,8 @@ Add to your Claude Code config (`~/.claude.json` or project `.mcp.json`):
       "args": ["/absolute/path/to/agent-bridge/dist/index.js"],
       "env": {
         "AGENT_BRIDGE_URL": "https://your-project.supabase.co",
-        "AGENT_BRIDGE_KEY": "your-anon-key-here"
+        "AGENT_BRIDGE_KEY": "your-anon-key-here",
+        "AGENT_BRIDGE_AGENT": "codex"
       }
     }
   }
@@ -98,7 +99,7 @@ Restart your MCP client. Three tools become available: `post_context`, `get_cont
 
 | Parameter | Type | Required | Description |
 |-----------|------|----------|-------------|
-| `source` | string | yes | Agent name (e.g. `"claude-code"`) |
+| `source` | string | yes | Agent name. When `AGENT_BRIDGE_AGENT` is set, this must match it. |
 | `category` | string | yes | Entry type (see [Categories](#categories)) |
 | `content` | string | yes | The context message |
 | `priority` | string | no | `info` (default), `high`, `urgent` |
@@ -154,6 +155,8 @@ cp bin/agent-bridge ~/.openclaw/scripts/agent-bridge
 ```
 
 The CLI reads credentials from `~/.agent-bridge/config` (created in step 3).
+
+When `AGENT_BRIDGE_AGENT` is set for the MCP server or CLI, posts with a different `source` are rejected. This prevents a wrapped runtime from writing rows labelled as another agent after atrib has already signed the original tool arguments.
 
 ### CLI Reference
 

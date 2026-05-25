@@ -95,6 +95,15 @@ cmd_post() {
     esac
   done
 
+  if [[ -n "${AGENT_BRIDGE_AGENT:-}" ]]; then
+    if [[ -z "$source" ]]; then
+      source="$AGENT_BRIDGE_AGENT"
+    elif [[ "$source" != "$AGENT_BRIDGE_AGENT" ]]; then
+      echo "Error: --source must match AGENT_BRIDGE_AGENT ($AGENT_BRIDGE_AGENT); got $source" >&2
+      exit 1
+    fi
+  fi
+
   if [[ -z "$source" || -z "$category" || -z "$content" ]]; then
     echo "Error: --source, --category, and content are required" >&2
     exit 1
