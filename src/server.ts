@@ -7,18 +7,6 @@ import {
   McpError,
 } from "@modelcontextprotocol/sdk/types.js";
 
-const SUPABASE_URL = process.env.AGENT_BRIDGE_URL;
-const SUPABASE_KEY = process.env.AGENT_BRIDGE_KEY;
-
-if (!SUPABASE_URL || !SUPABASE_KEY) {
-  console.error(
-    "Missing AGENT_BRIDGE_URL or AGENT_BRIDGE_KEY environment variables"
-  );
-  process.exit(1);
-}
-
-const REST_URL = `${SUPABASE_URL}/rest/v1`;
-
 import { normalizeReceiptId } from "./atrib-receipt.js";
 import {
   buildMessageEnvelope,
@@ -27,34 +15,69 @@ import {
 } from "./message-envelope.js";
 import { resolvePostSource } from "./source-identity.js";
 
-const headers = {
-  apikey: SUPABASE_KEY,
-  Authorization: `Bearer ${SUPABASE_KEY}`,
-  "Content-Type": "application/json",
-  Prefer: "return=representation",
-};
-
-async function supabaseRequest(
-  path: string,
-  options: RequestInit = {}
-): Promise<unknown> {
-  const url = `${REST_URL}${path}`;
-  const res = await fetch(url, {
-    ...options,
-    headers: { ...headers, ...(options.headers as Record<string, string>) },
-  });
-  if (!res.ok) {
-    const body = await res.text();
-    throw new Error(`Supabase request failed (${res.status}): ${body}`);
-  }
-  const text = await res.text();
-  return text ? JSON.parse(text) : null;
+export interface AgentBridgeServerConfig {
+  supabaseUrl: string;
+  supabaseKey: string;
+  agent?: string;
 }
 
-export async function startServer() {
+export interface AgentBridgeServerEnv {
+  AGENT_BRIDGE_URL?: string;
+  AGENT_BRIDGE_KEY?: string;
+  AGENT_BRIDGE_AGENT?: string;
+}
+
+export function configFromEnv(
+  env: AgentBridgeServerEnv = process.env,
+): AgentBridgeServerConfig {
+  const supabaseUrl = env.AGENT_BRIDGE_URL?.trim();
+  const supabaseKey = env.AGENT_BRIDGE_KEY?.trim();
+  if (!supabaseUrl || !supabaseKey) {
+    throw new Error(
+      "Missing AGENT_BRIDGE_URL or AGENT_BRIDGE_KEY environment variables",
+    );
+  }
+  return {
+    supabaseUrl,
+    supabaseKey,
+    agent: env.AGENT_BRIDGE_AGENT?.trim() || undefined,
+  };
+}
+
+function buildSupabaseRequest(config: AgentBridgeServerConfig) {
+  const restUrl = `${config.supabaseUrl.replace(/\/$/, "")}/rest/v1`;
+  const headers = {
+    apikey: config.supabaseKey,
+    Authorization: `Bearer ${config.supabaseKey}`,
+    "Content-Type": "application/json",
+    Prefer: "return=representation",
+  };
+
+  return async function supabaseRequest(
+    path: string,
+    options: RequestInit = {},
+  ): Promise<unknown> {
+    const url = `${restUrl}${path}`;
+    const res = await fetch(url, {
+      ...options,
+      headers: { ...headers, ...(options.headers as Record<string, string>) },
+    });
+    if (!res.ok) {
+      const body = await res.text();
+      throw new Error(`Supabase request failed (${res.status}): ${body}`);
+    }
+    const text = await res.text();
+    return text ? JSON.parse(text) : null;
+  };
+}
+
+export function createAgentBridgeServer(
+  config: AgentBridgeServerConfig,
+): Server {
+  const supabaseRequest = buildSupabaseRequest(config);
   const server = new Server(
     { name: "agent-bridge", version: "1.0.0" },
-    { capabilities: { tools: {} } }
+    { capabilities: { tools: {} } },
   );
 
   server.setRequestHandler(ListToolsRequestSchema, async () => ({
@@ -171,7 +194,7 @@ export async function startServer() {
           properties: {
             since: {
               type: "string",
-              description: "ISO timestamp — only entries after this time",
+              description: "ISO timestamp. Only entries after this time",
             },
             source: {
               type: "string",
@@ -240,11 +263,11 @@ export async function startServer() {
       case "post_context": {
         let source: string | undefined;
         try {
-          source = resolvePostSource(args?.source, process.env.AGENT_BRIDGE_AGENT);
+          source = resolvePostSource(args?.source, config.agent);
         } catch (e) {
           throw new McpError(
             ErrorCode.InvalidParams,
-            e instanceof Error ? e.message : "source identity mismatch"
+            e instanceof Error ? e.message : "source identity mismatch",
           );
         }
         const postArgs = { ...(args ?? {}), source };
@@ -279,7 +302,7 @@ export async function startServer() {
             ? Math.trunc(args.limit)
             : 20;
         const hasEnvelopeFilter = Boolean(
-          args?.target_agent || args?.thread_id || args?.kind
+          args?.target_agent || args?.thread_id || args?.kind,
         );
         const fetchLimit = hasEnvelopeFilter
           ? Math.min(Math.max(requestedLimit * 5, 50), 200)
@@ -289,20 +312,24 @@ export async function startServer() {
           `limit=${fetchLimit}`,
         ];
         if (args?.since)
-          params.push(`created_at=gte.${encodeURIComponent(String(args.since))}`);
+          params.push(
+            `created_at=gte.${encodeURIComponent(String(args.since))}`,
+          );
         if (args?.source)
           params.push(`source=eq.${encodeURIComponent(String(args.source))}`);
         if (args?.category)
-          params.push(`category=eq.${encodeURIComponent(String(args.category))}`);
+          params.push(
+            `category=eq.${encodeURIComponent(String(args.category))}`,
+          );
         if (args?.project)
           params.push(`project=eq.${encodeURIComponent(String(args.project))}`);
         if (args?.unacked_by)
           params.push(
-            `acked_by=not.cs.%7B${encodeURIComponent(String(args.unacked_by))}%7D`
+            `acked_by=not.cs.%7B${encodeURIComponent(String(args.unacked_by))}%7D`,
           );
 
         const data = await supabaseRequest(
-          `/shared_context?${params.join("&")}`
+          `/shared_context?${params.join("&")}`,
         );
         const filtered = filterContextRows(data, args, requestedLimit);
         return {
@@ -316,7 +343,7 @@ export async function startServer() {
         if (!ids?.length || !agent) {
           throw new McpError(
             ErrorCode.InvalidParams,
-            "ids (number[]) and agent (string) are required"
+            "ids (number[]) and agent (string) are required",
           );
         }
         const data = await supabaseRequest("/rpc/ack_context", {
@@ -338,6 +365,13 @@ export async function startServer() {
     }
   });
 
+  return server;
+}
+
+export async function startServer(
+  config: AgentBridgeServerConfig = configFromEnv(),
+) {
+  const server = createAgentBridgeServer(config);
   const transport = new StdioServerTransport();
   await server.connect(transport);
 }
