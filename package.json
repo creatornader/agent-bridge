@@ -14,10 +14,10 @@
     "@modelcontextprotocol/sdk": "^1.12.1"
   },
   "devDependencies": {
-    "@types/node": "^25.9.3",
+    "@types/node": "^26.0.0",
     "typescript": "^6.0.3",
     "tsup": "^8.4.0",
-    "vitest": "^4.1.8"
+    "vitest": "^4.1.9"
   },
   "overrides": {
     "esbuild": "0.28.1"
