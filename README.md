@@ -73,6 +73,11 @@ npm run build
 
 ## MCP Server Setup
 
+The MCP server reads credentials from `~/.agent-bridge/config`, the same file
+used by the CLI. Keep the Supabase URL and anon key there unless a deployment
+needs per-process overrides. Explicit `AGENT_BRIDGE_URL` and `AGENT_BRIDGE_KEY`
+environment variables still take precedence.
+
 Add to your Claude Code config (`~/.claude.json` or project `.mcp.json`):
 
 ```json
@@ -82,8 +87,6 @@ Add to your Claude Code config (`~/.claude.json` or project `.mcp.json`):
       "command": "node",
       "args": ["/absolute/path/to/agent-bridge/dist/index.js"],
       "env": {
-        "AGENT_BRIDGE_URL": "https://your-project.supabase.co",
-        "AGENT_BRIDGE_KEY": "your-anon-key-here",
         "AGENT_BRIDGE_AGENT": "codex"
       }
     }
@@ -91,7 +94,22 @@ Add to your Claude Code config (`~/.claude.json` or project `.mcp.json`):
 }
 ```
 
+Use an absolute Node path if your agent runtime changes `PATH`. For example,
+`/opt/homebrew/bin/node` avoids local toolchain shims on macOS Homebrew setups.
+
 Restart your MCP client. Three tools become available: `post_context`, `get_context`, `ack_context`.
+
+### Signed HTTP Wrapper
+
+This repo is the canonical MCP server and CLI. A signed HTTP wrapper, such as
+`agent-bridge-atrib`, may sit in front of it to add atrib receipts or local
+substrate metadata. Treat that wrapper as an attribution layer. Basic MCP
+availability should still have a direct source-repo path, and any wrapper
+deployment should prove `/mcp/health`, not only process existence.
+
+See
+[`docs/postmortems/2026-07-08-wrapper-source-drift.md`](docs/postmortems/2026-07-08-wrapper-source-drift.md)
+for the incident that established this policy.
 
 ### MCP Tool Reference
 

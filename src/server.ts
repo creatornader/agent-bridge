@@ -6,6 +6,9 @@ import {
   ListToolsRequestSchema,
   McpError,
 } from "@modelcontextprotocol/sdk/types.js";
+import { existsSync, readFileSync } from "node:fs";
+import { homedir } from "node:os";
+import { join } from "node:path";
 
 import { normalizeReceiptId } from "./atrib-receipt.js";
 import {
@@ -25,22 +28,89 @@ export interface AgentBridgeServerEnv {
   AGENT_BRIDGE_URL?: string;
   AGENT_BRIDGE_KEY?: string;
   AGENT_BRIDGE_AGENT?: string;
+  AGENT_BRIDGE_CONFIG?: string;
+  HOME?: string;
+}
+
+function normalizedConfigValue(value: string | undefined): string | undefined {
+  const trimmed = value?.trim();
+  return trimmed || undefined;
+}
+
+function defaultConfigPath(env: AgentBridgeServerEnv): string {
+  return (
+    normalizedConfigValue(env.AGENT_BRIDGE_CONFIG) ??
+    join(normalizedConfigValue(env.HOME) ?? homedir(), ".agent-bridge", "config")
+  );
+}
+
+function unquoteShellValue(value: string): string {
+  const trimmed = value.trim();
+  if (trimmed.length < 2) {
+    return trimmed;
+  }
+
+  const first = trimmed[0];
+  const last = trimmed[trimmed.length - 1];
+  if ((first === '"' && last === '"') || (first === "'" && last === "'")) {
+    return trimmed.slice(1, -1);
+  }
+
+  return trimmed;
+}
+
+function readConfigFile(
+  configPath: string,
+): Pick<Partial<AgentBridgeServerEnv>, "AGENT_BRIDGE_URL" | "AGENT_BRIDGE_KEY"> {
+  if (!existsSync(configPath)) {
+    return {};
+  }
+
+  const parsed: Pick<
+    Partial<AgentBridgeServerEnv>,
+    "AGENT_BRIDGE_URL" | "AGENT_BRIDGE_KEY"
+  > = {};
+
+  for (const line of readFileSync(configPath, "utf8").split(/\r?\n/)) {
+    const trimmed = line.trim();
+    if (!trimmed || trimmed.startsWith("#")) {
+      continue;
+    }
+
+    const separator = trimmed.indexOf("=");
+    if (separator === -1) {
+      continue;
+    }
+
+    const key = trimmed.slice(0, separator).trim();
+    const value = unquoteShellValue(trimmed.slice(separator + 1));
+    if (key === "AGENT_BRIDGE_URL" || key === "AGENT_BRIDGE_KEY") {
+      parsed[key] = value;
+    }
+  }
+
+  return parsed;
 }
 
 export function configFromEnv(
   env: AgentBridgeServerEnv = process.env,
 ): AgentBridgeServerConfig {
-  const supabaseUrl = env.AGENT_BRIDGE_URL?.trim();
-  const supabaseKey = env.AGENT_BRIDGE_KEY?.trim();
+  const fileConfig = readConfigFile(defaultConfigPath(env));
+  const supabaseUrl =
+    normalizedConfigValue(env.AGENT_BRIDGE_URL) ??
+    normalizedConfigValue(fileConfig.AGENT_BRIDGE_URL);
+  const supabaseKey =
+    normalizedConfigValue(env.AGENT_BRIDGE_KEY) ??
+    normalizedConfigValue(fileConfig.AGENT_BRIDGE_KEY);
   if (!supabaseUrl || !supabaseKey) {
     throw new Error(
-      "Missing AGENT_BRIDGE_URL or AGENT_BRIDGE_KEY environment variables",
+      "Missing AGENT_BRIDGE_URL or AGENT_BRIDGE_KEY environment variables or ~/.agent-bridge/config",
     );
   }
   return {
     supabaseUrl,
     supabaseKey,
-    agent: env.AGENT_BRIDGE_AGENT?.trim() || undefined,
+    agent: normalizedConfigValue(env.AGENT_BRIDGE_AGENT),
   };
 }
 
