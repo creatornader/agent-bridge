@@ -2,25 +2,28 @@
 
 ## Status
 
-Resolved for basic Codex and Claude Code availability.
+Resolved for basic Codex, Claude Code, and Claude Desktop availability.
 
-Codex and Claude Code now launch the source repo MCP server directly from
-`/Users/naderhelmy/repos/agent-bridge/dist/index.js` with
+Codex, Claude Code, and Claude Desktop now launch the source repo MCP server
+directly from `/Users/naderhelmy/repos/agent-bridge/dist/index.js` with
 `/opt/homebrew/bin/node`. The direct server reads credentials from
 `~/.agent-bridge/config`, so client configs no longer need to duplicate the
 Supabase URL or anon key.
 
-The broken Codex and Claude Code `agent-bridge-atrib` launchd jobs were removed
-after their labels stayed loaded while `/mcp/health` refused connections. The
-wrapper code still exists as an optional signed attribution layer.
+The broken Codex, Claude Code, and Claude Desktop `agent-bridge-atrib` launchd
+jobs were removed after their labels stayed loaded while `/mcp/health` refused
+connections. The wrapper code still exists as an optional signed attribution
+layer.
 
 ## Impact
 
-Codex and Claude Code could not use Agent Bridge through MCP while their client
-configs pointed at the `agent-bridge-atrib` HTTP wrapper ports:
+Codex, Claude Code, and Claude Desktop could not use Agent Bridge through MCP
+while their client configs pointed at the `agent-bridge-atrib` HTTP wrapper
+ports:
 
 - Codex: `http://127.0.0.1:8794/mcp`
 - Claude Code: `http://127.0.0.1:8793/mcp`
+- Claude Desktop: `http://127.0.0.1:8791/mcp`
 
 The source repo CLI and Supabase connection stayed healthy. The outage was in
 the local wrapper path and client wiring, not in the shared context database.
@@ -49,16 +52,19 @@ Homebrew Node binary that had previously run the service.
   absent. Env values still take precedence.
 - `test/server_factory.test.ts` covers config-file fallback, env precedence,
   quoted config values, explicit config paths, and missing credentials.
-- Local Codex and Claude Code configs now launch the source MCP server directly
-  with `/opt/homebrew/bin/node` and only set `AGENT_BRIDGE_AGENT`.
-- The dead Codex and Claude Code wrapper launchd jobs were uninstalled.
+- Local Codex, Claude Code, and Claude Desktop configs now launch the source
+  MCP server directly with `/opt/homebrew/bin/node` and only set
+  `AGENT_BRIDGE_AGENT`.
+- The dead Codex, Claude Code, and Claude Desktop wrapper launchd jobs were
+  uninstalled.
 - `atrib-internal/tools/install-agent-bridge-http-host.sh` now prefers
   `/opt/homebrew/bin/node` by default while still honoring `NODE_BIN`.
 
 ## Wrapper Policy
 
 Keep `agent-bridge-atrib` for signed atrib receipts and local-substrate metadata.
-Do not make it the only Agent Bridge path for Codex or Claude Code.
+Do not make it the only Agent Bridge path for Codex, Claude Code, or Claude
+Desktop.
 
 Only reinstall those wrapper jobs as active client targets after the wrapper has
 health-based supervision. A loaded launchd label is not proof that Agent Bridge
@@ -72,5 +78,8 @@ tool call.
 - Direct stdio MCP smoke: listed `post_context`, `get_context`, and
   `ack_context`, then read live context.
 - CLI status: returned `{"status":"ok","message":"Agent Bridge is connected to Supabase"}`.
-- Wrapper cleanup: Codex and Claude Code wrapper labels are absent, and their
-  launchd plist files are absent.
+- Claude Desktop launch proof: fresh Desktop log showed `initialize` and
+  `tools/list` succeeding against `/opt/homebrew/bin/node
+  /Users/naderhelmy/repos/agent-bridge/dist/index.js`.
+- Wrapper cleanup: Codex, Claude Code, and Claude Desktop wrapper labels are
+  absent, and their launchd plist files are absent.
