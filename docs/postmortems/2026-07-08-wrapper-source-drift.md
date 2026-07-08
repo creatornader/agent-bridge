@@ -5,21 +5,19 @@
 Resolved for basic Codex, Claude Code, and Claude Desktop availability.
 
 Codex, Claude Code, and Claude Desktop now launch the source repo MCP server
-directly from `/Users/naderhelmy/repos/agent-bridge/dist/index.js` with
-`/opt/homebrew/bin/node`. The direct server reads credentials from
-`~/.agent-bridge/config`, so client configs no longer need to duplicate the
-Supabase URL or anon key.
+directly from its built `dist/index.js` entrypoint with a pinned Node binary.
+The direct server reads credentials from `~/.agent-bridge/config`, so client
+configs no longer need to duplicate the Supabase URL or anon key.
 
-The broken Codex, Claude Code, and Claude Desktop `agent-bridge-atrib` launchd
-jobs were removed after their labels stayed loaded while `/mcp/health` refused
+The broken Codex, Claude Code, and Claude Desktop signed-wrapper launchd jobs
+were removed after their labels stayed loaded while `/mcp/health` refused
 connections. The wrapper code still exists as an optional signed attribution
 layer.
 
 ## Impact
 
 Codex, Claude Code, and Claude Desktop could not use Agent Bridge through MCP
-while their client configs pointed at the `agent-bridge-atrib` HTTP wrapper
-ports:
+while their client configs pointed at signed HTTP wrapper ports:
 
 - Codex: `http://127.0.0.1:8794/mcp`
 - Claude Code: `http://127.0.0.1:8793/mcp`
@@ -57,12 +55,12 @@ Homebrew Node binary that had previously run the service.
   `AGENT_BRIDGE_AGENT`.
 - The dead Codex, Claude Code, and Claude Desktop wrapper launchd jobs were
   uninstalled.
-- `atrib-internal/tools/install-agent-bridge-http-host.sh` now prefers
-  `/opt/homebrew/bin/node` by default while still honoring `NODE_BIN`.
+- The internal wrapper installer now prefers `/opt/homebrew/bin/node` by default
+  while still honoring `NODE_BIN`.
 
 ## Wrapper Policy
 
-Keep `agent-bridge-atrib` for signed atrib receipts and local-substrate metadata.
+Keep the signed wrapper for attribution receipts and local-substrate metadata.
 Do not make it the only Agent Bridge path for Codex, Claude Code, or Claude
 Desktop.
 
@@ -79,7 +77,6 @@ tool call.
   `ack_context`, then read live context.
 - CLI status: returned `{"status":"ok","message":"Agent Bridge is connected to Supabase"}`.
 - Claude Desktop launch proof: fresh Desktop log showed `initialize` and
-  `tools/list` succeeding against `/opt/homebrew/bin/node
-  /Users/naderhelmy/repos/agent-bridge/dist/index.js`.
+  `tools/list` succeeding against the direct source MCP entrypoint.
 - Wrapper cleanup: Codex, Claude Code, and Claude Desktop wrapper labels are
   absent, and their launchd plist files are absent.
