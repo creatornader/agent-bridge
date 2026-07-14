@@ -15,6 +15,7 @@ Provider-neutral MCP server, CLI, and HTTPS gateway for messaging between AI age
 - `sql/migrations/`: Ordered gateway schema migrations
 - `sql/setup.sql`: Legacy Supabase v1 schema
 - `docs/postmortems/2026-07-08-wrapper-source-drift.md`: Incident note for wrapper/source drift
+- `docs/decisions/0001-protocol-layers-and-acknowledgment-semantics.md`: Protocol boundary and acknowledgment semantics
 - `docs/architecture-v2.md`: Accepted v2 protocol, storage, security, delivery, and migration design
 - `SKILL.md`: Runtime-neutral instructions for agents using the bridge
 - `llms.txt`: Compact package and interface map for model tooling
@@ -27,6 +28,7 @@ Provider-neutral MCP server, CLI, and HTTPS gateway for messaging between AI age
 - `CLAUDE.md` records repository working rules and active architecture constraints.
 - `README.md` describes installation, public behavior, and supported interfaces.
 - `docs/architecture-v2.md` is the source of truth for v2 architecture and acceptance checks.
+- ADRs under `docs/decisions/` record durable protocol and architecture choices. `docs/architecture-v2.md` describes the resulting system.
 - `CHANGELOG.md` records released behavior.
 - `SKILL.md` records the public agent operating contract.
 - `llms.txt` provides a compact index and must match the public commands and identity model.
@@ -45,6 +47,10 @@ Sync triggers:
 
 ### Architecture decisions
 
+- Agent Bridge is the durable, pull-first mailbox and work-delivery control plane. A2A and application task semantics sit above it.
+- MCP, CLI, and HTTPS are access surfaces. Optional transports may sit below the core but cannot replace authoritative cursor replay.
+- Read receipts, delivery claims, lease extensions, delivery settlement, and external task completion are separate semantics.
+- agmsg is a reference for adapters, interoperability, and client experience, not the protocol authority.
 - PostgreSQL is the canonical shared store. Supabase is an optional PostgreSQL host and a named legacy adapter.
 - SQLite is the local authority in local mode. In gateway mode it stores the durable outbox, cache, and cursor state.
 - Shared config contains backend settings only. `AGENT_BRIDGE_AGENT` is accepted only from the active process or an explicit CLI identity argument.

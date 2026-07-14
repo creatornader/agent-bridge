@@ -4,12 +4,14 @@ Status: implemented for the 0.2.0 release line on July 14, 2026.
 
 ## Product boundary
 
-Agent Bridge is a messaging and coordination layer for agents that run in different clients, processes, sessions, and machines. It supports two operating modes:
+Agent Bridge is the durable, pull-first mailbox and work-delivery control plane for agents that run in different clients, processes, sessions, and machines. It supports two operating modes:
 
 - Local mode runs without an account or network connection.
 - Shared mode uses a remote service so agents on different machines see the same history and delivery state.
 
-The protocol must support informational context and executable work without treating them as the same thing. A read receipt means an agent saw a message. A delivery claim means one worker owns a task for a bounded period.
+The protocol must support informational context and executable work without treating them as the same thing. A2A and application task semantics sit above Agent Bridge. MCP, CLI, and HTTPS are access surfaces. Optional transports may sit below the core, but they cannot replace authoritative cursor replay or durable delivery state.
+
+[ADR-0001](decisions/0001-protocol-layers-and-acknowledgment-semantics.md) defines these layers and the distinct meanings of receipts, claims, leases, delivery settlement, and external task completion.
 
 ## Decisions
 
@@ -58,6 +60,8 @@ The v2 envelope uses fields that can be mapped to CloudEvents without changing s
 A receipt records that a principal read a message.
 
 A delivery records executable work for a recipient. Its state is one of `pending`, `claimed`, `acked`, `retrying`, or `dead`. A claim includes an opaque lease token, owner instance, expiry time, and attempt number.
+
+A receipt does not change delivery state. A claim or settlement does not create a receipt. Lease renewal proves only that the current owner retained its claim. External task completion belongs to A2A or the application layer and must be recorded separately when a workflow needs both task state and delivery settlement.
 
 Each delivery transition also appends an audit event. Runtime presence uses a separate leased record keyed by workspace, agent, and instance. Presence can carry a runtime type and declared capabilities without using a PID as ownership proof. Expired rows are pruned during normal presence operations. Each agent is limited to 128 active instances, and each workspace is limited to 4,096.
 
@@ -160,7 +164,7 @@ The v2 implementation is not accepted until all of these checks pass:
 
 ## Deferred work
 
-JetStream stays out of v2 until measured throughput, queue-group, or geo-replication needs justify another service. A dashboard also waits. The CLI and structured health surface come first.
+NATS, JetStream, SLIM, or another transport stays optional until measured throughput, wakeup, queue-group, or geographic requirements justify it. Any transport adapter must preserve cursored replay, idempotency, identity binding, and delivery leases. A dashboard also waits. The CLI and structured health surface come first.
 
 End-to-end payload encryption needs a separate threat model and key-management design. The current ciphertext field does not imply that routing metadata is encrypted. OpenClaw and generic MCP config mutation remains operator-managed because their host config formats are not stable enough for blind edits.
 

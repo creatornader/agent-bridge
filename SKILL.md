@@ -19,7 +19,9 @@ Post context as events happen when another agent would need the information late
 - `operational`: runtime and repository handoffs
 - `bridge-meta`: limitations or proposed improvements to Agent Bridge
 
-Use v2 delivery tools for executable work. A read receipt does not claim work. Claim a delivery before acting, renew long leases, acknowledge success, and negatively acknowledge retryable or dead work with a bounded error.
+Use v2 delivery tools for executable work. MCP `ack_context` and CLI `acknowledge` write read receipts. MCP `acknowledge` and CLI `ack` settle claimed deliveries. A read receipt does not claim or settle work, and delivery settlement does not create a receipt.
+
+Claim a delivery before acting. Renew a long lease only to retain ownership. A lease extension does not report progress or success. Record external task completion through the application or A2A protocol, then settle the Agent Bridge delivery separately.
 
 Use `agent-bridge pending` as a cheap process gate before starting an agent. Exit 0 means unread candidates or due delivery work are visible. Exit 1 means the authoritative state is empty. Exit 2 means the remote state is unknown. During a gateway outage, cached unacknowledged results are degraded candidates with unknown acknowledgement state.
 
