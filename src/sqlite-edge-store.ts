@@ -33,6 +33,9 @@ CREATE TABLE IF NOT EXISTS edge_scopes (
   pull_cursor TEXT,
   last_sync_at TEXT,
   last_error TEXT,
+  last_outbound_sync_at TEXT,
+  last_inbound_sync_at TEXT,
+  last_attempt_at TEXT,
   cache_contract INTEGER NOT NULL DEFAULT 1
 );
 CREATE TABLE IF NOT EXISTS edge_outbox (
@@ -48,6 +51,7 @@ CREATE TABLE IF NOT EXISTS edge_outbox (
   lease_token TEXT,
   lease_expires_at TEXT,
   last_error TEXT,
+  blocked_at TEXT,
   created_at TEXT NOT NULL,
   UNIQUE(scope_key, message_id),
   UNIQUE(scope_key, idempotency_key)
@@ -104,11 +108,24 @@ export interface EdgeEnqueueResult {
 
 export interface EdgeStats {
   pending: number;
+  due: number;
+  scheduled: number;
+  leased: number;
   blocked: number;
   cached: number;
   pullCursor?: string;
   lastSyncAt?: string;
   lastError?: string;
+  oldestDueAt?: string;
+  queueLagMs: number;
+  oldestBlockedAt?: string;
+  blockedAgeMs: number | null;
+  blockedMaxAttempts: number;
+  blockedLastError?: string;
+  nextRetryAt?: string;
+  lastOutboundSyncAt?: string;
+  lastInboundSyncAt?: string;
+  lastAttemptAt?: string;
 }
 
 export class EdgeConflictError extends Error {
@@ -231,11 +248,20 @@ export class SQLiteEdgeStore {
       if (!scopeColumns.some((column) => column.name === "cache_contract")) {
         this.db.exec("ALTER TABLE edge_scopes ADD COLUMN cache_contract INTEGER NOT NULL DEFAULT 0");
       }
+      for (const name of ["last_outbound_sync_at", "last_inbound_sync_at", "last_attempt_at"]) {
+        if (!scopeColumns.some((column) => column.name === name)) {
+          this.db.exec(`ALTER TABLE edge_scopes ADD COLUMN ${name} TEXT`);
+        }
+      }
       const columns = this.db.prepare("PRAGMA table_info(edge_inbox)").all() as Row[];
       if (!columns.some((column) => column.name === "project")) {
         this.db.exec("ALTER TABLE edge_inbox ADD COLUMN project TEXT");
       }
       this.db.exec("CREATE INDEX IF NOT EXISTS edge_inbox_project ON edge_inbox(scope_key, project, sequence_key)");
+      const outboxColumns = this.db.prepare("PRAGMA table_info(edge_outbox)").all() as Row[];
+      if (!outboxColumns.some((column) => column.name === "blocked_at")) {
+        this.db.exec("ALTER TABLE edge_outbox ADD COLUMN blocked_at TEXT");
+      }
       this.db.exec("COMMIT");
     } catch (error) {
       this.db.exec("ROLLBACK");
@@ -296,12 +322,10 @@ export class SQLiteEdgeStore {
     this.db.exec("BEGIN IMMEDIATE");
     try {
       const head = this.db.prepare(`SELECT * FROM edge_outbox
-        WHERE scope_key=? AND state='pending' ORDER BY position LIMIT 1`).get(this.key) as Row | undefined;
-      if (
-        !head ||
-        String(head.available_at) > nowText ||
-        (head.lease_expires_at && String(head.lease_expires_at) > nowText)
-      ) {
+        WHERE scope_key=? AND state='pending' AND available_at<=?
+          AND (lease_expires_at IS NULL OR lease_expires_at<=?)
+        ORDER BY position LIMIT 1`).get(this.key, nowText, nowText) as Row | undefined;
+      if (!head) {
         this.db.exec("COMMIT");
         return undefined;
       }
@@ -339,12 +363,12 @@ export class SQLiteEdgeStore {
     await this.noteError(error);
   }
 
-  async block(record: EdgeOutboxRecord, error: string): Promise<void> {
+  async block(record: EdgeOutboxRecord, error: string, now = new Date()): Promise<void> {
     await this.ready();
     this.db.prepare(`UPDATE edge_outbox SET state='blocked', attempts=attempts+1,
-      lease_token=NULL, lease_expires_at=NULL, last_error=?
+      lease_token=NULL, lease_expires_at=NULL, last_error=?, blocked_at=?
       WHERE scope_key=? AND position=? AND lease_token=?`)
-      .run(error.slice(0, 256), this.key, record.position, record.leaseToken);
+      .run(error.slice(0, 256), now.toISOString(), this.key, record.position, record.leaseToken);
     await this.noteError(error);
   }
 
@@ -362,6 +386,8 @@ export class SQLiteEdgeStore {
         .run(this.key, record.position, record.leaseToken);
       if (deleted.changes !== 1) throw new EdgeConflictError("outbox lease was lost before commit");
       this.db.prepare(`UPDATE edge_scopes SET last_sync_at=?, last_error=NULL WHERE scope_key=?`)
+        .run(now.toISOString(), this.key);
+      this.db.prepare("UPDATE edge_scopes SET last_outbound_sync_at=? WHERE scope_key=?")
         .run(now.toISOString(), this.key);
       this.db.exec("COMMIT");
     } catch (error) {
@@ -412,6 +438,8 @@ export class SQLiteEdgeStore {
           : currentCursor;
       this.db.prepare(`UPDATE edge_scopes SET pull_cursor=?, last_sync_at=?, last_error=NULL
         WHERE scope_key=?`).run(nextCursor ?? null, now.toISOString(), this.key);
+      this.db.prepare("UPDATE edge_scopes SET last_inbound_sync_at=? WHERE scope_key=?")
+        .run(now.toISOString(), this.key);
       this.db.exec("COMMIT");
     } catch (error) {
       this.db.exec("ROLLBACK");
@@ -425,6 +453,8 @@ export class SQLiteEdgeStore {
     try {
       for (const message of messages) this.cacheOne(message);
       this.db.prepare(`UPDATE edge_scopes SET last_sync_at=?, last_error=NULL WHERE scope_key=?`)
+        .run(now.toISOString(), this.key);
+      this.db.prepare("UPDATE edge_scopes SET last_inbound_sync_at=? WHERE scope_key=?")
         .run(now.toISOString(), this.key);
       this.db.exec("COMMIT");
     } catch (error) {
@@ -529,23 +559,57 @@ export class SQLiteEdgeStore {
       .run(error.slice(0, 256), this.key);
   }
 
-  async stats(): Promise<EdgeStats> {
+  async noteAttempt(now = new Date()): Promise<void> {
     await this.ready();
+    this.db.prepare("UPDATE edge_scopes SET last_attempt_at=? WHERE scope_key=?")
+      .run(now.toISOString(), this.key);
+  }
+
+  async stats(now = new Date()): Promise<EdgeStats> {
+    await this.ready();
+    const nowText = now.toISOString();
     const counts = this.db.prepare(`SELECT
       sum(CASE WHEN state='pending' THEN 1 ELSE 0 END) AS pending,
-      sum(CASE WHEN state='blocked' THEN 1 ELSE 0 END) AS blocked
-      FROM edge_outbox WHERE scope_key=?`).get(this.key) as Row;
+      sum(CASE WHEN state='pending' AND available_at<=? AND (lease_expires_at IS NULL OR lease_expires_at<=?) THEN 1 ELSE 0 END) AS due,
+      sum(CASE WHEN state='pending' AND available_at>? AND (lease_expires_at IS NULL OR lease_expires_at<=?) THEN 1 ELSE 0 END) AS scheduled,
+      sum(CASE WHEN state='pending' AND lease_expires_at>? THEN 1 ELSE 0 END) AS leased,
+      sum(CASE WHEN state='blocked' THEN 1 ELSE 0 END) AS blocked,
+      min(CASE WHEN state='pending' AND available_at<=? AND (lease_expires_at IS NULL OR lease_expires_at<=?) THEN available_at END) AS oldest_due,
+      min(CASE WHEN state='pending' AND available_at>? AND (lease_expires_at IS NULL OR lease_expires_at<=?) THEN available_at END) AS next_retry,
+      min(CASE WHEN state='blocked' THEN blocked_at END) AS oldest_blocked,
+      sum(CASE WHEN state='blocked' AND blocked_at IS NULL THEN 1 ELSE 0 END) AS blocked_age_unknown,
+      max(CASE WHEN state='blocked' THEN attempts ELSE 0 END) AS blocked_max_attempts
+      FROM edge_outbox WHERE scope_key=?`).get(nowText, nowText, nowText, nowText, nowText, nowText, nowText, nowText, nowText, this.key) as Row;
+    const blocked = this.db.prepare("SELECT last_error FROM edge_outbox WHERE scope_key=? AND state='blocked' ORDER BY coalesce(blocked_at,created_at) LIMIT 1").get(this.key) as Row | undefined;
     const cache = this.db.prepare("SELECT count(*) AS count FROM edge_inbox WHERE scope_key=?")
       .get(this.key) as Row;
-    const state = this.db.prepare(`SELECT pull_cursor, last_sync_at, last_error
+    const state = this.db.prepare(`SELECT pull_cursor, last_sync_at, last_error,
+      last_outbound_sync_at,last_inbound_sync_at,last_attempt_at
       FROM edge_scopes WHERE scope_key=?`).get(this.key) as Row;
+    const oldestDueAt = counts.oldest_due ? String(counts.oldest_due) : undefined;
+    const oldestBlockedAt = Number(counts.blocked_age_unknown ?? 0) > 0
+      ? undefined
+      : counts.oldest_blocked ? String(counts.oldest_blocked) : undefined;
     return {
       pending: Number(counts.pending ?? 0),
+      due: Number(counts.due ?? 0),
+      scheduled: Number(counts.scheduled ?? 0),
+      leased: Number(counts.leased ?? 0),
       blocked: Number(counts.blocked ?? 0),
       cached: Number(cache.count ?? 0),
       pullCursor: state.pull_cursor ? String(state.pull_cursor) : undefined,
       lastSyncAt: state.last_sync_at ? String(state.last_sync_at) : undefined,
       lastError: state.last_error ? String(state.last_error) : undefined,
+      oldestDueAt,
+      queueLagMs: oldestDueAt ? Math.max(0, now.getTime() - Date.parse(oldestDueAt)) : 0,
+      oldestBlockedAt,
+      blockedAgeMs: oldestBlockedAt ? Math.max(0, now.getTime() - Date.parse(oldestBlockedAt)) : null,
+      blockedMaxAttempts: Number(counts.blocked_max_attempts ?? 0),
+      blockedLastError: blocked?.last_error ? String(blocked.last_error) : undefined,
+      nextRetryAt: counts.next_retry ? String(counts.next_retry) : undefined,
+      lastOutboundSyncAt: state.last_outbound_sync_at ? String(state.last_outbound_sync_at) : undefined,
+      lastInboundSyncAt: state.last_inbound_sync_at ? String(state.last_inbound_sync_at) : undefined,
+      lastAttemptAt: state.last_attempt_at ? String(state.last_attempt_at) : undefined,
     };
   }
 

@@ -543,6 +543,49 @@
         "oldestAvailableAt": {
           "type": "string"
         },
+        "due": {
+          "anyOf": [
+            {
+              "type": "number"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "scheduled": {
+          "anyOf": [
+            {
+              "type": "number"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "expiredLeases": {
+          "anyOf": [
+            {
+              "type": "number"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "oldestDueAt": {
+          "type": "string"
+        },
+        "queueLagMs": {
+          "anyOf": [
+            {
+              "type": "number"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
         "principal": {
           "type": "object",
           "required": [
@@ -558,24 +601,6 @@
             }
           },
           "additionalProperties": true
-        },
-        "remoteReachable": {
-          "type": "boolean"
-        },
-        "outboxPending": {
-          "type": "number"
-        },
-        "outboxBlocked": {
-          "type": "number"
-        },
-        "cachedMessages": {
-          "type": "number"
-        },
-        "lastSyncAt": {
-          "type": "string"
-        },
-        "lastSyncError": {
-          "type": "string"
         }
       },
       "additionalProperties": true
@@ -601,13 +626,16 @@
         "database",
         "cursorPath",
         "lastCursor",
-        "queue"
+        "queue",
+        "checks"
       ],
       "properties": {
         "status": {
           "enum": [
             "ok",
-            "degraded"
+            "unknown",
+            "degraded",
+            "failed"
           ]
         },
         "localHealthy": {
@@ -763,6 +791,49 @@
             "oldestAvailableAt": {
               "type": "string"
             },
+            "due": {
+              "anyOf": [
+                {
+                  "type": "number"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "scheduled": {
+              "anyOf": [
+                {
+                  "type": "number"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "expiredLeases": {
+              "anyOf": [
+                {
+                  "type": "number"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "oldestDueAt": {
+              "type": "string"
+            },
+            "queueLagMs": {
+              "anyOf": [
+                {
+                  "type": "number"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
             "principal": {
               "type": "object",
               "required": [
@@ -780,7 +851,14 @@
               "additionalProperties": true
             },
             "remoteReachable": {
-              "type": "boolean"
+              "anyOf": [
+                {
+                  "type": "boolean"
+                },
+                {
+                  "type": "null"
+                }
+              ]
             },
             "outboxPending": {
               "type": "number"
@@ -796,9 +874,99 @@
             },
             "lastSyncError": {
               "type": "string"
+            },
+            "outboxDue": {
+              "type": "number"
+            },
+            "outboxScheduled": {
+              "type": "number"
+            },
+            "outboxLeased": {
+              "type": "number"
+            },
+            "outboxOldestDueAt": {
+              "type": "string"
+            },
+            "outboxQueueLagMs": {
+              "type": "number"
+            },
+            "outboxOldestBlockedAt": {
+              "type": "string"
+            },
+            "outboxBlockedAgeMs": {
+              "anyOf": [
+                {
+                  "type": "number"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "outboxBlockedMaxAttempts": {
+              "type": "number"
+            },
+            "outboxBlockedLastError": {
+              "type": "string"
+            },
+            "outboxNextRetryAt": {
+              "type": "string"
+            },
+            "lastOutboundSyncAt": {
+              "type": "string"
+            },
+            "lastInboundSyncAt": {
+              "type": "string"
+            },
+            "lastSyncAttemptAt": {
+              "type": "string"
+            },
+            "syncLoopState": {
+              "enum": [
+                "disabled",
+                "idle",
+                "running",
+                "backoff",
+                "stopped",
+                "failed"
+              ]
+            },
+            "syncLoopError": {
+              "type": "string"
+            },
+            "remoteError": {
+              "type": "string"
             }
           },
           "additionalProperties": true
+        },
+        "checks": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "required": [
+              "name",
+              "status",
+              "message"
+            ],
+            "properties": {
+              "name": {
+                "type": "string"
+              },
+              "status": {
+                "enum": [
+                  "ok",
+                  "unknown",
+                  "degraded",
+                  "failed"
+                ]
+              },
+              "message": {
+                "type": "string"
+              }
+            },
+            "additionalProperties": false
+          }
         }
       },
       "additionalProperties": true
@@ -819,13 +987,16 @@
         "database",
         "cursorPath",
         "lastCursor",
-        "queue"
+        "queue",
+        "checks"
       ],
       "properties": {
         "status": {
           "enum": [
             "ok",
-            "degraded"
+            "unknown",
+            "degraded",
+            "failed"
           ]
         },
         "localHealthy": {
@@ -981,6 +1152,49 @@
             "oldestAvailableAt": {
               "type": "string"
             },
+            "due": {
+              "anyOf": [
+                {
+                  "type": "number"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "scheduled": {
+              "anyOf": [
+                {
+                  "type": "number"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "expiredLeases": {
+              "anyOf": [
+                {
+                  "type": "number"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "oldestDueAt": {
+              "type": "string"
+            },
+            "queueLagMs": {
+              "anyOf": [
+                {
+                  "type": "number"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
             "principal": {
               "type": "object",
               "required": [
@@ -998,7 +1212,14 @@
               "additionalProperties": true
             },
             "remoteReachable": {
-              "type": "boolean"
+              "anyOf": [
+                {
+                  "type": "boolean"
+                },
+                {
+                  "type": "null"
+                }
+              ]
             },
             "outboxPending": {
               "type": "number"
@@ -1014,9 +1235,99 @@
             },
             "lastSyncError": {
               "type": "string"
+            },
+            "outboxDue": {
+              "type": "number"
+            },
+            "outboxScheduled": {
+              "type": "number"
+            },
+            "outboxLeased": {
+              "type": "number"
+            },
+            "outboxOldestDueAt": {
+              "type": "string"
+            },
+            "outboxQueueLagMs": {
+              "type": "number"
+            },
+            "outboxOldestBlockedAt": {
+              "type": "string"
+            },
+            "outboxBlockedAgeMs": {
+              "anyOf": [
+                {
+                  "type": "number"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "outboxBlockedMaxAttempts": {
+              "type": "number"
+            },
+            "outboxBlockedLastError": {
+              "type": "string"
+            },
+            "outboxNextRetryAt": {
+              "type": "string"
+            },
+            "lastOutboundSyncAt": {
+              "type": "string"
+            },
+            "lastInboundSyncAt": {
+              "type": "string"
+            },
+            "lastSyncAttemptAt": {
+              "type": "string"
+            },
+            "syncLoopState": {
+              "enum": [
+                "disabled",
+                "idle",
+                "running",
+                "backoff",
+                "stopped",
+                "failed"
+              ]
+            },
+            "syncLoopError": {
+              "type": "string"
+            },
+            "remoteError": {
+              "type": "string"
             }
           },
           "additionalProperties": true
+        },
+        "checks": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "required": [
+              "name",
+              "status",
+              "message"
+            ],
+            "properties": {
+              "name": {
+                "type": "string"
+              },
+              "status": {
+                "enum": [
+                  "ok",
+                  "unknown",
+                  "degraded",
+                  "failed"
+                ]
+              },
+              "message": {
+                "type": "string"
+              }
+            },
+            "additionalProperties": false
+          }
         }
       },
       "additionalProperties": true

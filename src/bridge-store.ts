@@ -24,6 +24,11 @@ export interface BridgeDiagnostics {
   dead: number | null;
   cancelled?: number | null;
   oldestAvailableAt?: string;
+  due?: number | null;
+  scheduled?: number | null;
+  expiredLeases?: number | null;
+  oldestDueAt?: string;
+  queueLagMs?: number | null;
   principal?: { workspace: string; agent: string };
 }
 export interface ClaimOptions { leaseMs: number; now?: Date; maxAttempts?: number; }
@@ -38,7 +43,7 @@ export interface DeliveryQuery {
 export interface DeliveryPage { deliveries: BridgeDelivery[]; cursor?: string; }
 export interface DeliveryEventPage { events: BridgeDeliveryEvent[]; cursor?: string; }
 export interface BridgeStore {
-  initialize(options?: { signal?: AbortSignal }): Promise<void>;
+  initialize(options?: { signal?: AbortSignal; mode?: "active" | "passive" }): Promise<void>;
   insertMessage(message: Omit<BridgeMessage, "sequence" | "createdAt">, options?: { signal?: AbortSignal }): Promise<InsertMessageResult>;
   listMessages(principal: BridgePrincipal, query?: MessageQuery, options?: { signal?: AbortSignal }): Promise<MessagePage>;
   recordReceipt(principal: BridgePrincipal, messageIds: string[], readAt?: Date): Promise<number>;
@@ -50,7 +55,7 @@ export interface BridgeStore {
   listDeliveryEvents?(principal: BridgePrincipal, deliveryId: string, query?: { cursor?: string; limit?: number }): Promise<DeliveryEventPage>;
   cancelDelivery?(principal: BridgePrincipal, deliveryId: string): Promise<BridgeDelivery | null>;
   requeueDelivery?(principal: BridgePrincipal, deliveryId: string): Promise<BridgeDelivery | null>;
-  diagnostics?(principal: BridgePrincipal): Promise<BridgeDiagnostics>;
+  diagnostics?(principal: BridgePrincipal, options?: { mode?: "snapshot" | "probe" }): Promise<BridgeDiagnostics>;
   heartbeat?(principal: BridgePrincipal, leaseMs: number, runtimeType?: string, capabilities?: string[]): Promise<AgentPresence>;
   listPresence?(principal: BridgePrincipal): Promise<AgentPresence[]>;
   sync?(options?: { maxPush?: number; maxPages?: number; signal?: AbortSignal }): Promise<unknown>;

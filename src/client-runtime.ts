@@ -10,8 +10,9 @@ import { SQLiteBridgeStore } from "./sqlite-bridge-store.js";
 import type { ClientConfig } from "./client-config.js";
 
 export interface ClientRuntime { config: ClientConfig; store: BridgeStore; service: BridgeService; close(): Promise<void>; }
+export interface ClientRuntimeOptions { autoSync?: boolean; initializationMode?: "active" | "passive"; }
 
-export function createStore(config: ClientConfig): BridgeStore {
+export function createStore(config: ClientConfig, options: ClientRuntimeOptions = {}): BridgeStore {
   if (config.provider === "local") {
     if (config.databasePath !== ":memory:") {
       const directory = dirname(config.databasePath);
@@ -26,13 +27,13 @@ export function createStore(config: ClientConfig): BridgeStore {
     if (basename(directory) === ".agent-bridge") chmodSync(directory, 0o700);
     const remote = new HttpBridgeStore({ baseUrl: config.url!, token: config.credential!, principal: config.principal });
     const edge = new SQLiteEdgeStore(config.edgeDatabasePath, { endpoint: config.url!, principal: config.principal });
-    return new SyncingBridgeStore(edge, remote, config.principal);
+    return new SyncingBridgeStore(edge, remote, config.principal, { autoSync: options.autoSync });
   }
   return new LegacySupabaseRestStore(config.url!, config.credential!);
 }
 
-export async function createClientRuntime(config: ClientConfig): Promise<ClientRuntime> {
-  const store = createStore(config);
-  await store.initialize();
+export async function createClientRuntime(config: ClientConfig, options: ClientRuntimeOptions = {}): Promise<ClientRuntime> {
+  const store = createStore(config, options);
+  await store.initialize({ mode: options.initializationMode });
   return { config, store, service: new BridgeService(store), close: async () => { await store.close?.(); } };
 }

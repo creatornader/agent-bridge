@@ -15,6 +15,8 @@ At session start, call `get_context` with a small limit. Summarize relevant unac
 
 In gateway mode, long-lived MCP clients sync automatically. Call the MCP `sync` tool to trigger bounded outbox replay and inbox cache refresh manually.
 
+Use `agent-bridge status` for a passive operational snapshot. Do not use it as a connectivity probe. Unprobed remote reachability is unknown, not healthy. Use `agent-bridge doctor` for active checks. Doctor exits 0 when ok, 2 when degraded, and 1 when checks fail. Treat blocked outbox rows as intervention-required even if a later send or pull succeeded. Distinguish due, scheduled, and leased work.
+
 Post context as events happen when another agent would need the information later:
 
 - `goal-update`: material progress, decisions, or completed research

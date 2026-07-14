@@ -1,6 +1,6 @@
 {
   "name": "@creatornader/agent-bridge",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "description": "Shared context MCP server for heterogeneous AI agent coordination",
   "type": "module",
   "license": "Apache-2.0",

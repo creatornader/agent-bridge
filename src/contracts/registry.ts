@@ -180,7 +180,7 @@ const PresenceSchema = Type.Object({
   lastSeenAt: Type.String(),
 }, { additionalProperties: true });
 
-const DiagnosticsSchema = Type.Object({
+const DeliveryDiagnosticsProperties = {
   schemaVersion: Type.Enum(["local-v2", "postgres-v2", "legacy-v1"]),
   deliverySupported: Type.Boolean(),
   pending: NullableNumber(),
@@ -189,17 +189,44 @@ const DiagnosticsSchema = Type.Object({
   dead: NullableNumber(),
   cancelled: Type.Optional(NullableNumber()),
   oldestAvailableAt: OptionalString(),
+  due: Type.Optional(NullableNumber()),
+  scheduled: Type.Optional(NullableNumber()),
+  expiredLeases: Type.Optional(NullableNumber()),
+  oldestDueAt: OptionalString(),
+  queueLagMs: Type.Optional(NullableNumber()),
   principal: Type.Optional(Type.Object({ workspace: Type.String(), agent: Type.String() }, { additionalProperties: true })),
-  remoteReachable: OptionalBoolean(),
+} as const;
+
+const DiagnosticsSchema = Type.Object(DeliveryDiagnosticsProperties, { additionalProperties: true });
+
+const ClientDiagnosticsSchema = Type.Object({
+  ...DeliveryDiagnosticsProperties,
+  remoteReachable: Type.Optional(Type.Union([Type.Boolean(), Type.Null()])),
   outboxPending: OptionalNumber(),
   outboxBlocked: OptionalNumber(),
   cachedMessages: OptionalNumber(),
   lastSyncAt: OptionalString(),
   lastSyncError: OptionalString(),
+  outboxDue: OptionalNumber(),
+  outboxScheduled: OptionalNumber(),
+  outboxLeased: OptionalNumber(),
+  outboxOldestDueAt: OptionalString(),
+  outboxQueueLagMs: OptionalNumber(),
+  outboxOldestBlockedAt: OptionalString(),
+  outboxBlockedAgeMs: Type.Optional(NullableNumber()),
+  outboxBlockedMaxAttempts: OptionalNumber(),
+  outboxBlockedLastError: OptionalString(),
+  outboxNextRetryAt: OptionalString(),
+  lastOutboundSyncAt: OptionalString(),
+  lastInboundSyncAt: OptionalString(),
+  lastSyncAttemptAt: OptionalString(),
+  syncLoopState: Type.Optional(Type.Enum(["disabled", "idle", "running", "backoff", "stopped", "failed"])),
+  syncLoopError: OptionalString(),
+  remoteError: OptionalString(),
 }, { additionalProperties: true });
 
 const ClientStatusSchema = Type.Object({
-  status: Type.Enum(["ok", "degraded"]),
+  status: Type.Enum(["ok", "unknown", "degraded", "failed"]),
   localHealthy: Type.Boolean(),
   connected: Type.Boolean(),
   remoteReachable: Type.Union([Type.Boolean(), Type.Null()]),
@@ -212,7 +239,12 @@ const ClientStatusSchema = Type.Object({
   database: Type.Union([Type.String(), Type.Null()]),
   cursorPath: Type.String(),
   lastCursor: Type.Union([Type.String(), Type.Null()]),
-  queue: DiagnosticsSchema,
+  queue: ClientDiagnosticsSchema,
+  checks: Type.Array(Type.Object({
+    name: Type.String(),
+    status: Type.Enum(["ok", "unknown", "degraded", "failed"]),
+    message: Type.String(),
+  }, { additionalProperties: false })),
 }, { additionalProperties: true });
 
 const HistoryRequestSchema = Type.Object({

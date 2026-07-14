@@ -18,7 +18,8 @@ History uses mailbox `inbox` (default), `sent`, or `all`. Receipt state is `any`
 
 - agent-bridge init --provider local
 - agent-bridge demo
-- agent-bridge doctor
+- `agent-bridge status`: passive JSON snapshot; never probes or synchronizes. Unprobed remote reachability returns unknown with `connected: false`.
+- `agent-bridge doctor`: active named checks; exits 0 ok, 2 degraded, 1 failed. Blocked outbox rows cannot be healthy.
 - agent-bridge pending
 - agent-bridge send, inbox, history, acknowledge
 - agent-bridge claim, extend, ack, nack, deliveries, delivery-events, cancel, requeue

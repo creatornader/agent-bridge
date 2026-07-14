@@ -6,6 +6,8 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and 
 
 ## [Unreleased]
 
+## [0.3.0] - 2026-07-14
+
 ### Added
 
 - Canonical TypeBox-backed v2 operation registry with deterministic JSON Schema 2020-12, OpenAPI 3.1.2, MCP manifest, and capability artifacts.
@@ -28,8 +30,11 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and 
 
 - Offline inbox and pending fallback now label degraded cache data and unknown acknowledgement state; long-lived MCP clients replay with cancellable bounded backoff and expose manual `sync`.
 - CLI health separates local edge health from remote gateway reachability, and unknown publication outcomes retry idempotently.
+- Passive `status` no longer starts synchronization or probes remote providers. `doctor` now reports named checks and exits 0, 2, or 1 for ok, degraded, or failed. Queue diagnostics distinguish due, scheduled, and leased work. They retain blocked outbox evidence after later successful synchronization.
 
 ### Changed
+
+- The pre-1.0 client status contract now has four states: `ok`, `unknown`, `degraded`, and `failed`. Named checks are required. Scripts that assumed only `ok` or `degraded` must handle the two new states. Passive status still exits 0.
 
 - New 2.1 clients require complete 2.1 negotiation before mutation and reject headerless or selected 2.0 gateways instead of downgrading. Gateways must be upgraded before 2.1 clients.
 - Capability output distinguishes current, selected, and supported protocol versions. Primary OpenAPI operations require 2.1. Embedded 2.0 vendor extensions contain limited compatibility schema metadata, not a second OpenAPI description.
@@ -92,5 +97,6 @@ First tagged release. Marks the point where agent-bridge has shipped its initial
 - Narrative-leak detection in CI + on commit via `creatornader/textleaks@v0.2.0` (renamed from leakguard).
 
 [0.1.0]: https://github.com/creatornader/agent-bridge/releases/tag/v0.1.0
-[Unreleased]: https://github.com/creatornader/agent-bridge/compare/v0.2.0...HEAD
+[Unreleased]: https://github.com/creatornader/agent-bridge/compare/v0.3.0...HEAD
+[0.3.0]: https://github.com/creatornader/agent-bridge/compare/v0.2.0...v0.3.0
 [0.2.0]: https://github.com/creatornader/agent-bridge/compare/v0.1.0...v0.2.0

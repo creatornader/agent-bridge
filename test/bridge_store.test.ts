@@ -466,6 +466,11 @@ function bridgeStoreContract(name: string, makeStore: () => SQLiteBridgeStore) {
         deliveryPolicy: { mode: "leased", notBefore },
       });
       expect(first.message.deliveryPolicy).toMatchObject({ mode: "leased", notBefore });
+      expect(await store.diagnostics!(worker)).toMatchObject({
+        due: 0,
+        scheduled: 1,
+        queueLagMs: 0,
+      });
       expect(await store.claimDelivery(worker, { leaseMs: 1_000, now: new Date() })).toBeNull();
       expect((await store.claimDelivery(worker, { leaseMs: 1_000, now: new Date(Date.now() + 61_000) }))?.messageId)
         .toBe(first.message.id);

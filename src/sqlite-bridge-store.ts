@@ -358,7 +358,25 @@ export class SQLiteBridgeStore implements BridgeStore {
       const result = delivery(this.db.prepare("SELECT * FROM bridge_deliveries WHERE id=?").get(id) as Row); this.db.exec("COMMIT"); return result;
     } catch (caught) { this.db.exec("ROLLBACK"); throw caught; }
   }
-  async diagnostics(principal: BridgePrincipal): Promise<BridgeDiagnostics> { await this.ready(); const rows = this.db.prepare("SELECT state, count(*) AS count, min(available_at) AS oldest FROM bridge_deliveries WHERE workspace=? AND recipient=? GROUP BY state").all(principal.workspace, principal.agent) as Row[]; const counts = new Map(rows.map((row) => [String(row.state), Number(row.count)])); const oldest = rows.filter((row) => row.state === "pending" || row.state === "retrying").map((row) => row.oldest ? String(row.oldest) : undefined).filter(Boolean).sort()[0]; return { schemaVersion: "local-v2", deliverySupported: true, pending: counts.get("pending") ?? 0, claimed: counts.get("claimed") ?? 0, retrying: counts.get("retrying") ?? 0, dead: counts.get("dead") ?? 0, cancelled: counts.get("cancelled") ?? 0, oldestAvailableAt: oldest }; }
+  async diagnostics(principal: BridgePrincipal): Promise<BridgeDiagnostics> {
+    await this.ready();
+    const now = new Date();
+    const nowText = now.toISOString();
+    const queue = this.db.prepare(`SELECT
+      sum(CASE WHEN state='pending' THEN 1 ELSE 0 END) AS pending,
+      sum(CASE WHEN state='claimed' THEN 1 ELSE 0 END) AS claimed,
+      sum(CASE WHEN state='retrying' THEN 1 ELSE 0 END) AS retrying,
+      sum(CASE WHEN state='dead' THEN 1 ELSE 0 END) AS dead,
+      sum(CASE WHEN state='cancelled' THEN 1 ELSE 0 END) AS cancelled,
+      min(CASE WHEN state IN ('pending','retrying') THEN available_at END) AS oldest_available,
+      sum(CASE WHEN state IN ('pending','retrying') AND available_at<=? THEN 1 ELSE 0 END) AS due,
+      sum(CASE WHEN state IN ('pending','retrying') AND available_at>? THEN 1 ELSE 0 END) AS scheduled,
+      sum(CASE WHEN state='claimed' AND lease_expires_at<=? THEN 1 ELSE 0 END) AS expired_leases,
+      min(CASE WHEN state IN ('pending','retrying') AND available_at<=? THEN available_at END) AS oldest_due
+      FROM bridge_deliveries WHERE workspace=? AND recipient=?`).get(nowText, nowText, nowText, nowText, principal.workspace, principal.agent) as Row;
+    const oldestDueAt = queue.oldest_due ? String(queue.oldest_due) : undefined;
+    return { schemaVersion: "local-v2", deliverySupported: true, pending: Number(queue.pending ?? 0), claimed: Number(queue.claimed ?? 0), retrying: Number(queue.retrying ?? 0), dead: Number(queue.dead ?? 0), cancelled: Number(queue.cancelled ?? 0), oldestAvailableAt: queue.oldest_available ? String(queue.oldest_available) : undefined, due: Number(queue.due ?? 0), scheduled: Number(queue.scheduled ?? 0), expiredLeases: Number(queue.expired_leases ?? 0), oldestDueAt, queueLagMs: oldestDueAt ? Math.max(0, now.getTime() - Date.parse(oldestDueAt)) : 0 };
+  }
   async heartbeat(principal: BridgePrincipal, leaseMs: number, runtimeType?: string, capabilities: string[] = []): Promise<AgentPresence> {
     await this.ready();
     const now = new Date();

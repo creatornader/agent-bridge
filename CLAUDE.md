@@ -83,6 +83,7 @@ Sync triggers:
 - For requests with bodies, the gateway validates media type, size, and JSON before opening the request transaction. Every authorized operation then consumes a credential-wide rate bucket and an operation bucket through narrow security-definer functions. Scope and rate denials append secret-free security events before domain work begins.
 - Production request authority, security accounting, and domain work use one checked-out client and one explicit outer transaction. Readiness uses a separate one-connection pool. Node hashes the bearer credential before PostgreSQL receives it. Migration 012 matches that hash and derives canonical workspace, principal, and scopes on the request backend. Migration 013 forces RLS on the five domain tables and records a protected catalog attestation. Gateway capabilities report row isolation only after live readiness checks pass. Lease transitions and target-to-delivery membership remain application-enforced.
 - Credential replacement links are immutable and principal-bound. Revocation and ordinary expiry always win; a successor grace cutoff may only shorten predecessor access.
+- Client `status` is passive and reports unknown remote reachability without claiming a connection. `doctor` performs explicit checks. It exits 0, 2, or 1 for ok, degraded, or failed. Diagnostics preserve blocked edge-outbox evidence across later successful synchronization and distinguish due, scheduled, and leased work.
 
 ### Providers
 
