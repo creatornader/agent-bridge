@@ -13,6 +13,7 @@ import type {
   DeliveryState,
   RetryPolicy,
 } from "../src/bridge-domain.js";
+import { cursorScope, decodeCursor, encodeCursor } from "../src/bridge-domain.js";
 import type {
   BridgeDiagnostics,
   BridgeStore,
@@ -71,9 +72,9 @@ class SwitchableRemote implements BridgeStore {
     return this.inner.listMessages(principal, query);
   }
 
-  async recordReceipt(workspace: string, ids: string[], principal: string, readAt?: Date): Promise<number> {
+  async recordReceipt(principal: BridgePrincipal, ids: string[], readAt?: Date): Promise<number> {
     this.check();
-    return this.inner.recordReceipt(workspace, ids, principal, readAt);
+    return this.inner.recordReceipt(principal, ids, readAt);
   }
 
   async claimDelivery(principal: BridgePrincipal, options: ClaimOptions): Promise<BridgeDelivery | null> {
@@ -140,6 +141,15 @@ afterEach(async () => {
 });
 
 describe("offline SQLite synchronization", () => {
+  it("shares one edge initialization across concurrent calls on the same store", async () => {
+    const root = directory();
+    const principal = { workspace: "acme", agent: "sender" };
+    const localEdge = edge(join(root, "edge.sqlite3"), principal);
+    await Promise.all(Array.from({ length: 8 }, () => localEdge.initialize()));
+    expect((await localEdge.list()).messages).toEqual([]);
+    await localEdge.close();
+  });
+
   it("queues through restart, reconnects, and caches the authoritative message", async () => {
     const root = directory();
     const path = join(root, "edge.sqlite3");
@@ -169,6 +179,50 @@ describe("offline SQLite synchronization", () => {
     expect(cached).toMatchObject({ source: "cache", stale: true });
     expect(cached.messages.map((message) => message.content)).toEqual(["durable offline work"]);
     await restarted.close();
+  });
+
+  it("keeps a committed targeted-away send in sent cache and advances inbox cursor", async () => {
+    const root = directory();
+    const principal = { workspace: "acme", agent: "sender" };
+    const remote = new SwitchableRemote();
+    remote.online = true;
+    const localEdge = edge(join(root, "edge.sqlite3"), principal);
+    const syncing = new SyncingBridgeStore(localEdge, remote, principal, { autoSync: false });
+    const targeted = {
+      ...draft(principal, "018f4a70-0000-7000-8000-000000000188"),
+      targets: ["worker"],
+    };
+
+    expect(await syncing.insertMessage(targeted)).toMatchObject({
+      disposition: "committed",
+      authoritative: true,
+    });
+    remote.online = false;
+    expect((await syncing.listMessages(principal, { mailbox: "sent" })).messages)
+      .toMatchObject([{ id: targeted.id }]);
+    const emptyInbox = await localEdge.list({ mailbox: "inbox" });
+    expect(emptyInbox.messages).toEqual([]);
+    expect(emptyInbox.cursor).toBeDefined();
+    await syncing.close();
+  });
+
+  it("preserves the sync high-water mark across empty filtered cache reads", async () => {
+    const root = directory();
+    const principal = { workspace: "acme", agent: "sender" };
+    const localEdge = edge(join(root, "edge.sqlite3"), principal);
+    const syncScope = cursorScope(principal, { mailbox: "all", includeExpired: true });
+    const inboxScope = cursorScope(principal, { mailbox: "inbox" });
+    await localEdge.cachePage([], encodeCursor("100", syncScope));
+
+    const empty = await localEdge.list({ mailbox: "inbox" });
+    expect(empty.messages).toEqual([]);
+    expect(decodeCursor(empty.cursor, inboxScope)).toBe("100");
+
+    const laterCursor = encodeCursor("150", inboxScope);
+    const later = await localEdge.list({ mailbox: "inbox", cursor: laterCursor });
+    expect(later.messages).toEqual([]);
+    expect(decodeCursor(later.cursor, inboxScope)).toBe("150");
+    await localEdge.close();
   });
 
   it("preserves project labels through replay and exact cache filtering", async () => {
@@ -289,7 +343,7 @@ describe("offline SQLite synchronization", () => {
 
     const cached = await syncing.listMessages(principal, {
       latest: true,
-      unacknowledgedBy: "worker",
+      receiptState: "unread",
     });
     expect(cached).toMatchObject({
       source: "cache",
@@ -651,6 +705,46 @@ describe("offline SQLite synchronization", () => {
       content: "durable offline work",
     }]);
     await upgraded.close();
+  });
+
+  it("resets the old inbox cursor and backfills prior sent targeted messages", async () => {
+    const root = directory();
+    const path = join(root, "edge.sqlite3");
+    const principal = { workspace: "acme", agent: "sender" };
+    const first = edge(path, principal);
+    await first.initialize();
+    await first.close();
+
+    const { DatabaseSync } = require("node:sqlite") as typeof import("node:sqlite");
+    const oldCache = new DatabaseSync(path);
+    oldCache.prepare("UPDATE edge_scopes SET cache_contract=0, pull_cursor=?")
+      .run(encodeCursor("1"));
+    oldCache.close();
+
+    const remote = new SwitchableRemote();
+    remote.online = true;
+    const targeted = {
+      ...draft(principal, "018f4a70-0000-7000-8000-000000000199"),
+      targets: ["worker"],
+    };
+    await remote.inner.insertMessage(targeted);
+    const syncing = new SyncingBridgeStore(
+      edge(path, principal),
+      remote,
+      principal,
+      { autoSync: false },
+    );
+    expect(await syncing.sync()).toMatchObject({ online: true, pulled: 1 });
+
+    remote.online = false;
+    const sent = await syncing.listMessages(principal, { mailbox: "sent" });
+    expect(sent).toMatchObject({ source: "cache", stale: true });
+    expect(sent.messages.map((message) => message.id)).toEqual([targeted.id]);
+    const database = new DatabaseSync(path);
+    expect(database.prepare("SELECT count(*) AS count FROM edge_outbox").get())
+      .toMatchObject({ count: 0 });
+    database.close();
+    await syncing.close();
   });
 
   it("allows concurrent processes to perform the first edge project-column upgrade", async () => {

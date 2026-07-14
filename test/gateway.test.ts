@@ -56,6 +56,70 @@ describe("authenticated v2 gateway", () => {
     expect((await history.json()).messages).toHaveLength(1);
   });
 
+  it("binds mailbox views and receipt state to the credential principal", async () => {
+    const store = new SQLiteBridgeStore();
+    const service = new BridgeService(store);
+    const sender = { workspace: "workspace-a", agent: "sender" };
+    const worker = { workspace: "workspace-a", agent: "worker" };
+    const targeted = await service.publish(sender, {
+      type: "work",
+      content: "for worker",
+      targets: ["worker"],
+    });
+    const broadcast = await service.publish(sender, {
+      type: "context",
+      content: "for everyone",
+    });
+    const principals = new Map([
+      ["sender-token", sender],
+      ["worker-token", worker],
+      ["other-token", { workspace: "workspace-a", agent: "other" }],
+    ]);
+    const base = await gateway({
+      resolve: async (token) => {
+        const principal = principals.get(token);
+        return principal ? { id: `${principal.agent}-credential`, principal } : null;
+      },
+    }, {}, store);
+
+    const senderInbox = await fetch(`${base}/v2/history`, { headers: auth("sender-token") });
+    expect((await senderInbox.json()).messages.map((message: { id: string }) => message.id))
+      .toEqual([broadcast.message.id]);
+    const senderSent = await fetch(`${base}/v2/history?mailbox=sent`, {
+      headers: auth("sender-token"),
+    });
+    expect((await senderSent.json()).messages.map((message: { id: string }) => message.id))
+      .toEqual([targeted.message.id, broadcast.message.id]);
+    const otherInbox = await fetch(`${base}/v2/history`, { headers: auth("other-token") });
+    expect((await otherInbox.json()).messages.map((message: { id: string }) => message.id))
+      .toEqual([broadcast.message.id]);
+
+    const recorded = await fetch(`${base}/v2/receipts`, {
+      method: "POST",
+      headers: auth("worker-token"),
+      body: JSON.stringify({ messageIds: [targeted.message.id] }),
+    });
+    expect(await recorded.json()).toMatchObject({ recorded: 1 });
+    const read = await fetch(`${base}/v2/history?receiptState=read`, {
+      headers: auth("worker-token"),
+    });
+    expect((await read.json()).messages.map((message: { id: string }) => message.id))
+      .toEqual([targeted.message.id]);
+
+    const mismatch = await fetch(
+      `${base}/v2/history?unacknowledgedBy=${encodeURIComponent(worker.agent)}`,
+      { headers: auth("sender-token") },
+    );
+    expect(mismatch.status).toBe(403);
+    expect(await mismatch.json()).toMatchObject({ error: { code: "principal_mismatch" } });
+    const unauthorizedReceipt = await fetch(`${base}/v2/receipts`, {
+      method: "POST",
+      headers: auth("other-token"),
+      body: JSON.stringify({ messageIds: [targeted.message.id] }),
+    });
+    expect(await unauthorizedReceipt.json()).toMatchObject({ recorded: 0 });
+  });
+
   it("binds identity while preserving and filtering optional project labels", async () => {
     const base = await gateway();
     for (const body of [

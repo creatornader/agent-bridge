@@ -56,6 +56,50 @@ describe("agent-bridge CLI", () => {
     const result = run(["send", "--source", "claude-code", "Bridge is ready"], { AGENT_BRIDGE_AGENT: "codex" });
     expect(result.status).toBe(1); expect(result.stderr).toContain("source must match AGENT_BRIDGE_AGENT (codex)");
   });
+  it("exposes sent mail and caller-relative receipt state", () => {
+    const home = mkdtempSync(join(tmpdir(), "agent-bridge-cli-")); homes.push(home);
+    const targeted = runAt(home, [
+      "send", "--source", "sender", "--target", "worker", "targeted",
+    ], { AGENT_BRIDGE_AGENT: undefined });
+    const targetedId = JSON.parse(targeted.stdout).message.id as string;
+    expect(runAt(home, ["send", "--source", "sender", "broadcast"], {
+      AGENT_BRIDGE_AGENT: undefined,
+    }).status).toBe(0);
+
+    const inbox = runAt(home, ["inbox", "--as", "sender"], {
+      AGENT_BRIDGE_AGENT: undefined,
+    });
+    expect(JSON.parse(inbox.stdout).messages.map((message: { content: string }) => message.content))
+      .toEqual(["broadcast"]);
+    const sent = runAt(home, ["sent", "--as", "sender"], {
+      AGENT_BRIDGE_AGENT: undefined,
+    });
+    expect(JSON.parse(sent.stdout).messages.map((message: { content: string }) => message.content))
+      .toEqual(["targeted", "broadcast"]);
+    const all = runAt(home, ["history", "--as", "sender", "--mailbox", "all"], {
+      AGENT_BRIDGE_AGENT: undefined,
+    });
+    expect(JSON.parse(all.stdout).messages).toHaveLength(2);
+
+    expect(runAt(home, [
+      "acknowledge", "--agent", "worker", "--ids", targetedId,
+    ], { AGENT_BRIDGE_AGENT: undefined }).status).toBe(0);
+    const read = runAt(home, [
+      "inbox", "--as", "worker", "--receipt-state", "read",
+    ], { AGENT_BRIDGE_AGENT: undefined });
+    expect(JSON.parse(read.stdout).messages.map((message: { id: string }) => message.id))
+      .toEqual([targetedId]);
+  });
+  it("rejects another principal's receipt assertion before opening storage", () => {
+    const home = mkdtempSync(join(tmpdir(), "agent-bridge-cli-")); homes.push(home);
+    const database = join(home, "must-not-exist.sqlite3");
+    const result = runAt(home, [
+      "history", "--as", "sender", "--unacked-by", "worker", "--db", database,
+    ], { AGENT_BRIDGE_AGENT: undefined });
+    expect(result.status).toBe(1);
+    expect(result.stderr).toContain("--unacked-by must equal the configured principal");
+    expect(existsSync(database)).toBe(false);
+  });
   it("runs the deterministic two-client local demo", () => {
     const result = run(["demo"], { AGENT_BRIDGE_AGENT: "operator" });
     expect(result.status).toBe(0); expect(JSON.parse(result.stdout)).toMatchObject({ status: "ok", principals: ["demo-sender", "demo-worker"], acknowledged: true });

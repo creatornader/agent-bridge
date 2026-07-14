@@ -106,19 +106,20 @@ export class HttpBridgeStore implements BridgeStore {
     this.assertPrincipal(principal);
     const params = new URLSearchParams();
     if (query.cursor) params.set("cursor", query.cursor);
+    if (query.mailbox) params.set("mailbox", query.mailbox);
+    if (query.receiptState) params.set("receiptState", query.receiptState);
     if (query.limit) params.set("limit", String(query.limit));
     if (query.includeExpired) params.set("includeExpired", "true");
     if (query.source) params.set("source", query.source);
     if (query.project) params.set("project", query.project);
     if (query.since) params.set("since", query.since);
-    if (query.unacknowledgedBy) params.set("unacknowledgedBy", query.unacknowledgedBy);
     if (query.threadId) params.set("threadId", query.threadId);
     if (query.latest) params.set("latest", "true");
     for (const type of query.types ?? []) params.append("type", type);
     return this.request(`/v2/history${params.size ? `?${params}` : ""}`, { signal: options.signal });
   }
-  async recordReceipt(workspace: string, ids: string[], principal: string): Promise<number> {
-    this.assertPrincipal({ workspace, agent: principal }, false);
+  async recordReceipt(principal: BridgePrincipal, ids: string[]): Promise<number> {
+    this.assertPrincipal(principal, false);
     return (await this.request("/v2/receipts", { method: "POST", body: { messageIds: ids } })).recorded;
   }
   async diagnostics(principal: BridgePrincipal): Promise<BridgeDiagnostics> {

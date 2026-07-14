@@ -40,7 +40,7 @@ describe("LegacySupabaseRestStore", () => {
       return new Response(JSON.stringify([{ id: 42, metadata: { message_envelope: { message_id: id } } }]), { status: 200 });
     });
     const store = new LegacySupabaseRestStore("https://example.test", "key", fetchImpl);
-    expect(await store.recordReceipt("*", [id], "codex")).toBe(1);
+    expect(await store.recordReceipt({ workspace: "*", agent: "codex" }, [id])).toBe(1);
   });
 
   it("normalizes network failures for watcher retry classification", async () => {
@@ -206,7 +206,10 @@ describe("LegacySupabaseRestStore", () => {
 
   it("acknowledges large numeric IDs without Number coercion", async () => {
     const sequence = "9007199254740991";
-    const fetchImpl = vi.fn<typeof fetch>(async (_input, init) => {
+    const fetchImpl = vi.fn<typeof fetch>(async (input, init) => {
+      if (!String(input).includes("/rpc/ack_context")) {
+        return Response.json([{ id: sequence, source: "sender", metadata: {} }]);
+      }
       expect(JSON.parse(String(init?.body))).toEqual({
         entry_ids: [sequence],
         agent_name: "codex",
@@ -222,7 +225,8 @@ describe("LegacySupabaseRestStore", () => {
     const mapped = legacyMessageIdFromSequence(sequence);
     const fetchImpl = vi.fn<typeof fetch>(async (input, init) => {
       if (!String(input).includes("/rpc/ack_context")) {
-        return new Response("[]", { status: 200 });
+        if (String(input).includes("metadata=cs.")) return new Response("[]", { status: 200 });
+        return Response.json([{ id: sequence, source: "sender", metadata: {} }]);
       }
       expect(JSON.parse(String(init?.body))).toEqual({
         entry_ids: [sequence],
@@ -235,7 +239,48 @@ describe("LegacySupabaseRestStore", () => {
       "key",
       fetchImpl,
     );
-    expect(await restarted.recordReceipt("*", [mapped], "codex")).toBe(1);
+    expect(await restarted.recordReceipt({ workspace: "*", agent: "codex" }, [mapped])).toBe(1);
+    expect(fetchImpl).toHaveBeenCalledTimes(3);
+  });
+
+  it("does not acknowledge a targeted row for an unrelated principal", async () => {
+    const fetchImpl = vi.fn<typeof fetch>(async (input) => {
+      if (String(input).includes("/rpc/ack_context")) {
+        throw new Error("receipt RPC must not be called");
+      }
+      return Response.json([{
+        id: 42,
+        source: "sender",
+        metadata: { message_envelope: { target_agents: ["worker"] } },
+      }]);
+    });
+    const store = new LegacySupabaseRestStore("https://example.test", "key", fetchImpl);
+    expect(await store.recordLegacyReceipt(["42"], "other")).toBe(0);
+    expect(fetchImpl).toHaveBeenCalledTimes(1);
+  });
+
+  it("batches legacy receipt visibility checks and caps the request", async () => {
+    const fetchImpl = vi.fn<typeof fetch>(async (input, init) => {
+      if (String(input).includes("/rpc/ack_context")) {
+        expect(JSON.parse(String(init?.body))).toEqual({
+          entry_ids: ["42", "43"],
+          agent_name: "worker",
+        });
+        return new Response("2", { status: 200 });
+      }
+      expect(String(input)).toContain("id=in.(42,43)");
+      return Response.json([
+        { id: 43, source: "sender", metadata: {} },
+        { id: 42, source: "sender", metadata: {} },
+      ]);
+    });
+    const store = new LegacySupabaseRestStore("https://example.test", "key", fetchImpl);
+    expect(await store.recordLegacyReceipt(["42", "43"], "worker")).toBe(2);
+    expect(fetchImpl).toHaveBeenCalledTimes(2);
+    await expect(store.recordLegacyReceipt(
+      Array.from({ length: 201 }, (_, index) => String(index + 1)),
+      "worker",
+    )).rejects.toThrow("between 1 and 200");
     expect(fetchImpl).toHaveBeenCalledTimes(2);
   });
 
@@ -259,6 +304,6 @@ describe("LegacySupabaseRestStore", () => {
       "key",
       fetchImpl,
     );
-    expect(await restarted.recordReceipt("*", [envelopeId], "codex")).toBe(1);
+    expect(await restarted.recordReceipt({ workspace: "*", agent: "codex" }, [envelopeId])).toBe(1);
   });
 });

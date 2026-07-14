@@ -178,13 +178,15 @@ export function createGateway(options: GatewayOptions) {
         const types = url.searchParams.getAll("type");
         send(res, 200, await service.history(principal, {
           cursor: url.searchParams.get("cursor") ?? undefined,
+          mailbox: url.searchParams.get("mailbox") ?? undefined as any,
+          receiptState: url.searchParams.get("receiptState") ?? undefined as any,
           limit: numberParam(url.searchParams.get("limit"), "limit"),
           types: types.length ? types : undefined,
           includeExpired: url.searchParams.get("includeExpired") === "true",
           source: url.searchParams.get("source") ?? undefined,
           project: url.searchParams.get("project") ?? undefined,
           since: url.searchParams.get("since") ?? undefined,
-          unacknowledgedBy: url.searchParams.get("unacknowledgedBy") ?? undefined,
+          unacknowledgedBy: url.searchParams.get("unacknowledgedBy") ?? url.searchParams.get("unacked_by") ?? undefined,
           threadId: url.searchParams.get("threadId") ?? undefined,
           latest: url.searchParams.get("latest") === "true",
         }), requestId); return;

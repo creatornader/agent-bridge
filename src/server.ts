@@ -19,6 +19,7 @@ import {
 import { resolveAgentIdentity, resolvePostSource } from "./source-identity.js";
 import { BridgeService } from "./bridge-service.js";
 import {
+  BridgePrincipalMismatchError,
   BridgeValidationError,
   validateProject,
   validateMessageDraft,
@@ -395,6 +396,7 @@ export function createAgentBridgeServer(
         description: "Read visible Agent Bridge v2 messages after an opaque cursor.",
         inputSchema: { type: "object" as const, properties: {
           cursor: { type: "string" }, limit: { type: "number", minimum: 1, maximum: 200 }, types: { type: "array", items: { type: "string" } },
+          mailbox: { type: "string", enum: ["inbox", "sent", "all"] }, receiptState: { type: "string", enum: ["any", "unread", "read"] },
           includeExpired: { type: "boolean" }, source: { type: "string" }, project: { type: "string" }, since: { type: "string" }, unacknowledgedBy: { type: "string" },
           threadId: { type: "string" }, latest: { type: "boolean" },
         }, additionalProperties: false },
@@ -539,6 +541,9 @@ export function createAgentBridgeServer(
           throw new McpError(ErrorCode.InvalidParams, "limit must be between 1 and 200");
         }
         const requestedLimit = rawLimit ?? 20;
+        if (args?.unacked_by !== undefined && String(args.unacked_by) !== config.agent) {
+          throw new McpError(ErrorCode.InvalidParams, "unacked_by must equal the configured principal");
+        }
         if (service && principal) {
           if (!service || !principal) throw new McpError(ErrorCode.InternalError, "bridge provider is not configured");
           if (args?.target_agent && String(args.target_agent) !== principal.agent) {
@@ -550,7 +555,7 @@ export function createAgentBridgeServer(
             source: args?.source ? String(args.source) : undefined,
             project,
             since: args?.since ? String(args.since) : undefined,
-            unacknowledgedBy: args?.unacked_by ? String(args.unacked_by) : config.agent,
+            receiptState: "unread",
             threadId: args?.thread_id ? String(args.thread_id) : undefined,
             latest: true,
           });
@@ -739,7 +744,7 @@ export function createAgentBridgeServer(
       }
     } catch (error) {
       if (error instanceof McpError) throw error;
-      if (error instanceof BridgeValidationError) {
+      if (error instanceof BridgeValidationError || error instanceof BridgePrincipalMismatchError) {
         throw new McpError(ErrorCode.InvalidParams, error.message);
       }
       throw error;

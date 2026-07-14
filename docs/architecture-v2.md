@@ -1,10 +1,14 @@
 # Agent Bridge v2 architecture
 
-Status: implemented for the 0.2.0 release line on July 14, 2026.
+Status: living architecture for the 0.3.0 development line. Version 0.2.0 was released on July 14, 2026.
 
 ## Product boundary
 
 Agent Bridge is the durable, pull-first mailbox and work-delivery control plane for agents that run in different clients, processes, sessions, and machines. It supports two operating modes:
+
+History visibility is caller-relative. `inbox` is the default and preserves broadcast-plus-targeted visibility; `sent` is source equal to the caller; `all` is their union. Receipt state (`any`, `unread`, `read`) is valid only for inbox and is always evaluated for the authenticated caller. Opaque v2 cursors bind workspace, caller, mailbox, and normalized filters. Readers temporarily accept v1 sequence cursors but emit only v2. After an edge cache contract upgrade, the gateway resets the authoritative pull cursor and replays `all` visibility; the publication outbox is never treated as sent history.
+
+These authorization guarantees apply to local v2 and the authenticated gateway. The legacy Supabase adapter can enforce them only cooperatively because its publishable key can call the underlying PostgREST table and receipt RPC directly.
 
 - Local mode runs without an account or network connection.
 - Shared mode uses a remote service so agents on different machines see the same history and delivery state.

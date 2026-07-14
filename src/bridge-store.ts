@@ -2,6 +2,8 @@ import type { AgentPresence, BridgeDelivery, BridgeDeliveryEvent, BridgeMessage,
 
 export interface InsertMessageResult { message: BridgeMessage; created: boolean; }
 export interface MessageQuery {
+  mailbox?: "inbox" | "sent" | "all";
+  receiptState?: "any" | "unread" | "read";
   project?: string;
   cursor?: string;
   limit?: number;
@@ -9,7 +11,6 @@ export interface MessageQuery {
   includeExpired?: boolean;
   source?: string;
   since?: string;
-  unacknowledgedBy?: string;
   threadId?: string;
   latest?: boolean;
 }
@@ -29,7 +30,7 @@ export interface BridgeStore {
   initialize(options?: { signal?: AbortSignal }): Promise<void>;
   insertMessage(message: Omit<BridgeMessage, "sequence" | "createdAt">, options?: { signal?: AbortSignal }): Promise<InsertMessageResult>;
   listMessages(principal: BridgePrincipal, query?: MessageQuery, options?: { signal?: AbortSignal }): Promise<MessagePage>;
-  recordReceipt(workspace: string, messageIds: string[], principal: string, readAt?: Date): Promise<number>;
+  recordReceipt(principal: BridgePrincipal, messageIds: string[], readAt?: Date): Promise<number>;
   recordLegacyReceipt?(legacyIds: string[], principal: string): Promise<number>;
   claimDelivery(principal: BridgePrincipal, options: ClaimOptions): Promise<BridgeDelivery | null>;
   renewDelivery(principal: BridgePrincipal, deliveryId: string, leaseToken: string, leaseMs: number): Promise<BridgeDelivery | null>;

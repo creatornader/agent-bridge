@@ -132,9 +132,14 @@ integration("PostgreSQL BridgeStore integration", () => {
     expect(repeated.message.id).toBe(first.message.id);
     const firstPage = await service.history(principal, { limit: 1 });
     expect(firstPage.messages.map((message) => message.id)).toEqual([first.message.id]);
+    const worker = { ...principal, agent: "worker" };
+    await expect(service.history(worker, { cursor: firstPage.cursor, limit: 2 }))
+      .rejects.toThrow("cursor is invalid");
+    const workerFirstPage = await service.history(worker, { limit: 1 });
+    expect(workerFirstPage.messages.map((message) => message.id)).toEqual([first.message.id]);
     const secondPage = await service.history(
-      { ...principal, agent: "worker" },
-      { cursor: firstPage.cursor, limit: 2 },
+      worker,
+      { cursor: workerFirstPage.cursor, limit: 2 },
     );
     expect(secondPage.messages.map((message) => message.id)).toEqual([targeted.message.id]);
     expect((await service.history({ ...principal, agent: "stranger" })).messages).toHaveLength(1);
