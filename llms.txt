@@ -3,7 +3,7 @@
 Repository: https://github.com/creatornader/agent-bridge
 Package: @creatornader/agent-bridge
 
-Agent Bridge carries durable context and executable work between AI agents in different clients, processes, sessions, and machines.
+Agent Bridge is a durable, pull-first mailbox and work-delivery control plane for AI agents in different clients, processes, sessions, and machines.
 
 ## Modes
 
@@ -29,6 +29,20 @@ Reliable messaging: send, history, claim, extend, acknowledge, negative_acknowle
 
 Gateway MCP clients sync automatically and expose manual sync for bounded outbox replay and inbox cache refresh. Offline unacknowledged results are degraded candidates with unknown acknowledgement state, not proof that messages are unread or that no remote work exists.
 
+## Protocol boundary
+
+A2A and application task semantics sit above Agent Bridge.
+MCP, CLI, and HTTPS are client access surfaces.
+Optional transports such as SLIM or NATS may sit below the core.
+agmsg is a reference for adapters, interoperability, and client experience.
+
+## Acknowledgment rules
+
+MCP ack_context and CLI acknowledge write read receipts.
+MCP acknowledge and CLI ack settle claimed deliveries.
+A receipt does not settle work. Delivery settlement does not create a receipt.
+Lease extension does not report progress or external task completion.
+
 ## Identity rule
 
 The active runtime supplies AGENT_BRIDGE_AGENT and AGENT_BRIDGE_INSTANCE. Do not hardcode another client name and do not store agent identity in the shared backend config. Gateway installations use a separate principal-bound token and owner-only backend file for each client.
@@ -36,6 +50,7 @@ The active runtime supplies AGENT_BRIDGE_AGENT and AGENT_BRIDGE_INSTANCE. Do not
 ## References
 
 - README.md: setup, commands, security, and provider behavior
+- docs/decisions/0001-protocol-layers-and-acknowledgment-semantics.md: protocol layers and acknowledgment semantics
 - docs/architecture-v2.md: protocol, storage, identity, delivery, and acceptance decisions
 - clients/*.json: runtime adapter manifests
 - SKILL.md: concise agent operating instructions

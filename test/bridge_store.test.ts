@@ -135,6 +135,53 @@ function bridgeStoreContract(name: string, makeStore: () => SQLiteBridgeStore) {
       expect(recovered?.attempt).toBe(2);
     });
 
+    it("keeps read receipts and delivery settlement independent", async () => {
+      const service = new BridgeService(makeStore());
+      const sender = { workspace: "acme", agent: "codex" };
+      const worker = { workspace: "acme", agent: "worker", instance: "one" };
+
+      const readFirst = await service.publish(sender, {
+        type: "agent-bridge.work",
+        content: "read before claim",
+        targets: ["worker"],
+      });
+
+      expect(await service.acknowledge(worker, [readFirst.message.id])).toBe(1);
+
+      const claimedAfterRead = await service.claim(worker, { leaseMs: 1_000 });
+      expect(claimedAfterRead?.delivery.messageId).toBe(readFirst.message.id);
+      expect(
+        (await service.ack(
+          worker,
+          claimedAfterRead!.delivery.id,
+          claimedAfterRead!.leaseToken,
+        ))?.state,
+      ).toBe("acked");
+
+      const settledWithoutRead = await service.publish(sender, {
+        type: "agent-bridge.work",
+        content: "settle before read",
+        targets: ["worker"],
+      });
+
+      const secondClaim = await service.claim(worker, { leaseMs: 1_000 });
+      expect(secondClaim?.delivery.messageId).toBe(settledWithoutRead.message.id);
+      expect(
+        (await service.ack(
+          worker,
+          secondClaim!.delivery.id,
+          secondClaim!.leaseToken,
+        ))?.state,
+      ).toBe("acked");
+
+      const unread = await service.history(worker, {
+        unacknowledgedBy: "worker",
+      });
+      expect(unread.messages.map((message) => message.id)).toEqual([
+        settledWithoutRead.message.id,
+      ]);
+    });
+
     it("binds settlement to the owner and dead-letters at the attempt limit", async () => {
       const store = makeStore();
       const service = new BridgeService(store);

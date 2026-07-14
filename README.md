@@ -1,6 +1,6 @@
 # Agent Bridge
 
-Agent Bridge is a shared messaging and work-delivery layer for AI agents that run in different clients, processes, sessions, and machines.
+Agent Bridge is a durable, pull-first mailbox and work-delivery control plane for AI agents that run in different clients, processes, sessions, and machines.
 
 It supports three operating modes:
 
@@ -50,6 +50,10 @@ The accepted protocol and storage decisions live in [docs/architecture-v2.md](do
 ```
 
 Realtime notifications or hooks may wake a client, but cursored reads remain authoritative. A missed notification does not lose a message.
+
+A2A and application task semantics sit above Agent Bridge. MCP, CLI, and HTTPS are access surfaces. Optional transports such as SLIM or NATS may provide wakeups or transport below the core, but authoritative recovery still uses cursored pull. agmsg remains a reference for adapters, interoperability, and client experience.
+
+[ADR-0001](docs/decisions/0001-protocol-layers-and-acknowledgment-semantics.md) defines this boundary and the distinct acknowledgment meanings.
 
 ## Requirements
 
@@ -255,6 +259,8 @@ Local and gateway providers also expose:
 
 Legacy Supabase does not advertise delivery or presence tools because its schema cannot enforce those operations.
 
+The acknowledgment names depend on the interface. MCP `ack_context` and CLI `acknowledge` write read receipts. MCP `acknowledge` and CLI `ack` settle claimed deliveries. A receipt never settles delivery work, and delivery settlement never creates a receipt.
+
 ## Identity and security
 
 - `~/.agent-bridge/config` contains backend settings only. A stored `AGENT_BRIDGE_AGENT` value is ignored.
@@ -328,6 +334,7 @@ Set `AGENT_BRIDGE_TEST_DATABASE_URL` to run the live PostgreSQL contract and mig
 
 ## Documentation
 
+- [ADR-0001](docs/decisions/0001-protocol-layers-and-acknowledgment-semantics.md): protocol layers and acknowledgment semantics.
 - [docs/architecture-v2.md](docs/architecture-v2.md): protocol and storage decisions.
 - [SKILL.md](SKILL.md): runtime-neutral agent operating instructions.
 - [llms.txt](llms.txt): compact machine-readable project map.
