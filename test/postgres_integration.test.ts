@@ -289,6 +289,7 @@ integration("PostgreSQL BridgeStore integration", () => {
       type: "agent-bridge.work",
       content: "poison",
       targets: ["worker"],
+      deliveryPolicy: { mode: "leased", maxAttempts: 1, retryJitterRatio: 0 },
     });
     const worker = { ...principal, agent: "worker" };
     const claim = await service.claim(worker, { leaseMs: 1_000 });
@@ -329,6 +330,7 @@ integration("PostgreSQL BridgeStore integration", () => {
       type: "agent-bridge.work",
       content: "private work",
       targets: ["worker"],
+      deliveryPolicy: { mode: "leased", maxAttempts: 1 },
     });
     expect(
       await service.acknowledge({ ...principal, agent: "stranger" }, [published.message.id]),
@@ -344,6 +346,103 @@ integration("PostgreSQL BridgeStore integration", () => {
       [claim!.delivery.id],
     );
     expect(await service.claim(worker, { leaseMs: 1_000, maxAttempts: 1 })).toBeNull();
+  });
+
+  it("enforces publisher delivery policy, controls, audit events, and cursor scope", async () => {
+    const service = new BridgeService(new PostgresBridgeStore(pool!));
+    const principal = { workspace: await workspace(), agent: "publisher" };
+    const worker = { workspace: principal.workspace, agent: "worker", instance: "one" };
+    const mailbox = await service.publish(principal, {
+      id: uuidv7(), type: "note", content: "targeted mailbox", targets: ["worker"],
+      deliveryPolicy: { mode: "mailbox" },
+    });
+    expect(mailbox.message.deliveryPolicy).toEqual({ mode: "mailbox" });
+    expect(await service.claim(worker, { leaseMs: 1_000 })).toBeNull();
+
+    const work = await service.publish(principal, {
+      id: uuidv7(), type: "work", content: "controlled", targets: ["worker"],
+      idempotencyKey: "controlled-work",
+      deliveryPolicy: { mode: "leased", maxAttempts: 1, retryJitterRatio: 0 },
+    });
+    await expect(service.publish(principal, {
+      id: uuidv7(), type: "work", content: "controlled", targets: ["worker"],
+      idempotencyKey: "controlled-work",
+      deliveryPolicy: { mode: "leased", maxAttempts: 2, retryJitterRatio: 0 },
+    })).rejects.toMatchObject({ code: "idempotency_conflict", status: 409 });
+
+    const claim = await service.claim(worker, { leaseMs: 1_000, maxAttempts: 99 });
+    expect(claim?.delivery.messageId).toBe(work.message.id);
+    const cancelled = await service.cancel(principal, claim!.delivery.id);
+    expect(cancelled?.state).toBe("cancelled");
+    expect(await service.cancel(principal, claim!.delivery.id)).toEqual(cancelled);
+    expect(await service.ack(worker, claim!.delivery.id, claim!.leaseToken)).toBeNull();
+    expect(await service.cancel({ ...principal, agent: "other" }, claim!.delivery.id)).toBeNull();
+
+    const requeues = await Promise.allSettled([
+      service.requeue(principal, claim!.delivery.id),
+      service.requeue(principal, claim!.delivery.id),
+    ]);
+    expect(requeues.filter((result) => result.status === "fulfilled")).toHaveLength(1);
+    expect(requeues.filter((result) => result.status === "rejected")).toHaveLength(1);
+    const reclaimed = await service.claim(worker, { leaseMs: 1_000 });
+    expect(reclaimed?.delivery).toMatchObject({ attempt: 2, cycleAttempt: 1, requeueCount: 1 });
+    expect((await service.nack(worker, reclaimed!.delivery.id, reclaimed!.leaseToken, "failed", "retry"))?.state)
+      .toBe("dead");
+    await expect(service.cancel(principal, reclaimed!.delivery.id))
+      .rejects.toMatchObject({ code: "delivery_state_conflict", status: 409 });
+    const events = await service.deliveryEvents(principal, reclaimed!.delivery.id);
+    expect(events.events.map((event) => event.action))
+      .toEqual(["created", "claim", "cancel", "requeue", "claim", "attempts_exhausted"]);
+
+    await service.publish(principal, { id: uuidv7(), type: "work", content: "another", targets: ["worker"] });
+    const page = await service.deliveries(worker, { role: "recipient", limit: 1 });
+    expect(page.deliveries).toHaveLength(1);
+    await expect(service.deliveries(principal, { role: "publisher", cursor: page.cursor }))
+      .rejects.toThrow("cursor is invalid");
+  });
+
+  it("fences delivery control and expired-at-limit races", async () => {
+    const service = new BridgeService(new PostgresBridgeStore(pool!));
+    const publisher = { workspace: await workspace(), agent: "publisher" };
+    const worker = { workspace: publisher.workspace, agent: "worker", instance: "race" };
+    await service.publish(publisher, {
+      id: uuidv7(), type: "work", content: "cancel versus nack", targets: ["worker"],
+      deliveryPolicy: { mode: "leased", maxAttempts: 1 },
+    });
+    const claim = await service.claim(worker, { leaseMs: 1_000 });
+    await Promise.allSettled([
+      service.cancel(publisher, claim!.delivery.id),
+      service.nack(worker, claim!.delivery.id, claim!.leaseToken, "terminal", "dead"),
+    ]);
+    expect((await service.deliveryEvents(publisher, claim!.delivery.id)).events
+      .filter((event) => event.action === "cancel" || event.action === "nack_dead"))
+      .toHaveLength(1);
+
+    const requeueRace = await Promise.allSettled([
+      service.requeue(publisher, claim!.delivery.id),
+      service.claim(worker, { leaseMs: 1_000 }),
+    ]);
+    expect((await service.deliveryEvents(publisher, claim!.delivery.id)).events
+      .filter((event) => event.action === "requeue")).toHaveLength(1);
+    const racedClaim = requeueRace[1]?.status === "fulfilled" ? requeueRace[1].value : null;
+    const cleanup = racedClaim ?? await service.claim(worker, { leaseMs: 1_000 });
+    if (cleanup) await service.ack(worker, cleanup.delivery.id, cleanup.leaseToken);
+
+    await service.publish(publisher, {
+      id: uuidv7(), type: "work", content: "expire at limit", targets: ["worker"],
+      deliveryPolicy: { mode: "leased", maxAttempts: 1 },
+    });
+    const limited = await service.claim(worker, { leaseMs: 1_000 });
+    await pool!.query(
+      "UPDATE agent_bridge.deliveries SET lease_expires_at=now() - interval '1 second' WHERE id=$1",
+      [limited!.delivery.id],
+    );
+    await Promise.all([
+      service.claim(worker, { leaseMs: 1_000 }),
+      service.claim(worker, { leaseMs: 1_000 }),
+    ]);
+    expect((await service.deliveryEvents(publisher, limited!.delivery.id)).events
+      .filter((event) => event.action === "attempts_exhausted")).toHaveLength(1);
   });
 
   it("authenticates active credentials and rejects disabled or revoked principals", async () => {
@@ -606,6 +705,134 @@ integration("PostgreSQL BridgeStore integration", () => {
       "UPDATE agent_bridge.schema_migrations SET checksum=$1 WHERE version=3",
       [recorded.rows[0]!.checksum],
     );
+  });
+
+  it("backfills v0.2 delivery history and preserves deterministic claim order", async () => {
+    await withTemporaryDatabase(async (upgrade) => {
+      const directory = fileURLToPath(new URL("../sql/migrations", import.meta.url));
+      const plan = await loadMigrationPlan(directory);
+      for (const migration of plan.slice(0, 9)) {
+        await upgrade.query(
+          migration.source.split("__AGENT_BRIDGE_MIGRATION_CHECKSUM__").join(migration.checksum),
+        );
+      }
+      await upgrade.query("INSERT INTO agent_bridge.workspaces (id,name) VALUES ('migration-test','migration-test')");
+      const legacy = [
+        { messageId: "018f4a70-0000-7000-8000-000000000101", deliveryId: "018f4a70-0000-7000-8000-000000000111", state: "acked", attempt: 1, actor: "worker-ack", error: null },
+        { messageId: "018f4a70-0000-7000-8000-000000000102", deliveryId: "018f4a70-0000-7000-8000-000000000112", state: "claimed", attempt: 1, actor: "worker-claim", error: null },
+        { messageId: "018f4a70-0000-7000-8000-000000000103", deliveryId: "018f4a70-0000-7000-8000-000000000113", state: "retrying", attempt: 2, actor: "worker-retry", error: "retry" },
+        { messageId: "018f4a70-0000-7000-8000-000000000104", deliveryId: "018f4a70-0000-7000-8000-000000000114", state: "dead", attempt: 3, actor: "worker-dead", error: "legacy failure" },
+      ] as const;
+      for (const [index, row] of legacy.entries()) {
+        const createdAt = `2026-07-1${index}T00:00:00.000Z`;
+        await upgrade.query(`INSERT INTO agent_bridge.messages
+          (id,workspace,source,type,content,targets,priority,created_at)
+          VALUES ($1,'migration-test','publisher','work',$2,'["worker"]'::jsonb,'high',$3)`,
+        [row.messageId, row.state, createdAt]);
+        await upgrade.query(`INSERT INTO agent_bridge.deliveries
+          (id,message_id,workspace,recipient,state,attempt,available_at)
+          VALUES ($1,$2,'migration-test','worker','pending',0,$3)`,
+        [row.deliveryId, row.messageId, createdAt]);
+        await upgrade.query(`UPDATE agent_bridge.deliveries
+          SET state='claimed',attempt=$2,lease_token=$3,lease_owner=$4,
+            lease_expires_at='2026-08-01T00:00:00.000Z'
+          WHERE id=$1`, [row.deliveryId, row.attempt, randomUUID(), row.actor]);
+        if (row.state !== "claimed") {
+          await upgrade.query(`UPDATE agent_bridge.deliveries
+            SET state=$2,lease_token=NULL,lease_owner=NULL,lease_expires_at=NULL,last_error=$3
+            WHERE id=$1`, [row.deliveryId, row.state, row.error]);
+        }
+      }
+      await upgrade.query(`INSERT INTO agent_bridge.delivery_events
+        (delivery_id,message_id,workspace,recipient,from_state,to_state,attempt,lease_owner,error,created_at)
+        VALUES
+          ('018f4a70-0000-7000-8000-000000000114','018f4a70-0000-7000-8000-000000000104','migration-test','worker','claimed','dead',3,NULL,'message expired','2026-07-13T23:59:58.000Z'),
+          ('018f4a70-0000-7000-8000-000000000114','018f4a70-0000-7000-8000-000000000104','migration-test','worker','claimed','dead',3,NULL,'maximum attempts reached','2026-07-13T23:59:59.000Z')`);
+      const migration = plan[9]!;
+      await upgrade.query(
+        migration.source.split("__AGENT_BRIDGE_MIGRATION_CHECKSUM__").join(migration.checksum),
+      );
+      const migrated = await upgrade.query<{
+        state: string; created_matches: boolean; last_action: string; last_actor: string;
+      }>(`SELECT delivery.state,delivery.created_at=message.created_at AS created_matches,
+          delivery.last_action,delivery.last_actor
+        FROM agent_bridge.deliveries delivery JOIN agent_bridge.messages message
+          ON message.workspace=delivery.workspace AND message.id=delivery.message_id
+        ORDER BY delivery.id`);
+      expect(migrated.rows).toEqual([
+        { state: "acked", created_matches: true, last_action: "ack", last_actor: "worker-ack" },
+        { state: "claimed", created_matches: true, last_action: "claim", last_actor: "worker-claim" },
+        { state: "retrying", created_matches: true, last_action: "nack_retry", last_actor: "worker-retry" },
+        { state: "dead", created_matches: true, last_action: "nack_dead", last_actor: "worker-dead" },
+      ]);
+      const actions = await upgrade.query<{ to_state: string; action: string; actor: string }>(`
+        SELECT to_state,action,actor FROM agent_bridge.delivery_events
+        WHERE workspace='migration-test' AND from_state IS NOT NULL
+          AND error IS DISTINCT FROM 'message expired'
+          AND error IS DISTINCT FROM 'maximum attempts reached'
+          AND to_state<>'claimed'
+        ORDER BY delivery_id,sequence`);
+      expect(actions.rows).toEqual([
+        { to_state: "acked", action: "ack", actor: "worker-ack" },
+        { to_state: "retrying", action: "nack_retry", actor: "worker-retry" },
+        { to_state: "dead", action: "nack_dead", actor: "worker-dead" },
+      ]);
+      const claimActors = await upgrade.query<{ actor: string }>(`
+        SELECT actor FROM agent_bridge.delivery_events
+        WHERE workspace='migration-test' AND to_state='claimed'
+        ORDER BY delivery_id`);
+      expect(claimActors.rows).toEqual(legacy.map((row) => ({ actor: row.actor })));
+      const createdActors = await upgrade.query<{ action: string; actor: string }>(`
+        SELECT action,actor FROM agent_bridge.delivery_events
+        WHERE workspace='migration-test' AND from_state IS NULL
+        ORDER BY delivery_id`);
+      expect(createdActors.rows).toEqual(Array.from({ length: 4 }, () => ({
+        action: "created", actor: "publisher",
+      })));
+      const automatedActors = await upgrade.query<{ error: string; action: string; actor: string }>(`
+        SELECT error,action,actor FROM agent_bridge.delivery_events
+        WHERE workspace='migration-test'
+          AND error IN ('message expired','maximum attempts reached')
+        ORDER BY error`);
+      expect(automatedActors.rows).toEqual([
+        { error: "maximum attempts reached", action: "attempts_exhausted", actor: "agent-bridge" },
+        { error: "message expired", action: "message_expired", actor: "agent-bridge" },
+      ]);
+
+      const sameTime = "2026-07-14T12:00:00.000Z";
+      const ordered = [
+        { messageId: "018f4a70-0000-7000-8000-000000000121", deliveryId: "018f4a70-0000-7000-8000-000000000131", priority: "info", rank: 2 },
+        { messageId: "018f4a70-0000-7000-8000-000000000122", deliveryId: "018f4a70-0000-7000-8000-000000000132", priority: "high", rank: 1 },
+        { messageId: "018f4a70-0000-7000-8000-000000000123", deliveryId: "018f4a70-0000-7000-8000-000000000134", priority: "urgent", rank: 0 },
+        { messageId: "018f4a70-0000-7000-8000-000000000124", deliveryId: "018f4a70-0000-7000-8000-000000000133", priority: "urgent", rank: 0 },
+      ] as const;
+      for (const row of ordered) {
+        await upgrade.query(`INSERT INTO agent_bridge.messages
+          (id,workspace,source,type,content,targets,priority,created_at,delivery_mode,
+           delivery_max_attempts,delivery_retry_base_delay_ms,delivery_retry_max_delay_ms,
+           delivery_retry_jitter_ratio)
+          VALUES ($1,'migration-test','publisher','work',$2,'["order-worker"]'::jsonb,$3,$4,
+            'leased',5,1000,60000,0.2)`, [row.messageId, row.priority, row.priority, sameTime]);
+        await upgrade.query(`INSERT INTO agent_bridge.deliveries
+          (id,message_id,workspace,recipient,state,created_at,priority_rank,available_at,last_actor,last_action)
+          VALUES ($1,$2,'migration-test','order-worker','pending',$3,$4,$3,'publisher','created')`,
+        [row.deliveryId, row.messageId, sameTime, row.rank]);
+      }
+      const service = new BridgeService(new PostgresBridgeStore(upgrade));
+      const worker = { workspace: "migration-test", agent: "order-worker", instance: "order" };
+      const actual: string[] = [];
+      for (let index = 0; index < ordered.length; index += 1) {
+        const claim = await service.claim(worker, { leaseMs: 1_000 });
+        actual.push(claim!.delivery.messageId);
+        await service.ack(worker, claim!.delivery.id, claim!.leaseToken);
+      }
+      expect(actual).toEqual([
+        "018f4a70-0000-7000-8000-000000000124",
+        "018f4a70-0000-7000-8000-000000000123",
+        "018f4a70-0000-7000-8000-000000000122",
+        "018f4a70-0000-7000-8000-000000000121",
+      ]);
+    });
   });
 
   it("reports a missing runtime table as not ready", async () => {

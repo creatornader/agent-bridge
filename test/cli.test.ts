@@ -47,6 +47,36 @@ describe("agent-bridge CLI", () => {
     const result = run(["post", "--category", "operational", "Bridge is ready"], { AGENT_BRIDGE_AGENT: "codex" });
     expect(result.status).toBe(0); expect(JSON.parse(result.stdout).message).toMatchObject({ source: "codex", type: "operational", content: "Bridge is ready" });
   });
+  it("publishes and settles leased work with publisher-owned CLI policy", () => {
+    const home = mkdtempSync(join(tmpdir(), "agent-bridge-cli-")); homes.push(home);
+    const sent = runAt(home, [
+      "send", "--source", "publisher", "--target", "worker",
+      "--delivery-mode", "leased", "--delivery-max-attempts", "1",
+      "--retry-base-ms", "1000", "--retry-max-ms", "60000",
+      "--retry-jitter", "0", "work",
+    ], { AGENT_BRIDGE_AGENT: undefined });
+    expect(sent.status).toBe(0);
+    expect(JSON.parse(sent.stdout).message.deliveryPolicy).toMatchObject({
+      mode: "leased", maxAttempts: 1, retryBaseDelayMs: 1000,
+      retryMaxDelayMs: 60000, retryJitterRatio: 0,
+    });
+    const claimed = runAt(home, ["claim", "--as", "worker", "--instance", "one", "--lease-ms", "1000"], { AGENT_BRIDGE_AGENT: undefined });
+    const claim = JSON.parse(claimed.stdout);
+    const nacked = runAt(home, [
+      "nack", "--as", "worker", "--instance", "one",
+      "--delivery-id", claim.delivery.id, "--lease-token", claim.leaseToken,
+      "--disposition", "retry", "--error", "failed",
+    ], { AGENT_BRIDGE_AGENT: undefined });
+    expect(JSON.parse(nacked.stdout).state).toBe("dead");
+    const dead = runAt(home, ["dead-letters", "--as", "worker", "--role", "recipient"], { AGENT_BRIDGE_AGENT: undefined });
+    expect(JSON.parse(dead.stdout).deliveries).toHaveLength(1);
+    const invalid = runAt(home, [
+      "send", "--source", "publisher", "--delivery-mode", "mailbox",
+      "--retry-base-ms", "1000", "invalid",
+    ], { AGENT_BRIDGE_AGENT: undefined });
+    expect(invalid.status).toBe(1);
+    expect(invalid.stderr).toContain("mailbox delivery mode does not accept retry or scheduling flags");
+  });
   it("accepts an explicit source when the environment has no identity", () => {
     const result = run(["send", "--source", "codex", "Bridge is ready"]);
     expect(result.status).toBe(0);

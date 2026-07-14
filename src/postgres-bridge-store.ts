@@ -1,14 +1,20 @@
 import { randomUUID } from "node:crypto";
 import {
+  DeliveryStateConflictError,
   decodeCursor,
+  decodeScopedCursor,
   encodeCursor,
+  encodeScopedCursor,
   cursorScope,
+  scopedCursorScope,
+  validateDeliveryCursorPosition,
+  validateEventCursorPosition,
   type AgentPresence,
   type BridgeDelivery,
   type BridgeDeliveryEvent,
   type BridgeMessage,
   type BridgePrincipal,
-  type RetryPolicy,
+  type DeliveryPolicy,
 } from "./bridge-domain.js";
 import type {
   BridgeStore,
@@ -17,6 +23,7 @@ import type {
   InsertMessageResult,
   MessagePage,
   MessageQuery,
+  DeliveryQuery,
 } from "./bridge-store.js";
 import { assertIdempotentReplay } from "./idempotency.js";
 
@@ -25,6 +32,15 @@ export interface PgQueryable {
     sql: string,
     values?: unknown[],
   ): Promise<{ rows: T[]; rowCount: number | null }>;
+  connect?(): Promise<PgTransactionClient>;
+  release?(): void;
+}
+interface PgTransactionClient {
+  query<T extends Record<string, unknown> = Record<string, unknown>>(
+    sql: string,
+    values?: unknown[],
+  ): Promise<{ rows: T[]; rowCount: number | null }>;
+  release(): void;
 }
 
 type Row = Record<string, any>;
@@ -44,6 +60,16 @@ function asTimestamp(value: unknown): string | undefined {
 }
 
 function asMessage(row: Row): BridgeMessage {
+  const deliveryPolicy: DeliveryPolicy = row.delivery_mode === "mailbox"
+    ? { mode: "mailbox" }
+    : {
+        mode: "leased",
+        maxAttempts: Number(row.delivery_max_attempts),
+        retryBaseDelayMs: Number(row.delivery_retry_base_delay_ms),
+        retryMaxDelayMs: Number(row.delivery_retry_max_delay_ms),
+        retryJitterRatio: Number(row.delivery_retry_jitter_ratio),
+        ...(row.delivery_not_before ? { notBefore: asTimestamp(row.delivery_not_before) } : {}),
+      };
   return {
     id: String(row.id),
     workspace: String(row.workspace),
@@ -65,6 +91,7 @@ function asMessage(row: Row): BridgeMessage {
     atribReceiptId: row.atrib_receipt_id ?? undefined,
     informedBy: parse(row.informed_by),
     metadata: parse(row.metadata),
+    deliveryPolicy,
     createdAt: asTimestamp(row.created_at) ?? "",
   };
 }
@@ -77,11 +104,17 @@ function asDelivery(row: Row): BridgeDelivery {
     recipient: String(row.recipient),
     state: row.state,
     attempt: Number(row.attempt),
+    cycleAttempt: Number(row.cycle_attempt ?? row.attempt),
+    requeueCount: Number(row.requeue_count ?? 0),
+    createdAt: asTimestamp(row.created_at) ?? "",
+    priorityRank: Number(row.priority_rank),
     availableAt: asTimestamp(row.available_at) ?? "",
     leaseToken: row.lease_token ?? undefined,
     leaseOwner: row.lease_owner ?? undefined,
     leaseExpiresAt: asTimestamp(row.lease_expires_at),
     lastError: row.last_error ?? undefined,
+    lastActor: row.last_actor ?? undefined,
+    lastAction: row.last_action,
   };
 }
 
@@ -99,9 +132,27 @@ function asDeliveryEvent(row: Row): BridgeDeliveryEvent {
     messageId: String(row.message_id), workspace: String(row.workspace),
     recipient: String(row.recipient), fromState: row.from_state as BridgeDeliveryEvent["fromState"],
     toState: row.to_state as BridgeDeliveryEvent["toState"], attempt: Number(row.attempt),
+    cycleAttempt: Number(row.cycle_attempt), requeueCount: Number(row.requeue_count),
     leaseOwner: row.lease_owner ?? undefined, error: row.error ?? undefined,
+    actor: String(row.actor), action: row.action,
     createdAt: asTimestamp(row.created_at) ?? "",
   };
+}
+
+async function transaction<T>(db: PgQueryable, work: (client: PgQueryable) => Promise<T>): Promise<T> {
+  const borrowed = !db.release && Boolean(db.connect);
+  const client = borrowed ? await db.connect!() : db;
+  try {
+    await client.query("BEGIN");
+    const result = await work(client);
+    await client.query("COMMIT");
+    return result;
+  } catch (error) {
+    await client.query("ROLLBACK").catch(() => undefined);
+    throw error;
+  } finally {
+    if (borrowed && "release" in client && typeof client.release === "function") client.release();
+  }
 }
 
 export class PostgresBridgeStore implements BridgeStore {
@@ -134,6 +185,12 @@ export class PostgresBridgeStore implements BridgeStore {
       input.atribReceiptId ?? null,
       json(input.informedBy),
       json(input.metadata),
+      input.deliveryPolicy.mode,
+      input.deliveryPolicy.mode === "leased" ? input.deliveryPolicy.maxAttempts : null,
+      input.deliveryPolicy.mode === "leased" ? input.deliveryPolicy.retryBaseDelayMs : null,
+      input.deliveryPolicy.mode === "leased" ? input.deliveryPolicy.retryMaxDelayMs : null,
+      input.deliveryPolicy.mode === "leased" ? input.deliveryPolicy.retryJitterRatio : null,
+      input.deliveryPolicy.mode === "leased" ? input.deliveryPolicy.notBefore ?? null : null,
     ];
 
     const result = await this.db.query<Row>(
@@ -141,11 +198,14 @@ export class PostgresBridgeStore implements BridgeStore {
          INSERT INTO agent_bridge.messages (
            id, workspace, project, source, type, content, content_type, data, targets,
            thread_id, reply_to_id, correlation_id, causation_id, priority,
-           expires_at, idempotency_key, atrib_receipt_id, informed_by, metadata
+           expires_at, idempotency_key, atrib_receipt_id, informed_by, metadata,
+           delivery_mode, delivery_max_attempts, delivery_retry_base_delay_ms,
+           delivery_retry_max_delay_ms, delivery_retry_jitter_ratio, delivery_not_before
          )
          VALUES (
            $1, $2, $3, $4, $5, $6, $7, $8::jsonb, $9::jsonb,
-           $10, $11, $12, $13, $14, $15, $16, $17, $18::jsonb, $19::jsonb
+           $10, $11, $12, $13, $14, $15, $16, $17, $18::jsonb, $19::jsonb,
+           $20, $21, $22, $23, $24, $25
          )
          ON CONFLICT (workspace, source, idempotency_key)
            WHERE idempotency_key IS NOT NULL
@@ -164,11 +224,17 @@ export class PostgresBridgeStore implements BridgeStore {
          LIMIT 1
        ), delivery_rows AS (
          INSERT INTO agent_bridge.deliveries (
-           id, message_id, workspace, recipient, state, available_at
+           id, message_id, workspace, recipient, state, available_at,
+           created_at, priority_rank, last_actor, last_action
          )
-         SELECT gen_random_uuid(), inserted.id, inserted.workspace, target, 'pending', now()
+         SELECT gen_random_uuid(), inserted.id, inserted.workspace, target, 'pending',
+                greatest(now(), coalesce(inserted.delivery_not_before, now())),
+                inserted.created_at,
+                case inserted.priority when 'urgent' then 0 when 'high' then 1 else 2 end,
+                inserted.source, 'created'
          FROM inserted
          CROSS JOIN LATERAL jsonb_array_elements_text(inserted.targets) AS target
+         WHERE inserted.delivery_mode = 'leased'
          ON CONFLICT (message_id, recipient) DO NOTHING
        )
        SELECT * FROM selected`,
@@ -283,54 +349,74 @@ export class PostgresBridgeStore implements BridgeStore {
     principal: BridgePrincipal,
     options: ClaimOptions,
   ): Promise<BridgeDelivery | null> {
-    const owner = principal.instance ?? principal.agent;
-    const token = randomUUID();
-    const result = await this.db.query<Row>(
-      `WITH expired AS (
-         UPDATE agent_bridge.deliveries delivery
+    return transaction(this.db, async (db) => {
+      await db.query(
+        `UPDATE agent_bridge.deliveries delivery
          SET state='dead', last_error='message expired', lease_token=NULL,
-             lease_owner=NULL, lease_expires_at=NULL
+             lease_owner=NULL, lease_expires_at=NULL,
+             last_actor='agent-bridge', last_action='message_expired'
          FROM agent_bridge.messages message
          WHERE delivery.workspace=$1 AND delivery.recipient=$2
-           AND delivery.state IN ('pending', 'retrying', 'claimed')
+           AND delivery.state IN ('pending','retrying','claimed')
            AND message.workspace=delivery.workspace AND message.id=delivery.message_id
-           AND message.expires_at IS NOT NULL AND message.expires_at <= now()
-         RETURNING delivery.id
-       ), exhausted AS (
-         UPDATE agent_bridge.deliveries delivery
+           AND message.expires_at IS NOT NULL AND message.expires_at<=now()`,
+        [principal.workspace, principal.agent],
+      );
+      await db.query(
+        `UPDATE agent_bridge.deliveries delivery
          SET state='dead', last_error='maximum attempts reached', lease_token=NULL,
-             lease_owner=NULL, lease_expires_at=NULL
-         WHERE delivery.workspace=$1 AND delivery.recipient=$2 AND delivery.attempt >= $6
-           AND (
-             delivery.state IN ('pending', 'retrying')
-             OR (delivery.state='claimed' AND delivery.lease_expires_at <= now())
-           )
-         RETURNING delivery.id
-       ), candidate AS (
-         SELECT delivery.id
+             lease_owner=NULL, lease_expires_at=NULL,
+             last_actor='agent-bridge', last_action='attempts_exhausted'
+         FROM agent_bridge.messages message
+         WHERE delivery.workspace=$1 AND delivery.recipient=$2
+           AND message.workspace=delivery.workspace AND message.id=delivery.message_id
+           AND delivery.cycle_attempt>=message.delivery_max_attempts
+           AND (delivery.state IN ('pending','retrying')
+             OR (delivery.state='claimed' AND delivery.lease_expires_at<=now()))`,
+        [principal.workspace, principal.agent],
+      );
+      await db.query(
+        `UPDATE agent_bridge.deliveries delivery
+         SET state='retrying', available_at=now(), lease_token=NULL,
+             lease_owner=NULL, lease_expires_at=NULL,
+             last_error='lease expired', last_actor='agent-bridge', last_action='lease_expired'
+         FROM agent_bridge.messages message
+         WHERE delivery.workspace=$1 AND delivery.recipient=$2
+           AND message.workspace=delivery.workspace AND message.id=delivery.message_id
+           AND delivery.state='claimed' AND delivery.lease_expires_at<=now()
+           AND delivery.cycle_attempt<message.delivery_max_attempts`,
+        [principal.workspace, principal.agent],
+      );
+      const candidate = await db.query<Row>(
+        `SELECT delivery.id
          FROM agent_bridge.deliveries delivery
          JOIN agent_bridge.messages message
            ON message.workspace=delivery.workspace AND message.id=delivery.message_id
          WHERE delivery.workspace=$1 AND delivery.recipient=$2
-           AND (
-             (delivery.state IN ('pending', 'retrying') AND delivery.available_at <= now())
-             OR (delivery.state='claimed' AND delivery.lease_expires_at <= now())
-           )
-           AND delivery.attempt < $6
-           AND (message.expires_at IS NULL OR message.expires_at > now())
-         ORDER BY delivery.available_at, delivery.id
+           AND delivery.state IN ('pending','retrying')
+           AND delivery.available_at<=now()
+           AND delivery.cycle_attempt<message.delivery_max_attempts
+           AND (message.expires_at IS NULL OR message.expires_at>now())
+         ORDER BY delivery.priority_rank, delivery.available_at, delivery.created_at, delivery.id
          FOR UPDATE OF delivery SKIP LOCKED
-         LIMIT 1
-       )
-       UPDATE agent_bridge.deliveries delivery
-       SET state='claimed', attempt=delivery.attempt+1, lease_token=$3,
-           lease_owner=$4, lease_expires_at=now() + ($5 * interval '1 millisecond')
-       FROM candidate
-       WHERE delivery.id=candidate.id
-       RETURNING delivery.*`,
-      [principal.workspace, principal.agent, token, owner, options.leaseMs, options.maxAttempts ?? 5],
-    );
-    return result.rows[0] ? asDelivery(result.rows[0]) : null;
+         LIMIT 1`,
+        [principal.workspace, principal.agent],
+      );
+      if (!candidate.rows[0]) return null;
+      const token = randomUUID();
+      const owner = principal.instance ?? principal.agent;
+      const claimed = await db.query<Row>(
+        `UPDATE agent_bridge.deliveries
+         SET state='claimed', attempt=attempt+1, cycle_attempt=cycle_attempt+1,
+             lease_token=$1, lease_owner=$2,
+             lease_expires_at=now()+($3*interval '1 millisecond'),
+             last_error=NULL, last_actor=$4, last_action='claim'
+         WHERE id=$5
+         RETURNING *`,
+        [token, owner, options.leaseMs, `${principal.agent}/${owner}`, candidate.rows[0].id],
+      );
+      return asDelivery(claimed.rows[0]!);
+    });
   }
 
   async renewDelivery(
@@ -356,43 +442,154 @@ export class PostgresBridgeStore implements BridgeStore {
     token: string,
     state: "acked" | "retrying" | "dead",
     error?: string,
-    retryPolicy?: RetryPolicy,
+    _retryPolicy?: import("./bridge-domain.js").RetryPolicy,
   ): Promise<BridgeDelivery | null> {
-    if (!retryPolicy) throw new Error("retry policy is required");
     const result = await this.db.query<Row>(
-      `UPDATE agent_bridge.deliveries
+      `UPDATE agent_bridge.deliveries delivery
        SET state=CASE
-             WHEN $1='retrying' AND attempt >= $6 THEN 'dead'
+             WHEN $1='retrying' AND cycle_attempt>=message.delivery_max_attempts THEN 'dead'
              ELSE $1
            END,
            available_at=CASE
-             WHEN $1='retrying' AND attempt < $6 THEN
+             WHEN $1='retrying' AND cycle_attempt<message.delivery_max_attempts THEN
                now() + (
-                 LEAST($8::double precision, $7::double precision * power(2, GREATEST(attempt - 1, 0)))
-                 * (1 + ((random() * 2) - 1) * $9::double precision)
+                 LEAST(message.delivery_retry_max_delay_ms::double precision,
+                       message.delivery_retry_base_delay_ms::double precision * power(2, GREATEST(cycle_attempt - 1, 0)))
+                 * (1 + ((random() * 2) - 1) * message.delivery_retry_jitter_ratio)
                  * interval '1 millisecond'
                )
              ELSE available_at
            END,
-           last_error=$2, lease_token=NULL, lease_owner=NULL, lease_expires_at=NULL
-       WHERE workspace=$3 AND recipient=$4 AND lease_owner=$5
-         AND id=$10 AND lease_token=$11 AND state='claimed' AND lease_expires_at>now()
-       RETURNING *`,
+           last_error=$2, lease_token=NULL, lease_owner=NULL, lease_expires_at=NULL,
+           last_actor=$5,
+           last_action=CASE
+             WHEN $1='acked' THEN 'ack'
+             WHEN $1='dead' THEN 'nack_dead'
+             WHEN cycle_attempt>=message.delivery_max_attempts THEN 'attempts_exhausted'
+             ELSE 'nack_retry'
+           END
+       FROM agent_bridge.messages message
+       WHERE delivery.workspace=$3 AND delivery.recipient=$4 AND delivery.lease_owner=$5
+         AND message.workspace=delivery.workspace AND message.id=delivery.message_id
+         AND delivery.id=$6 AND delivery.lease_token=$7 AND delivery.state='claimed' AND delivery.lease_expires_at>now()
+       RETURNING delivery.*`,
       [
         state,
         error?.slice(0, 1024) ?? null,
         principal.workspace,
         principal.agent,
         principal.instance ?? principal.agent,
-        retryPolicy.maxAttempts,
-        retryPolicy.baseDelayMs,
-        retryPolicy.maxDelayMs,
-        retryPolicy.jitterRatio,
         id,
         token,
       ],
     );
     return result.rows[0] ? asDelivery(result.rows[0]) : null;
+  }
+
+  async listDeliveries(principal: BridgePrincipal, query: DeliveryQuery = {}) {
+    const filters = {
+      role: query.role ?? "all",
+      states: [...(query.states ?? [])].sort(),
+      messageId: query.messageId ?? null,
+      recipient: query.recipient ?? null,
+    };
+    const scope = scopedCursorScope("deliveries", principal, filters);
+    const boundary = validateDeliveryCursorPosition(decodeScopedCursor(query.cursor, scope));
+    const createdAt = boundary?.createdAt;
+    const id = boundary?.id;
+    const limit = query.limit ?? 50;
+    const values: unknown[] = [principal.workspace, principal.agent];
+    const clauses = ["delivery.workspace=$1"];
+    const role = query.role ?? "all";
+    clauses.push(role === "recipient" ? "delivery.recipient=$2" : role === "publisher" ? "message.source=$2" : "(delivery.recipient=$2 OR message.source=$2)");
+    if (createdAt && id) {
+      values.push(createdAt, id);
+      clauses.push(`(delivery.created_at,delivery.id)>($${values.length - 1}::timestamptz,$${values.length}::uuid)`);
+    }
+    if (query.messageId) { values.push(query.messageId); clauses.push(`delivery.message_id=$${values.length}`); }
+    if (query.recipient) { values.push(query.recipient); clauses.push(`delivery.recipient=$${values.length}`); }
+    if (query.states?.length) { values.push(query.states); clauses.push(`delivery.state=ANY($${values.length}::text[])`); }
+    values.push(limit);
+    const result = await this.db.query<Row>(
+      `SELECT delivery.* FROM agent_bridge.deliveries delivery
+       JOIN agent_bridge.messages message ON message.workspace=delivery.workspace AND message.id=delivery.message_id
+       WHERE ${clauses.join(" AND ")}
+       ORDER BY delivery.created_at,delivery.id LIMIT $${values.length}`,
+      values,
+    );
+    const deliveries = result.rows.map(asDelivery);
+    const last = deliveries[deliveries.length - 1];
+    return { deliveries, cursor: deliveries.length === limit && last ? encodeScopedCursor(scope, { createdAt: last.createdAt, id: last.id }) : undefined };
+  }
+
+  async listDeliveryEvents(principal: BridgePrincipal, id: string, query: { cursor?: string; limit?: number } = {}) {
+    const limit = Math.min(Math.max(query.limit ?? 50, 1), 200);
+    const scope = scopedCursorScope("delivery-events", principal, { deliveryId: id });
+    const position = validateEventCursorPosition(decodeScopedCursor(query.cursor, scope));
+    const result = await this.db.query<Row>(
+      `SELECT event.* FROM agent_bridge.delivery_events event
+       JOIN agent_bridge.messages message ON message.workspace=event.workspace AND message.id=event.message_id
+       WHERE event.workspace=$1 AND event.delivery_id=$2 AND event.sequence>$3::bigint
+         AND (event.recipient=$4 OR message.source=$4)
+       ORDER BY event.sequence LIMIT $5`,
+      [principal.workspace, id, position ?? "0", principal.agent, limit],
+    );
+    const events = result.rows.map(asDeliveryEvent);
+    const last = events[events.length - 1];
+    return { events, cursor: events.length === limit && last ? encodeScopedCursor(scope, last.sequence) : undefined };
+  }
+
+  async cancelDelivery(principal: BridgePrincipal, id: string) {
+    return transaction(this.db, async (db) => {
+      const visible = await db.query<Row>(
+        `SELECT delivery.* FROM agent_bridge.deliveries delivery
+         JOIN agent_bridge.messages message ON message.workspace=delivery.workspace AND message.id=delivery.message_id
+         WHERE delivery.id=$1 AND delivery.workspace=$2 AND message.source=$3 FOR UPDATE OF delivery`,
+        [id, principal.workspace, principal.agent],
+      );
+      const current = visible.rows[0];
+      if (!current) return null;
+      if (current.state === "cancelled") return asDelivery(current);
+      if (!["pending", "retrying", "claimed"].includes(current.state)) {
+        throw new DeliveryStateConflictError(`cannot cancel a ${current.state} delivery`);
+      }
+      const result = await db.query<Row>(
+        `UPDATE agent_bridge.deliveries SET state='cancelled', lease_token=NULL,
+         lease_owner=NULL, lease_expires_at=NULL, last_error=NULL,
+         last_actor=$1, last_action='cancel' WHERE id=$2 RETURNING *`,
+        [principal.agent, id],
+      );
+      return asDelivery(result.rows[0]!);
+    });
+  }
+
+  async requeueDelivery(principal: BridgePrincipal, id: string) {
+    return transaction(this.db, async (db) => {
+      const visible = await db.query<Row>(
+        `SELECT delivery.*,message.expires_at,message.delivery_not_before
+         FROM agent_bridge.deliveries delivery
+         JOIN agent_bridge.messages message ON message.workspace=delivery.workspace AND message.id=delivery.message_id
+         WHERE delivery.id=$1 AND delivery.workspace=$2 AND message.source=$3 FOR UPDATE OF delivery`,
+        [id, principal.workspace, principal.agent],
+      );
+      const current = visible.rows[0];
+      if (!current) return null;
+      if (!["dead", "cancelled"].includes(current.state)) {
+        throw new DeliveryStateConflictError(`cannot requeue a ${current.state} delivery`);
+      }
+      if (current.expires_at && new Date(current.expires_at).getTime() <= Date.now()) {
+        throw new DeliveryStateConflictError("cannot requeue an expired message");
+      }
+      const result = await db.query<Row>(
+        `UPDATE agent_bridge.deliveries SET state='pending',
+         available_at=greatest(now(),coalesce($1::timestamptz,now())),
+         cycle_attempt=0,requeue_count=requeue_count+1,
+         lease_token=NULL,lease_owner=NULL,lease_expires_at=NULL,last_error=NULL,
+         last_actor=$2,last_action='requeue' WHERE id=$3 RETURNING *`,
+        [current.delivery_not_before, principal.agent, id],
+      );
+      return asDelivery(result.rows[0]!);
+    });
   }
 
   async diagnostics(principal: BridgePrincipal): Promise<BridgeDiagnostics> {
@@ -416,6 +613,7 @@ export class PostgresBridgeStore implements BridgeStore {
       claimed: counts.get("claimed") ?? 0,
       retrying: counts.get("retrying") ?? 0,
       dead: counts.get("dead") ?? 0,
+      cancelled: counts.get("cancelled") ?? 0,
       oldestAvailableAt: oldest,
     };
   }
@@ -468,11 +666,4 @@ export class PostgresBridgeStore implements BridgeStore {
     return result.rows.map(asPresence);
   }
 
-  async listDeliveryEvents(deliveryId: string): Promise<BridgeDeliveryEvent[]> {
-    const result = await this.db.query<Row>(
-      "SELECT * FROM agent_bridge.delivery_events WHERE delivery_id=$1 ORDER BY sequence",
-      [deliveryId],
-    );
-    return result.rows.map(asDeliveryEvent);
-  }
 }

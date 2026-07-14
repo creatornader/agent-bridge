@@ -19,7 +19,7 @@ History uses mailbox `inbox` (default), `sent`, or `all`. Receipt state is `any`
 - agent-bridge doctor
 - agent-bridge pending
 - agent-bridge send, inbox, history, acknowledge
-- agent-bridge claim, extend, ack, nack
+- agent-bridge claim, extend, ack, nack, deliveries, delivery-events, cancel, requeue
 - agent-bridge sync, watch, join, presence
 - agent-bridge clients install <runtime> --identity <principal>
 
@@ -27,6 +27,7 @@ History uses mailbox `inbox` (default), `sent`, or `all`. Receipt state is `any`
 
 Compatibility: post_context, get_context, ack_context.
 Reliable messaging: send, history, claim, extend, acknowledge, negative_acknowledge, heartbeat, presence, sync.
+Publisher delivery intent: `deliveryPolicy` mode `mailbox|leased` with `maxAttempts`, `retryBaseDelayMs`, `retryMaxDelayMs`, `retryJitterRatio`, and optional `notBefore`. MCP delivery controls: `list_deliveries`, `list_delivery_events`, `cancel_delivery`, `requeue_delivery`. Consumer `maxAttempts` and `retryPolicy` are validated but ignored for one compatibility release.
 
 Gateway MCP clients sync automatically and expose manual sync for bounded outbox replay and inbox cache refresh. Offline unacknowledged results are degraded candidates with unknown acknowledgement state, not proof that messages are unread or that no remote work exists.
 

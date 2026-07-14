@@ -356,8 +356,12 @@ describe("createAgentBridgeServer", () => {
     try {
       const tools = await client.listTools();
       expect(tools.tools.map((tool) => tool.name)).toContain("claim");
+      expect(tools.tools.map((tool) => tool.name)).toContain("list_deliveries");
+      expect(tools.tools.map((tool) => tool.name)).toContain("list_delivery_events");
       const send = tools.tools.find((tool) => tool.name === "send");
       const history = tools.tools.find((tool) => tool.name === "history");
+      const claimTool = tools.tools.find((tool) => tool.name === "claim");
+      const nackTool = tools.tools.find((tool) => tool.name === "negative_acknowledge");
       const getContext = tools.tools.find((tool) => tool.name === "get_context");
       const postContext = tools.tools.find((tool) => tool.name === "post_context");
       expect(getContext?.outputSchema?.required).toEqual(["entries"]);
@@ -372,6 +376,9 @@ describe("createAgentBridgeServer", () => {
         receiptState: { enum: ["any", "unread", "read"] },
       });
       expect(send?.inputSchema.properties).toHaveProperty("project");
+      expect(send?.inputSchema.properties.deliveryPolicy.properties).toHaveProperty("retryBaseDelayMs");
+      expect(claimTool?.inputSchema.properties).toHaveProperty("maxAttempts");
+      expect(nackTool?.inputSchema.properties).toHaveProperty("retryPolicy");
       expect(history?.inputSchema.properties).toHaveProperty("project");
       expect(getContext?.inputSchema.properties).toHaveProperty("project");
       expect(postContext?.inputSchema.properties).toHaveProperty("project");
@@ -468,6 +475,47 @@ describe("createAgentBridgeServer", () => {
         },
       });
       expect((acknowledged.structuredContent as any).state).toBe("acked");
+
+      await expect(client.callTool({
+        name: "claim",
+        arguments: { leaseMs: 30_000, maxAttempts: 0 },
+      })).rejects.toMatchObject({ code: ErrorCode.InvalidParams });
+      await client.callTool({
+        name: "send",
+        arguments: {
+          type: "work", content: "deprecated consumer policy", targets: ["codex"],
+          deliveryPolicy: { mode: "leased", maxAttempts: 1, retryJitterRatio: 0 },
+        },
+      });
+      const compatibilityClaim = await client.callTool({
+        name: "claim",
+        arguments: { leaseMs: 30_000, maxAttempts: 99 },
+      });
+      const compatibility = compatibilityClaim.structuredContent as any;
+      await expect(client.callTool({
+        name: "negative_acknowledge",
+        arguments: {
+          deliveryId: compatibility.delivery.id,
+          leaseToken: compatibility.leaseToken,
+          error: "invalid compatibility policy",
+          disposition: "retry",
+          retryPolicy: { maxAttempts: 0 },
+        },
+      })).rejects.toMatchObject({ code: ErrorCode.InvalidParams });
+      const compatibilityNack = await client.callTool({
+        name: "negative_acknowledge",
+        arguments: {
+          deliveryId: compatibility.delivery.id,
+          leaseToken: compatibility.leaseToken,
+          error: "stored policy wins",
+          disposition: "retry",
+          retryPolicy: {
+            maxAttempts: 99, baseDelayMs: 1,
+            maxDelayMs: 60_000, jitterRatio: 0,
+          },
+        },
+      });
+      expect((compatibilityNack.structuredContent as any).state).toBe("dead");
       const presence = await client.callTool({ name: "presence", arguments: {} });
       expect((presence.structuredContent as any).agents).toHaveLength(1);
       const legacyId = "00000000-0000-8000-8000-000000000003";

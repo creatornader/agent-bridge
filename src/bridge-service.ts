@@ -5,21 +5,49 @@ import {
   validateMessageDraft,
   validatePrincipal,
   validateProject,
-  validateRetryPolicy,
   validateUuid,
   type BridgeDelivery,
   type BridgeMessage,
   type BridgePrincipal,
   type MessageDraft,
-  type RetryPolicy,
   type AgentPresence,
+  type DeliveryState,
 } from "./bridge-domain.js";
 import type {
   BridgeStore,
+  DeliveryQuery,
   InsertMessageResult,
   MessagePage,
   MessageQuery,
 } from "./bridge-store.js";
+
+function validateDeprecatedMaxAttempts(value: unknown): void {
+  if (value === undefined) return;
+  if (!Number.isSafeInteger(value) || Number(value) < 1 || Number(value) > 100) {
+    throw new BridgeValidationError("maxAttempts must be between 1 and 100");
+  }
+}
+
+function validateDeprecatedRetryPolicy(value: unknown): void {
+  if (value === undefined) return;
+  if (value === null || typeof value !== "object" || Array.isArray(value)) {
+    throw new BridgeValidationError("retryPolicy must be an object");
+  }
+  const allowed = new Set(["maxAttempts", "baseDelayMs", "maxDelayMs", "jitterRatio"]);
+  for (const key of Object.keys(value)) {
+    if (!allowed.has(key)) throw new BridgeValidationError(`retryPolicy.${key} is not supported`);
+  }
+  const policy = value as Record<string, unknown>;
+  validateDeprecatedMaxAttempts(policy.maxAttempts);
+  for (const [key, maximum] of [["baseDelayMs", 3_600_000], ["maxDelayMs", 86_400_000]] as const) {
+    if (policy[key] !== undefined && (!Number.isSafeInteger(policy[key]) || Number(policy[key]) < 1 || Number(policy[key]) > maximum)) {
+      throw new BridgeValidationError(`${key} is invalid`);
+    }
+  }
+  if (policy.jitterRatio !== undefined && (!Number.isFinite(policy.jitterRatio) || Number(policy.jitterRatio) < 0 || Number(policy.jitterRatio) > 1)) {
+    throw new BridgeValidationError("jitterRatio must be between 0 and 1");
+  }
+}
 
 function validateLeaseMs(value = 30_000): number {
   if (!Number.isSafeInteger(value) || value < 1_000 || value > 15 * 60_000) {
@@ -121,9 +149,9 @@ export class BridgeService {
     options: { leaseMs?: number; maxAttempts?: number } = {},
   ): Promise<{ delivery: BridgeDelivery; leaseToken: string } | null> {
     const principal = validatePrincipal(principalInput);
+    validateDeprecatedMaxAttempts(options.maxAttempts);
     const delivery = await this.store.claimDelivery(principal, {
       leaseMs: validateLeaseMs(options.leaseMs),
-      maxAttempts: validateRetryPolicy({ maxAttempts: options.maxAttempts }).maxAttempts,
     });
     return delivery?.leaseToken ? { delivery, leaseToken: delivery.leaseToken } : null;
   }
@@ -155,7 +183,6 @@ export class BridgeService {
       validateUuid(leaseToken, "leaseToken"),
       "acked",
       undefined,
-      validateRetryPolicy(),
     );
   }
 
@@ -164,24 +191,67 @@ export class BridgeService {
     deliveryId: string,
     leaseToken: string,
     error: string,
-    dead = false,
-    retryPolicy: Partial<RetryPolicy> = {},
+    disposition: "retry" | "dead" | boolean = "retry",
+    deprecatedRetryPolicy?: unknown,
   ): Promise<BridgeDelivery | null> {
     const principal = validatePrincipal(principalInput);
-    if (typeof dead !== "boolean") {
-      throw new BridgeValidationError("dead must be a boolean");
+    if (!["retry", "dead", true, false].includes(disposition as never)) {
+      throw new BridgeValidationError("disposition must be retry or dead");
     }
     if (typeof error !== "string" || !error.trim()) {
       throw new BridgeValidationError("error is required");
     }
+    validateDeprecatedRetryPolicy(deprecatedRetryPolicy);
     return this.store.settleDelivery(
       principal,
       validateUuid(deliveryId, "deliveryId"),
       validateUuid(leaseToken, "leaseToken"),
-      dead ? "dead" : "retrying",
+      disposition === "dead" || disposition === true ? "dead" : "retrying",
       error.slice(0, 1_024),
-      validateRetryPolicy(retryPolicy),
     );
+  }
+
+  async deliveries(principalInput: BridgePrincipal, query: DeliveryQuery = {}) {
+    const principal = validatePrincipal(principalInput);
+    if (!this.store.listDeliveries) throw new BridgeValidationError("delivery listing is not supported by this provider");
+    const limit = query.limit ?? 50;
+    if (!Number.isSafeInteger(limit) || limit < 1 || limit > 200) throw new BridgeValidationError("limit must be between 1 and 200");
+    const role = query.role ?? "all";
+    if (!["recipient", "publisher", "all"].includes(role)) throw new BridgeValidationError("role is invalid");
+    const validStates: DeliveryState[] = ["pending", "claimed", "acked", "retrying", "dead", "cancelled"];
+    if (query.states !== undefined && (!Array.isArray(query.states) || query.states.some((state) => !validStates.includes(state)))) {
+      throw new BridgeValidationError("states contains an invalid delivery state");
+    }
+    const recipient = query.recipient?.trim();
+    if (recipient !== undefined && (!recipient || recipient.length > 128)) throw new BridgeValidationError("recipient is invalid");
+    return this.store.listDeliveries(principal, {
+      ...query,
+      role,
+      limit,
+      messageId: query.messageId ? validateUuid(query.messageId, "messageId") : undefined,
+      recipient,
+      states: query.states ? [...new Set(query.states)].sort() : undefined,
+    });
+  }
+
+  async deliveryEvents(principalInput: BridgePrincipal, deliveryId: string, query: { cursor?: string; limit?: number } = {}) {
+    const principal = validatePrincipal(principalInput);
+    if (!this.store.listDeliveryEvents) throw new BridgeValidationError("delivery event listing is not supported by this provider");
+    const limit = query.limit ?? 50;
+    if (!Number.isSafeInteger(limit) || limit < 1 || limit > 200) throw new BridgeValidationError("limit must be between 1 and 200");
+    return this.store.listDeliveryEvents(principal, validateUuid(deliveryId, "deliveryId"), { ...query, limit });
+  }
+
+  async cancel(principalInput: BridgePrincipal, deliveryId: string) {
+    const principal = validatePrincipal(principalInput);
+    if (!this.store.cancelDelivery) throw new BridgeValidationError("delivery cancellation is not supported by this provider");
+    return this.store.cancelDelivery(principal, validateUuid(deliveryId, "deliveryId"));
+  }
+
+  async requeue(principalInput: BridgePrincipal, deliveryId: string) {
+    const principal = validatePrincipal(principalInput);
+    if (!this.store.requeueDelivery) throw new BridgeValidationError("delivery requeue is not supported by this provider");
+    return this.store.requeueDelivery(principal, validateUuid(deliveryId, "deliveryId"));
   }
 
   async heartbeat(

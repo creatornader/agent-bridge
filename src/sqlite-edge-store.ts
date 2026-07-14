@@ -124,6 +124,9 @@ function canonical(value: JsonValue | undefined): string {
 }
 
 function intent(message: PendingMessage | BridgeMessage): JsonValue {
+  const deliveryPolicy = message.deliveryPolicy ?? (message.targets.length
+    ? { mode: "leased", maxAttempts: 5, retryBaseDelayMs: 1_000, retryMaxDelayMs: 60_000, retryJitterRatio: 0.2 }
+    : { mode: "mailbox" });
   return {
     workspace: message.workspace,
     project: message.project ?? null,
@@ -142,6 +145,7 @@ function intent(message: PendingMessage | BridgeMessage): JsonValue {
     atribReceiptId: message.atribReceiptId ?? null,
     informedBy: [...(message.informedBy ?? [])].sort(),
     metadata: message.metadata ?? null,
+    deliveryPolicy: deliveryPolicy as unknown as JsonValue,
   };
 }
 

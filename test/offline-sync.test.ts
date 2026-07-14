@@ -6,6 +6,7 @@ import { join } from "node:path";
 import { pathToFileURL } from "node:url";
 import { promisify } from "node:util";
 import { afterEach, describe, expect, it, vi } from "vitest";
+import { BridgeService } from "../src/bridge-service.js";
 import type {
   BridgeDelivery,
   BridgeMessage,
@@ -22,7 +23,7 @@ import type {
   MessagePage,
   MessageQuery,
 } from "../src/bridge-store.js";
-import { edgeScopeKey, SQLiteEdgeStore, stableIdempotency } from "../src/sqlite-edge-store.js";
+import { edgeMessageFingerprint, edgeScopeKey, SQLiteEdgeStore, stableIdempotency } from "../src/sqlite-edge-store.js";
 import { SQLiteBridgeStore } from "../src/sqlite-bridge-store.js";
 import { SyncingBridgeStore } from "../src/syncing-bridge-store.js";
 
@@ -39,6 +40,7 @@ class SwitchableRemote implements BridgeStore {
   online = false;
   insertFailure?: Error;
   failAfterCommit = false;
+  responseDeliveryPolicy?: BridgeMessage["deliveryPolicy"];
 
   constructor(readonly inner = new SQLiteBridgeStore()) {
     remoteStores.push(inner);
@@ -64,7 +66,9 @@ class SwitchableRemote implements BridgeStore {
         code: "request_timeout",
       });
     }
-    return result;
+    return this.responseDeliveryPolicy
+      ? { ...result, message: { ...result.message, deliveryPolicy: this.responseDeliveryPolicy } }
+      : result;
   }
 
   async listMessages(principal: BridgePrincipal, query?: MessageQuery): Promise<MessagePage> {
@@ -93,7 +97,7 @@ class SwitchableRemote implements BridgeStore {
     token: string,
     state: Extract<DeliveryState, "acked" | "retrying" | "dead">,
     error: string | undefined,
-    retryPolicy: RetryPolicy,
+    retryPolicy?: RetryPolicy,
   ): Promise<BridgeDelivery | null> {
     this.check();
     return this.inner.settleDelivery(principal, id, token, state, error, retryPolicy);
@@ -141,6 +145,49 @@ afterEach(async () => {
 });
 
 describe("offline SQLite synchronization", () => {
+  it("includes remote cancelled deliveries in syncing diagnostics", async () => {
+    const root = directory();
+    const principal = { workspace: "acme", agent: "worker", instance: "one" };
+    const publisher = { workspace: "acme", agent: "publisher" };
+    const remote = new SwitchableRemote(); remote.online = true;
+    const authority = new BridgeService(remote.inner);
+    await authority.publish(publisher, {
+      type: "work", content: "cancelled", targets: ["worker"],
+    });
+    const claim = await authority.claim(principal, { leaseMs: 1_000 });
+    await authority.cancel(publisher, claim!.delivery.id);
+    const syncing = new SyncingBridgeStore(
+      edge(join(root, "edge.sqlite3"), principal), remote, principal, { autoSync: false },
+    );
+    await syncing.initialize();
+    expect(await syncing.diagnostics(principal)).toMatchObject({ cancelled: 1 });
+    await syncing.close();
+  });
+
+  it("binds delivery policy into edge idempotency and recovery equivalence", async () => {
+    const root = directory(); const principal = { workspace: "acme", agent: "sender" };
+    const localEdge = edge(join(root, "edge.sqlite3"), principal);
+    const leased = {
+      ...draft(principal), targets: ["worker"],
+      deliveryPolicy: { mode: "leased" as const, maxAttempts: 2, retryBaseDelayMs: 1_000, retryMaxDelayMs: 60_000, retryJitterRatio: 0.2 },
+    };
+    const changed = { ...leased, deliveryPolicy: { ...leased.deliveryPolicy, maxAttempts: 3 } };
+    expect(edgeMessageFingerprint(leased)).not.toBe(edgeMessageFingerprint(changed));
+    await localEdge.enqueue(leased);
+    await expect(localEdge.enqueue(changed)).rejects.toMatchObject({ code: "edge_idempotency_conflict" });
+    await localEdge.close();
+
+    const recoveryEdge = edge(join(root, "recovery.sqlite3"), principal);
+    const remote = new SwitchableRemote(); remote.online = true;
+    remote.responseDeliveryPolicy = { ...leased.deliveryPolicy, maxAttempts: 4 };
+    const syncing = new SyncingBridgeStore(recoveryEdge, remote, principal, { autoSync: false });
+    await syncing.initialize();
+    await expect(syncing.insertMessage({
+      ...leased, id: "018f4a70-0000-7000-8000-000000000102",
+    })).rejects.toMatchObject({ code: "idempotency_conflict", status: 409 });
+    expect(await syncing.diagnostics(principal)).toMatchObject({ outboxPending: 0, outboxBlocked: 1 });
+    await syncing.close();
+  });
   it("shares one edge initialization across concurrent calls on the same store", async () => {
     const root = directory();
     const principal = { workspace: "acme", agent: "sender" };

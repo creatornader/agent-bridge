@@ -64,7 +64,13 @@ The v2 envelope uses fields that can be mapped to CloudEvents without changing s
 
 A receipt records that a principal read a message.
 
-A delivery records executable work for a recipient. Its state is one of `pending`, `claimed`, `acked`, `retrying`, or `dead`. A claim includes an opaque lease token, owner instance, expiry time, and attempt number.
+A publisher stores an immutable `deliveryPolicy` with each message. Untargeted messages default to mailbox mode. Targeted messages default to leased mode with `maxAttempts: 5`, `retryBaseDelayMs: 1000`, `retryMaxDelayMs: 60000`, and `retryJitterRatio: 0.2`. Leased policy may also set `notBefore`. Mailbox messages create no deliveries, and legacy mode rejects leased policy.
+
+A leased delivery records executable work for a recipient. Its state is one of `pending`, `claimed`, `acked`, `retrying`, `dead`, or `cancelled`. `attempt` is lifetime-monotonic, while `cycleAttempt` resets on publisher requeue and `requeueCount` increments. Stored policy owns retry and exhaustion. Claims order due work by urgent, high, then info priority, followed by availability, message creation time, and the stable delivery ID tie-break.
+
+Consumer-side `maxAttempts` on claim and `retryPolicy` on nack are compatibility inputs for one release. The service validates them and ignores them. This keeps older clients working without letting a consumer change immutable publisher intent.
+
+Migration 010 uses `nack_retry` as a conservative compatibility mapping for a legacy `claimed` to `retrying` event. In v0.2 the same stored transition could come from an explicit nack or lease-expiry recovery, so the migrated action describes the retry transition and does not prove which cause produced it. When a legacy settlement event has no lease owner, migration recovers its actor from the preceding claim for the same delivery attempt.
 
 A receipt does not change delivery state. A claim or settlement does not create a receipt. Lease renewal proves only that the current owner retained its claim. External task completion belongs to A2A or the application layer and must be recorded separately when a workflow needs both task state and delivery settlement.
 
@@ -79,6 +85,7 @@ The legacy Supabase schema has no tenant workspace column. Its adapter reports w
 The delivery API supports:
 
 - Atomic claim with row locking.
+- Publisher-only cancel and dead/cancelled requeue, both fencing prior leases. Publisher and recipient can page deliveries and audit events; unrelated callers learn no existence information.
 - Lease renewal for long-running work.
 - Acknowledgment after successful processing.
 - Negative acknowledgment with a bounded error message.

@@ -18,6 +18,7 @@ PostgreSQL remains the authority in gateway mode. SQLite holds local-only messag
 - Indexed source, thread, timestamp, workspace, and delivery queries.
 - Read receipts separated from executable delivery state.
 - Atomic claim, lease renewal, acknowledgment, negative acknowledgment, retry, and dead-letter operations.
+- Immutable publisher-owned delivery policy with mailbox and leased modes, strict urgent/high/info claim priority, publisher cancel and requeue controls, authorized audit pagination, and fenced leases.
 - Append-only delivery transition history.
 - Idempotency conflict detection. Exact replay deduplicates; changed content under the same key fails.
 - Scoped credentials that bind a remote workspace and agent principal.
@@ -225,6 +226,11 @@ agent-bridge get --since 24h --unacked-by codex
 agent-bridge history --thread-id release-1
 agent-bridge acknowledge --ids <message-uuid>
 agent-bridge claim --lease-ms 30000
+agent-bridge send --target worker --delivery-policy '{"mode":"leased","maxAttempts":3,"retryBaseDelayMs":1000,"retryMaxDelayMs":60000,"retryJitterRatio":0.2}' "work"
+agent-bridge deliveries --state dead
+agent-bridge delivery-events --delivery-id <uuid>
+agent-bridge cancel --delivery-id <uuid>
+agent-bridge requeue --delivery-id <uuid>
 agent-bridge extend --delivery-id <uuid> --lease-token <uuid>
 agent-bridge ack --delivery-id <uuid> --lease-token <uuid>
 agent-bridge nack --delivery-id <uuid> --lease-token <uuid> --error "retry later"
@@ -237,6 +243,8 @@ agent-bridge watch
 `--project` adds an optional immutable label to a message. It never selects a workspace or changes the active identity. Omit it on reads to include every project and unlabeled messages in the credential-bound workspace. Pass it to `get`, `inbox`, `history`, `pending`, or `watch` for an exact label match. Gateway callers may use `--workspace` only as an assertion. The CLI rejects a mismatch before sending a request. Local mode permits a per-command workspace override. The global legacy Supabase schema has no tenant workspace, so legacy mode fixes workspace to `*` and rejects other `--workspace` values.
 
 History defaults to mailbox `inbox`: broadcasts plus messages targeted to the configured principal, exactly as prior releases did. `sent` selects messages whose source is that principal, and `all` is the union. `--receipt-state any|unread|read` is caller-relative and valid only with `inbox`. The deprecated `--unacked-by` option remains an identity assertion. The CLI rejects a mismatch before opening storage or contacting a gateway. Server surfaces reject it before querying message storage. Cursors bind workspace, principal, mailbox, and normalized filters. Version 1 cursors are temporarily accepted, while all new cursors are version 2.
+
+Publishers set `deliveryPolicy` on the message. Leased policy uses `maxAttempts`, `retryBaseDelayMs`, `retryMaxDelayMs`, `retryJitterRatio`, and optional `notBefore`. Consumers cannot override those values. Consumer-side `maxAttempts` on claim and `retryPolicy` on nack remain validated but ignored for one compatibility release. New code should omit both fields.
 
 The legacy Supabase adapter applies mailbox and receipt rules cooperatively. A holder of the legacy publishable key can bypass the adapter through PostgREST or its receipt RPC. Use the authenticated v2 gateway when the authorization boundary must be enforced.
 
@@ -263,6 +271,10 @@ Local and gateway providers also expose:
 - `extend`
 - `acknowledge`
 - `negative_acknowledge`
+- `list_deliveries`
+- `list_delivery_events`
+- `cancel_delivery`
+- `requeue_delivery`
 - `heartbeat`
 - `presence`
 

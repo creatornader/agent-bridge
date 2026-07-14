@@ -32,6 +32,7 @@ function fingerprint(message: Omit<BridgeMessage, "sequence" | "createdAt">): st
     atribReceiptId: message.atribReceiptId ?? null,
     informedBy: [...(message.informedBy ?? [])].sort(),
     metadata: message.metadata ?? null,
+    deliveryPolicy: { ...(message.deliveryPolicy ?? (message.targets.length ? { mode: "leased", maxAttempts: 5, retryBaseDelayMs: 1_000, retryMaxDelayMs: 60_000, retryJitterRatio: 0.2 } : { mode: "mailbox" })) } as unknown as JsonValue,
   };
   return createHash("sha256").update(canonical(value)).digest("hex");
 }

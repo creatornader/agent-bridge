@@ -14,6 +14,6 @@ describe("PostgresBridgeStore", () => {
     expect(history?.sql).toContain("expires_at IS NULL OR expires_at > now()");
     const claim = calls.find((call) => call.sql.includes("FOR UPDATE OF delivery SKIP LOCKED"));
     expect(claim?.sql).toContain("FOR UPDATE OF delivery SKIP LOCKED");
-    expect(claim?.sql).toContain("lease_expires_at");
+    expect(calls.some((call) => call.sql.includes("lease_expires_at<=now()"))).toBe(true);
   });
 });
