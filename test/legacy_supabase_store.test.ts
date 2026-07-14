@@ -70,6 +70,109 @@ describe("LegacySupabaseRestStore", () => {
     expect(page.messages[0]?.id).toBe(legacyMessageIdFromSequence(sequence));
   });
 
+  it("preserves project labels on legacy writes", async () => {
+    const fetchImpl = vi.fn<typeof fetch>(async (input, init) => {
+      if (String(input).includes("metadata=cs.")) return Response.json([]);
+      expect(JSON.parse(String(init?.body))).toMatchObject({ project: "project-alpha" });
+      return Response.json([{
+        id: 42,
+        source: "codex",
+        category: "operational",
+        content: "project-scoped",
+        priority: "info",
+        project: "project-alpha",
+        metadata: {},
+        acked_by: [],
+        created_at: "2026-07-14T00:00:00.000Z",
+      }]);
+    });
+    const store = new LegacySupabaseRestStore("https://example.test", "key", fetchImpl);
+    const result = await store.insertMessage({
+      id: "018f4a70-0000-7000-8000-000000000012",
+      workspace: "agent-bridge",
+      project: "project-alpha",
+      source: "codex",
+      type: "operational",
+      content: "project-scoped",
+      contentType: "text/plain",
+      targets: [],
+      priority: "info",
+    });
+    expect(result.message).toMatchObject({ workspace: "agent-bridge", project: "project-alpha" });
+  });
+
+  it("replays an exact legacy UUID and rejects changed immutable intent", async () => {
+    let stored: Record<string, unknown> | undefined;
+    const fetchImpl = vi.fn<typeof fetch>(async (input, init) => {
+      if (String(input).includes("metadata=cs.")) {
+        return Response.json(stored ? [stored] : []);
+      }
+      const body = JSON.parse(String(init?.body)) as Record<string, unknown>;
+      stored = {
+        id: 42,
+        ...body,
+        acked_by: [],
+        created_at: "2026-07-14T00:00:00.000Z",
+      };
+      return Response.json([stored]);
+    });
+    const store = new LegacySupabaseRestStore("https://example.test", "key", fetchImpl);
+    const exact = {
+      id: "018f4a70-0000-7000-8000-000000000013",
+      workspace: "agent-bridge",
+      project: "project-alpha",
+      source: "codex",
+      type: "operational",
+      content: "stable intent",
+      contentType: "text/plain",
+      targets: [] as string[],
+      priority: "info" as const,
+    };
+
+    expect(await store.insertMessage(exact)).toMatchObject({ created: true });
+    expect(await store.insertMessage(exact)).toMatchObject({
+      created: false,
+      message: { id: exact.id, project: "project-alpha", content: "stable intent" },
+    });
+    await expect(store.insertMessage({ ...exact, project: "project-beta" }))
+      .rejects.toMatchObject({ status: 409, code: "idempotency_conflict" });
+    await expect(store.insertMessage({ ...exact, content: "changed intent" }))
+      .rejects.toMatchObject({ status: 409, code: "idempotency_conflict" });
+    expect(fetchImpl.mock.calls.filter(([, init]) => init?.method === "POST")).toHaveLength(1);
+  });
+
+  it("uses exact project filtering and leaves omitted reads cross-project", async () => {
+    const rows = [
+      {
+        id: 1, source: "codex", category: "operational", content: "alpha",
+        priority: "info", project: "project-alpha", metadata: {}, acked_by: [],
+        created_at: "2026-07-14T00:00:00.000Z",
+      },
+      {
+        id: 2, source: "codex", category: "operational", content: "unlabeled",
+        priority: "info", project: null, metadata: {}, acked_by: [],
+        created_at: "2026-07-14T00:00:01.000Z",
+      },
+    ];
+    const urls: string[] = [];
+    const fetchImpl = vi.fn<typeof fetch>(async (input) => {
+      const url = String(input);
+      urls.push(url);
+      return Response.json(url.includes("project=eq.project-alpha") ? [rows[0]] : rows);
+    });
+    const store = new LegacySupabaseRestStore("https://example.test", "key", fetchImpl);
+
+    expect((await store.listMessages(
+      { workspace: "agent-bridge", agent: "codex" },
+      { project: "project-alpha" },
+    )).messages.map((message) => message.content)).toEqual(["alpha"]);
+    expect((await store.listMessages(
+      { workspace: "agent-bridge", agent: "codex" },
+    )).messages.map((message) => message.content)).toEqual(["alpha", "unlabeled"]);
+    expect(urls[0]).toContain("project=eq.project-alpha");
+    expect(urls[1]).not.toContain("project=eq.");
+  });
+
   it("paginates newest-first legacy reads until envelope filters match", async () => {
     const irrelevant = Array.from({ length: 50 }, (_, index) => ({
       id: 100 - index,

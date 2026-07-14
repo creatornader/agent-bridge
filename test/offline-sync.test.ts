@@ -1,6 +1,10 @@
+import { execFile } from "node:child_process";
 import { mkdtempSync, rmSync } from "node:fs";
+import { createRequire } from "node:module";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { pathToFileURL } from "node:url";
+import { promisify } from "node:util";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type {
   BridgeDelivery,
@@ -17,12 +21,14 @@ import type {
   MessagePage,
   MessageQuery,
 } from "../src/bridge-store.js";
-import { SQLiteEdgeStore, stableIdempotency } from "../src/sqlite-edge-store.js";
+import { edgeScopeKey, SQLiteEdgeStore, stableIdempotency } from "../src/sqlite-edge-store.js";
 import { SQLiteBridgeStore } from "../src/sqlite-bridge-store.js";
 import { SyncingBridgeStore } from "../src/syncing-bridge-store.js";
 
 const directories: string[] = [];
 const remoteStores: SQLiteBridgeStore[] = [];
+const require = createRequire(import.meta.url);
+const execFileAsync = promisify(execFile);
 
 function networkError(): Error {
   return Object.assign(new Error("gateway unavailable"), { status: 0, code: "network_error" });
@@ -163,6 +169,53 @@ describe("offline SQLite synchronization", () => {
     expect(cached).toMatchObject({ source: "cache", stale: true });
     expect(cached.messages.map((message) => message.content)).toEqual(["durable offline work"]);
     await restarted.close();
+  });
+
+  it("preserves project labels through replay and exact cache filtering", async () => {
+    const root = directory();
+    const principal = { workspace: "acme", agent: "sender", instance: "desktop" };
+    const remote = new SwitchableRemote();
+    const syncing = new SyncingBridgeStore(
+      edge(join(root, "edge.sqlite3"), principal),
+      remote,
+      principal,
+      { autoSync: false },
+    );
+    await syncing.initialize();
+    await syncing.insertMessage({
+      ...draft(principal),
+      project: "project-alpha",
+      idempotencyKey: "offline-project-key",
+    });
+
+    remote.online = true;
+    expect(await syncing.sync()).toMatchObject({ pushed: 1, pending: 0, cached: 1 });
+    expect((await remote.inner.listMessages(principal, { project: "project-alpha" })).messages)
+      .toMatchObject([{ project: "project-alpha", content: "durable offline work" }]);
+
+    remote.online = false;
+    expect((await syncing.listMessages(principal, { project: "project-alpha" })).messages)
+      .toMatchObject([{ project: "project-alpha" }]);
+    expect((await syncing.listMessages(principal, { project: "project-beta" })).messages)
+      .toEqual([]);
+    expect((await syncing.listMessages(principal)).messages)
+      .toMatchObject([{ project: "project-alpha" }]);
+    await syncing.close();
+  });
+
+  it("rejects an offline idempotency replay when only its project changes", async () => {
+    const root = directory();
+    const principal = { workspace: "acme", agent: "sender" };
+    const localEdge = edge(join(root, "edge.sqlite3"), principal);
+    const first = {
+      ...draft(principal),
+      project: "project-alpha",
+      idempotencyKey: "offline-project-key",
+    };
+    await localEdge.enqueue(first);
+    await expect(localEdge.enqueue({ ...first, project: "project-beta" }))
+      .rejects.toMatchObject({ code: "edge_idempotency_conflict" });
+    await localEdge.close();
   });
 
   it("deduplicates an ambiguous committed send and preserves cache scope isolation", async () => {
@@ -553,4 +606,95 @@ describe("offline SQLite synchronization", () => {
     });
     await syncing.close();
   });
+
+  it("adds the project cache column without losing prior edge history", async () => {
+    const root = directory();
+    const path = join(root, "edge.sqlite3");
+    const principal = { workspace: "acme", agent: "sender" };
+    const scope = { endpoint: "https://bridge.example.test", principal };
+    const scopeKey = edgeScopeKey(scope);
+    const { DatabaseSync } = require("node:sqlite") as typeof import("node:sqlite");
+    const legacy = new DatabaseSync(path);
+    const message = {
+      ...draft(principal),
+      sequence: "1",
+      createdAt: "2026-07-14T00:00:00.000Z",
+    };
+    legacy.exec(`
+      CREATE TABLE edge_scopes (
+        scope_key TEXT PRIMARY KEY, endpoint_hash TEXT NOT NULL, workspace TEXT NOT NULL,
+        agent TEXT NOT NULL, pull_cursor TEXT, last_sync_at TEXT, last_error TEXT
+      );
+      CREATE TABLE edge_inbox (
+        scope_key TEXT NOT NULL REFERENCES edge_scopes(scope_key), message_id TEXT NOT NULL,
+        remote_sequence TEXT NOT NULL, sequence_key TEXT NOT NULL, workspace TEXT NOT NULL,
+        source TEXT NOT NULL, type TEXT NOT NULL, thread_id TEXT, created_at TEXT NOT NULL,
+        expires_at TEXT, message_json TEXT NOT NULL, PRIMARY KEY(scope_key, message_id),
+        UNIQUE(scope_key, sequence_key)
+      );
+    `);
+    legacy.prepare(`INSERT INTO edge_scopes
+      (scope_key, endpoint_hash, workspace, agent) VALUES (?, ?, ?, ?)`)
+      .run(scopeKey, "legacy-endpoint-hash", principal.workspace, principal.agent);
+    legacy.prepare(`INSERT INTO edge_inbox
+      (scope_key, message_id, remote_sequence, sequence_key, workspace, source, type,
+       thread_id, created_at, expires_at, message_json)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`)
+      .run(scopeKey, message.id, "1", "0000000000000000001", principal.workspace,
+        principal.agent, message.type, null, message.createdAt, null, JSON.stringify(message));
+    legacy.close();
+
+    const upgraded = edge(path, principal);
+    await upgraded.initialize();
+    expect((await upgraded.list()).messages).toMatchObject([{
+      id: message.id,
+      content: "durable offline work",
+    }]);
+    await upgraded.close();
+  });
+
+  it("allows concurrent processes to perform the first edge project-column upgrade", async () => {
+    const root = directory();
+    const path = join(root, "edge.sqlite3");
+    const principal = { workspace: "acme", agent: "sender" };
+    const { DatabaseSync } = require("node:sqlite") as typeof import("node:sqlite");
+    const legacy = new DatabaseSync(path);
+    legacy.exec(`
+      CREATE TABLE edge_scopes (
+        scope_key TEXT PRIMARY KEY, endpoint_hash TEXT NOT NULL, workspace TEXT NOT NULL,
+        agent TEXT NOT NULL, pull_cursor TEXT, last_sync_at TEXT, last_error TEXT
+      );
+      CREATE TABLE edge_inbox (
+        scope_key TEXT NOT NULL REFERENCES edge_scopes(scope_key), message_id TEXT NOT NULL,
+        remote_sequence TEXT NOT NULL, sequence_key TEXT NOT NULL, workspace TEXT NOT NULL,
+        source TEXT NOT NULL, type TEXT NOT NULL, thread_id TEXT, created_at TEXT NOT NULL,
+        expires_at TEXT, message_json TEXT NOT NULL, PRIMARY KEY(scope_key, message_id),
+        UNIQUE(scope_key, sequence_key)
+      );
+    `);
+    legacy.close();
+
+    const sqliteModule = pathToFileURL(join(process.cwd(), "dist/sqlite.js")).href;
+    const script = `
+      import { SQLiteEdgeStore } from ${JSON.stringify(sqliteModule)};
+      const edge = new SQLiteEdgeStore(process.env.AGENT_BRIDGE_TEST_DB, {
+        endpoint: "https://bridge.example.test",
+        principal: { workspace: "acme", agent: "sender" },
+      });
+      await edge.initialize();
+      await edge.close();
+    `;
+    await Promise.all(Array.from({ length: 8 }, () => execFileAsync(
+      process.execPath,
+      ["--input-type=module", "--eval", script],
+      { env: { ...process.env, AGENT_BRIDGE_TEST_DB: path } },
+    )));
+
+    const upgraded = new DatabaseSync(path);
+    const columns = upgraded.prepare("PRAGMA table_info(edge_inbox)").all() as Array<{
+      name: string;
+    }>;
+    expect(columns.filter((column) => column.name === "project")).toHaveLength(1);
+    upgraded.close();
+  }, 15_000);
 });

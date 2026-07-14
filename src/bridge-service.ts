@@ -3,6 +3,7 @@ import {
   encodeCursor,
   validateMessageDraft,
   validatePrincipal,
+  validateProject,
   validateRetryPolicy,
   validateUuid,
   type BridgeDelivery,
@@ -65,7 +66,7 @@ function validateQuery(query: MessageQuery): MessageQuery {
   if (query.latest && query.cursor) {
     throw new BridgeValidationError("latest cannot be combined with cursor");
   }
-  return { ...query, limit, source, since, unacknowledgedBy, threadId, latest: query.latest === true };
+  return { ...query, project: validateProject(query.project), limit, source, since, unacknowledgedBy, threadId, latest: query.latest === true };
 }
 
 export class BridgeService {

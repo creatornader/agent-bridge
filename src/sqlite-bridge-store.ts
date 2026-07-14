@@ -17,7 +17,7 @@ PRAGMA journal_mode = WAL;
 PRAGMA synchronous = FULL;
 PRAGMA foreign_keys = ON;
 CREATE TABLE IF NOT EXISTS bridge_messages (
- sequence INTEGER PRIMARY KEY AUTOINCREMENT, id TEXT NOT NULL UNIQUE, workspace TEXT NOT NULL, source TEXT NOT NULL,
+ sequence INTEGER PRIMARY KEY AUTOINCREMENT, id TEXT NOT NULL UNIQUE, workspace TEXT NOT NULL, project TEXT, source TEXT NOT NULL,
  type TEXT NOT NULL, content TEXT NOT NULL, content_type TEXT NOT NULL, data TEXT, targets TEXT NOT NULL DEFAULT '[]',
  thread_id TEXT, reply_to_id TEXT, correlation_id TEXT, causation_id TEXT, priority TEXT NOT NULL, expires_at TEXT,
  idempotency_key TEXT, atrib_receipt_id TEXT, informed_by TEXT, metadata TEXT, created_at TEXT NOT NULL,
@@ -73,7 +73,7 @@ CREATE TRIGGER IF NOT EXISTS bridge_messages_no_delete BEFORE DELETE ON bridge_m
 
 function stringify(value: unknown): string | null { return value === undefined ? null : JSON.stringify(value); }
 function parse(value: unknown): any { return typeof value === "string" ? JSON.parse(value) : undefined; }
-function message(row: Row): BridgeMessage { return { id: String(row.id), workspace: String(row.workspace), source: String(row.source), sequence: String(row.sequence), type: String(row.type), content: String(row.content), contentType: String(row.content_type), data: parse(row.data), targets: parse(row.targets) ?? [], threadId: row.thread_id as string | undefined, replyToId: row.reply_to_id as string | undefined, correlationId: row.correlation_id as string | undefined, causationId: row.causation_id as string | undefined, priority: row.priority as BridgeMessage["priority"], expiresAt: row.expires_at as string | undefined, idempotencyKey: row.idempotency_key as string | undefined, atribReceiptId: row.atrib_receipt_id as string | undefined, informedBy: parse(row.informed_by), metadata: parse(row.metadata), createdAt: String(row.created_at) }; }
+function message(row: Row): BridgeMessage { return { id: String(row.id), workspace: String(row.workspace), project: row.project == null ? undefined : String(row.project), source: String(row.source), sequence: String(row.sequence), type: String(row.type), content: String(row.content), contentType: String(row.content_type), data: parse(row.data), targets: parse(row.targets) ?? [], threadId: row.thread_id as string | undefined, replyToId: row.reply_to_id as string | undefined, correlationId: row.correlation_id as string | undefined, causationId: row.causation_id as string | undefined, priority: row.priority as BridgeMessage["priority"], expiresAt: row.expires_at as string | undefined, idempotencyKey: row.idempotency_key as string | undefined, atribReceiptId: row.atrib_receipt_id as string | undefined, informedBy: parse(row.informed_by), metadata: parse(row.metadata), createdAt: String(row.created_at) }; }
 function delivery(row: Row): BridgeDelivery { return { id: String(row.id), messageId: String(row.message_id), workspace: String(row.workspace), recipient: String(row.recipient), state: row.state as BridgeDelivery["state"], attempt: Number(row.attempt), availableAt: String(row.available_at), leaseToken: row.lease_token as string | undefined, leaseOwner: row.lease_owner as string | undefined, leaseExpiresAt: row.lease_expires_at as string | undefined, lastError: row.last_error as string | undefined }; }
 function presence(row: Row): AgentPresence { return { workspace: String(row.workspace), agent: String(row.agent), instance: String(row.instance), runtimeType: row.runtime_type as string | undefined, capabilities: parse(row.capabilities) ?? [], leaseExpiresAt: String(row.lease_expires_at), lastSeenAt: String(row.last_seen_at) }; }
 function deliveryEvent(row: Row): BridgeDeliveryEvent { return { sequence: String(row.sequence), deliveryId: String(row.delivery_id), messageId: String(row.message_id), workspace: String(row.workspace), recipient: String(row.recipient), fromState: row.from_state as BridgeDeliveryEvent["fromState"], toState: row.to_state as BridgeDeliveryEvent["toState"], attempt: Number(row.attempt), leaseOwner: row.lease_owner as string | undefined, error: row.error as string | undefined, createdAt: String(row.created_at) }; }
@@ -81,21 +81,21 @@ function deliveryEvent(row: Row): BridgeDeliveryEvent { return { sequence: Strin
 export class SQLiteBridgeStore implements BridgeStore {
   private readonly db: Database;
   private initialized = false;
-  constructor(private readonly path = ":memory:", private readonly busyTimeoutMs = 2_000) { this.db = openDatabase(path); this.restrictFiles(); }
+  constructor(private readonly path = ":memory:", private readonly busyTimeoutMs = 2_000) { this.db = openDatabase(path); this.db.exec(`PRAGMA busy_timeout = ${Math.max(1, Math.trunc(this.busyTimeoutMs))}`); this.restrictFiles(); }
   private restrictFiles(): void {
     if (this.path === ":memory:") return;
     for (const path of [this.path, `${this.path}-wal`, `${this.path}-shm`]) {
       if (existsSync(path)) chmodSync(path, 0o600);
     }
   }
-  async initialize(): Promise<void> { if (this.initialized) return; const versionRow = this.db.prepare("SELECT sqlite_version() AS version").get() as Row; const parts = String(versionRow.version).split(".").map(Number); const encoded = (parts[0] ?? 0) * 1_000_000 + (parts[1] ?? 0) * 1_000 + (parts[2] ?? 0); if (encoded < 3_051_003) throw new Error("SQLite 3.51.3 or newer is required"); this.db.exec(`PRAGMA busy_timeout = ${Math.max(1, Math.trunc(this.busyTimeoutMs))}; ${schema}`); this.restrictFiles(); this.initialized = true; }
+  async initialize(): Promise<void> { if (this.initialized) return; const versionRow = this.db.prepare("SELECT sqlite_version() AS version").get() as Row; const parts = String(versionRow.version).split(".").map(Number); const encoded = (parts[0] ?? 0) * 1_000_000 + (parts[1] ?? 0) * 1_000 + (parts[2] ?? 0); if (encoded < 3_051_003) throw new Error("SQLite 3.51.3 or newer is required"); this.db.exec(`PRAGMA busy_timeout = ${Math.max(1, Math.trunc(this.busyTimeoutMs))}; ${schema}`); this.db.exec("BEGIN IMMEDIATE"); try { const columns = this.db.prepare("PRAGMA table_info(bridge_messages)").all() as Row[]; if (!columns.some((column) => column.name === "project")) this.db.exec("ALTER TABLE bridge_messages ADD COLUMN project TEXT"); this.db.exec("CREATE INDEX IF NOT EXISTS bridge_messages_project ON bridge_messages(workspace, project, sequence)"); this.db.exec("COMMIT"); } catch (error) { this.db.exec("ROLLBACK"); throw error; } this.restrictFiles(); this.initialized = true; }
   private async ready() { await this.initialize(); }
   async insertMessage(input: Omit<BridgeMessage, "sequence" | "createdAt">): Promise<InsertMessageResult> {
     await this.ready(); const createdAt = new Date().toISOString();
     this.db.exec("BEGIN IMMEDIATE");
     try {
       if (input.idempotencyKey) { const existing = this.db.prepare("SELECT * FROM bridge_messages WHERE workspace = ? AND source = ? AND idempotency_key = ?").get(input.workspace, input.source, input.idempotencyKey) as Row | undefined; if (existing) { const replay = message(existing); assertIdempotentReplay(replay, input); this.db.exec("COMMIT"); return { message: replay, created: false }; } }
-      this.db.prepare(`INSERT INTO bridge_messages (id,workspace,source,type,content,content_type,data,targets,thread_id,reply_to_id,correlation_id,causation_id,priority,expires_at,idempotency_key,atrib_receipt_id,informed_by,metadata,created_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`).run(input.id,input.workspace,input.source,input.type,input.content,input.contentType,stringify(input.data),JSON.stringify(input.targets),input.threadId ?? null,input.replyToId ?? null,input.correlationId ?? null,input.causationId ?? null,input.priority,input.expiresAt ?? null,input.idempotencyKey ?? null,input.atribReceiptId ?? null,stringify(input.informedBy),stringify(input.metadata),createdAt);
+      this.db.prepare(`INSERT INTO bridge_messages (id,workspace,project,source,type,content,content_type,data,targets,thread_id,reply_to_id,correlation_id,causation_id,priority,expires_at,idempotency_key,atrib_receipt_id,informed_by,metadata,created_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`).run(input.id,input.workspace,input.project ?? null,input.source,input.type,input.content,input.contentType,stringify(input.data),JSON.stringify(input.targets),input.threadId ?? null,input.replyToId ?? null,input.correlationId ?? null,input.causationId ?? null,input.priority,input.expiresAt ?? null,input.idempotencyKey ?? null,input.atribReceiptId ?? null,stringify(input.informedBy),stringify(input.metadata),createdAt);
       for (const recipient of input.targets) this.db.prepare("INSERT INTO bridge_deliveries (id,message_id,workspace,recipient,state,available_at) VALUES (?,?,?,?,?,?)").run(randomUUID(), input.id, input.workspace, recipient, "pending", createdAt);
       const row = this.db.prepare("SELECT * FROM bridge_messages WHERE id = ?").get(input.id) as Row; this.db.exec("COMMIT"); return { message: message(row), created: true };
     } catch (error) { this.db.exec("ROLLBACK"); throw error; }
@@ -111,6 +111,7 @@ export class SQLiteBridgeStore implements BridgeStore {
     if (!query.includeExpired) { clauses.push("(expires_at IS NULL OR expires_at > ?)"); args.push(now); }
     if (query.types?.length) { clauses.push(`type IN (${query.types.map(() => "?").join(",")})`); args.push(...query.types); }
     if (query.source) { clauses.push("source = ?"); args.push(query.source); }
+    if (query.project) { clauses.push("project = ?"); args.push(query.project); }
     if (query.since) { clauses.push("created_at >= ?"); args.push(query.since); }
     if (query.unacknowledgedBy) {
       clauses.push("NOT EXISTS (SELECT 1 FROM bridge_receipts receipt WHERE receipt.workspace=bridge_messages.workspace AND receipt.message_id=bridge_messages.id AND receipt.principal=?)");

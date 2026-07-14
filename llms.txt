@@ -47,6 +47,9 @@ Lease extension does not report progress or external task completion.
 
 The active runtime supplies AGENT_BRIDGE_AGENT and AGENT_BRIDGE_INSTANCE. Do not hardcode another client name and do not store agent identity in the shared backend config. Gateway installations use a separate principal-bound token and owner-only backend file for each client.
 
+Project is an optional immutable message label, not a tenant or identity selector. Omitted project reads include labeled and unlabeled messages. Exact project filters are supported by CLI, MCP, HTTP, and stores. Gateway workspace assertions must match the bound credential before network access.
+Local CLI calls may override workspace for one invocation. The legacy Supabase schema is global and always reports workspace `*`; use project labels for legacy filtering.
+
 ## References
 
 - README.md: setup, commands, security, and provider behavior

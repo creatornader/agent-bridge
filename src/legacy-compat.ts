@@ -57,7 +57,7 @@ export function legacyContextMetadata(message: BridgeMessage): Record<string, Js
     target_agents: message.targets,
     payload_mime: message.contentType,
   };
-  if (message.workspace !== "*") envelope.project = message.workspace;
+  if (message.project) envelope.project = message.project;
   if (message.threadId) envelope.thread_id = message.threadId;
   if (message.replyToId) envelope.reply_to_id = message.replyToId;
   if (message.correlationId) envelope.correlation_id = message.correlationId;

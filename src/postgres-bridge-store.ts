@@ -46,6 +46,7 @@ function asMessage(row: Row): BridgeMessage {
   return {
     id: String(row.id),
     workspace: String(row.workspace),
+    project: row.project ?? undefined,
     source: String(row.source),
     sequence: String(row.sequence),
     type: String(row.type),
@@ -115,6 +116,7 @@ export class PostgresBridgeStore implements BridgeStore {
     const values = [
       input.id,
       input.workspace,
+      input.project ?? null,
       input.source,
       input.type,
       input.content,
@@ -136,13 +138,13 @@ export class PostgresBridgeStore implements BridgeStore {
     const result = await this.db.query<Row>(
       `WITH inserted AS (
          INSERT INTO agent_bridge.messages (
-           id, workspace, source, type, content, content_type, data, targets,
+           id, workspace, project, source, type, content, content_type, data, targets,
            thread_id, reply_to_id, correlation_id, causation_id, priority,
            expires_at, idempotency_key, atrib_receipt_id, informed_by, metadata
          )
          VALUES (
-           $1, $2, $3, $4, $5, $6, $7::jsonb, $8::jsonb,
-           $9, $10, $11, $12, $13, $14, $15, $16, $17::jsonb, $18::jsonb
+           $1, $2, $3, $4, $5, $6, $7, $8::jsonb, $9::jsonb,
+           $10, $11, $12, $13, $14, $15, $16, $17, $18::jsonb, $19::jsonb
          )
          ON CONFLICT (workspace, source, idempotency_key)
            WHERE idempotency_key IS NOT NULL
@@ -153,10 +155,10 @@ export class PostgresBridgeStore implements BridgeStore {
          UNION ALL
          SELECT existing.*, false AS created
          FROM agent_bridge.messages existing
-         WHERE $15::text IS NOT NULL
+         WHERE $16::text IS NOT NULL
            AND existing.workspace = $2
-           AND existing.source = $3
-           AND existing.idempotency_key = $15
+           AND existing.source = $4
+           AND existing.idempotency_key = $16
            AND NOT EXISTS (SELECT 1 FROM inserted)
          LIMIT 1
        ), delivery_rows AS (
@@ -221,6 +223,10 @@ export class PostgresBridgeStore implements BridgeStore {
     if (query.source) {
       values.push(query.source);
       sql += ` AND source = $${values.length}`;
+    }
+    if (query.project) {
+      values.push(query.project);
+      sql += ` AND project = $${values.length}`;
     }
     if (query.since) {
       values.push(query.since);

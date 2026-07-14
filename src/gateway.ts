@@ -182,6 +182,7 @@ export function createGateway(options: GatewayOptions) {
           types: types.length ? types : undefined,
           includeExpired: url.searchParams.get("includeExpired") === "true",
           source: url.searchParams.get("source") ?? undefined,
+          project: url.searchParams.get("project") ?? undefined,
           since: url.searchParams.get("since") ?? undefined,
           unacknowledgedBy: url.searchParams.get("unacknowledgedBy") ?? undefined,
           threadId: url.searchParams.get("threadId") ?? undefined,

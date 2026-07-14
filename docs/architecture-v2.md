@@ -49,6 +49,7 @@ Each message has:
 - Content and optional structured or referenced payload data.
 - Creation and expiry timestamps.
 - An optional idempotency key.
+- An optional validated project label that is immutable with the message. It does not affect workspace, identity, delivery, or cursor authority.
 - Optional atrib receipt and informed-by references.
 
 Frequently queried fields are columns with indexes. Extension data remains JSON.
@@ -66,6 +67,10 @@ A receipt does not change delivery state. A claim or settlement does not create 
 Each delivery transition also appends an audit event. Runtime presence uses a separate leased record keyed by workspace, agent, and instance. Presence can carry a runtime type and declared capabilities without using a PID as ownership proof. Expired rows are pruned during normal presence operations. Each agent is limited to 128 active instances, and each workspace is limited to 4,096.
 
 The system promises at-least-once delivery. It does not promise exactly-once execution. Idempotency keys prevent duplicate insertion, and consumers must make side effects idempotent.
+
+Project participates in the idempotency fingerprint. Reads without a project filter span labeled and unlabeled messages inside the credential-bound workspace. An exact filter narrows that same cursor authority. Migration 008 adds the PostgreSQL column and index. Existing local and edge SQLite databases add their project columns during initialization. Migration 006 is not rewritten. A schema-owner command dry-runs or reconciles its rows into workspace `agent-bridge` in one transaction. It preserves IDs, timestamps, receipts, and row counts, and it verifies that no delivery exists before or after the change.
+
+The legacy Supabase schema has no tenant workspace column. Its adapter reports workspace `*` and uses the legacy `project` column only as a message label. It rejects per-command workspace overrides because assigning a caller-selected workspace to global rows would create a false isolation boundary.
 
 The delivery API supports:
 

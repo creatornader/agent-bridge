@@ -8,6 +8,7 @@ import type {
   MessageQuery,
 } from "./bridge-store.js";
 import { legacyMessageIdFromSequence, legacySequenceFromMessageId } from "./legacy-compat.js";
+import { assertIdempotentReplay } from "./idempotency.js";
 
 type LegacyRow = Record<string, any>;
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
@@ -44,7 +45,8 @@ function asMessage(row: LegacyRow, principal: BridgePrincipal): BridgeMessage {
   return {
     id: messageId(row),
     sequence: String(row.id),
-    workspace: row.project ?? principal.workspace,
+    workspace: principal.workspace,
+    project: row.project ?? undefined,
     source: row.source,
     type: envelope?.kind ?? row.category,
     content: row.content,
@@ -123,17 +125,6 @@ export class LegacySupabaseRestStore implements BridgeStore {
         "legacy Supabase mode cannot enforce idempotency keys; migrate to shared mode",
       );
     }
-    const lookup = encodeURIComponent(
-      JSON.stringify({ message_envelope: { message_id: input.id } }),
-    );
-    const existing = await this.request(
-      `/shared_context?metadata=cs.${lookup}&order=id.asc&limit=1`,
-    );
-    if (existing[0]) {
-      this.legacyIds.set(messageId(existing[0]), String(existing[0].id));
-      return { created: false, message: asMessage(existing[0], { workspace: input.workspace, agent: input.source }) };
-    }
-
     const existingMetadata = input.metadata &&
       typeof input.metadata === "object" &&
       !Array.isArray(input.metadata)
@@ -143,33 +134,46 @@ export class LegacySupabaseRestStore implements BridgeStore {
       typeof existingMetadata.message_envelope === "object"
       ? existingMetadata.message_envelope as Record<string, unknown>
       : {};
+    const storedMetadata = JSON.parse(JSON.stringify({
+      ...existingMetadata,
+      message_envelope: {
+        ...existingEnvelope,
+        schema: "agent-bridge.message-envelope.v1",
+        message_id: input.id,
+        source_agent: input.source,
+        kind: input.type,
+        payload_mime: input.contentType,
+        payload: input.data,
+        target_agents: input.targets,
+        thread_id: input.threadId,
+        reply_to_id: input.replyToId,
+        correlation_id: input.correlationId,
+        causation_id: input.causationId,
+        expires_at: input.expiresAt,
+        informed_by: input.informedBy,
+      },
+    }));
     const body = {
       source: input.source,
       category: input.type,
       content: input.content,
       priority: input.priority,
-      project: input.workspace === "*" ? null : input.workspace,
-      metadata: {
-        ...existingMetadata,
-        message_envelope: {
-          ...existingEnvelope,
-          schema: "agent-bridge.message-envelope.v1",
-          message_id: input.id,
-          source_agent: input.source,
-          kind: input.type,
-          payload_mime: input.contentType,
-          payload: input.data,
-          target_agents: input.targets,
-          thread_id: input.threadId,
-          reply_to_id: input.replyToId,
-          correlation_id: input.correlationId,
-          causation_id: input.causationId,
-          expires_at: input.expiresAt,
-          informed_by: input.informedBy,
-        },
-      },
+      project: input.project ?? null,
+      metadata: storedMetadata,
       atrib_receipt_id: input.atribReceiptId,
     };
+    const lookup = encodeURIComponent(
+      JSON.stringify({ message_envelope: { message_id: input.id } }),
+    );
+    const existing = await this.request(
+      `/shared_context?metadata=cs.${lookup}&order=id.asc&limit=1`,
+    );
+    if (existing[0]) {
+      const message = asMessage(existing[0], { workspace: input.workspace, agent: input.source });
+      assertIdempotentReplay(message, { ...input, metadata: storedMetadata });
+      this.legacyIds.set(message.id, String(existing[0].id));
+      return { created: false, message };
+    }
     const rows = await this.request("/shared_context", {
       method: "POST",
       body: JSON.stringify(body),
@@ -194,9 +198,9 @@ export class LegacySupabaseRestStore implements BridgeStore {
 
     while (messages.length < limit) {
       const batchLimit = Math.min(Math.max(limit * 2, 50), 200);
-      const workspaceFilter = principal.workspace === "*"
-        ? ""
-        : `&project=eq.${encodeURIComponent(principal.workspace)}`;
+      const workspaceFilter = query.project
+        ? `&project=eq.${encodeURIComponent(query.project)}`
+        : "";
       const sourceFilter = query.source
         ? `&source=eq.${encodeURIComponent(query.source)}`
         : "";

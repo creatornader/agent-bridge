@@ -16,6 +16,7 @@ function canonical(value: JsonValue | undefined): string {
 function fingerprint(message: Omit<BridgeMessage, "sequence" | "createdAt">): string {
   const value: JsonValue = {
     workspace: message.workspace,
+    project: message.project ?? null,
     source: message.source,
     type: message.type,
     content: message.content,

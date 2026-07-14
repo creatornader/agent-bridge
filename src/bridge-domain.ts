@@ -27,6 +27,7 @@ export interface BridgePrincipal {
 
 export interface MessageDraft {
   id?: string;
+  project?: string;
   type: string;
   content: string;
   contentType?: string;
@@ -49,6 +50,7 @@ export interface BridgeMessage
     Pick<MessageDraft, "id" | "type" | "content" | "contentType" | "targets" | "priority">
   > {
   workspace: string;
+  project?: string;
   source: string;
   sequence: string;
   createdAt: string;
@@ -138,6 +140,10 @@ function content(value: unknown): string {
 function optional(value: unknown, field: string, max = 512): string | undefined {
   if (value === undefined || value === null) return undefined;
   return clean(value, field, max);
+}
+
+export function validateProject(value: unknown): string | undefined {
+  return optional(value, "project", 128);
 }
 
 function timestamp(value: unknown, field: string): string | undefined {
@@ -272,6 +278,7 @@ export function validateMessageDraft(
 
   return {
     id,
+    project: validateProject(input.project),
     type: clean(input.type, "type", 128),
     content: content(input.content),
     contentType: optional(input.contentType, "contentType", 128) ?? "text/plain",

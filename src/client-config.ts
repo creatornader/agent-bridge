@@ -82,7 +82,9 @@ export function resolveClientConfig(
   const url = value("AGENT_BRIDGE_URL");
   const credential = provider === "gateway" ? value("AGENT_BRIDGE_TOKEN") : value("AGENT_BRIDGE_KEY");
   if (provider !== "local" && (!url || !credential)) throw new Error(`${provider} requires AGENT_BRIDGE_URL and ${provider === "gateway" ? "AGENT_BRIDGE_TOKEN" : "AGENT_BRIDGE_KEY"}`);
-  const workspace = value("AGENT_BRIDGE_WORKSPACE") ?? (provider === "legacy-supabase" ? "*" : "default");
+  const workspace = provider === "legacy-supabase"
+    ? "*"
+    : value("AGENT_BRIDGE_WORKSPACE") ?? "default";
   const instance = clean(env.AGENT_BRIDGE_INSTANCE);
   const databasePath = value("AGENT_BRIDGE_DB") ?? join(home, ".agent-bridge", "bridge.sqlite3");
   const edgeDatabasePath = value("AGENT_BRIDGE_EDGE_DB") ?? join(home, ".agent-bridge", "edge.sqlite3");

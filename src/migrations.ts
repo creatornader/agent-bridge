@@ -16,6 +16,7 @@ const REQUIRED_COLUMNS = new Map([
   ["messages.sequence", "int8"],
   ["messages.id", "uuid"],
   ["messages.workspace", "text"],
+  ["messages.project", "text"],
   ["messages.source", "text"],
   ["messages.targets", "jsonb"],
   ["receipts.workspace", "text"],
@@ -52,6 +53,7 @@ export const REQUIRED_MIGRATIONS = [
   { version: 5, name: "delivery_events_presence" },
   { version: 6, name: "legacy_shared_context_import" },
   { version: 7, name: "runtime_role" },
+  { version: 8, name: "message_projects" },
 ] as const;
 
 function checksum(source: string): string {
@@ -120,7 +122,7 @@ export async function runtimeSchemaReady(db: PgQueryable): Promise<boolean> {
   );
   if ([...REQUIRED_COLUMNS].some(([name, type]) => actual.get(name) !== type)) return false;
 
-  const objects = await db.query<{ immutable: boolean; deliveryAudit: boolean; idempotency: boolean; claim: boolean; source: boolean; thread: boolean; created: boolean; presence: boolean }>(
+  const objects = await db.query<{ immutable: boolean; deliveryAudit: boolean; idempotency: boolean; claim: boolean; source: boolean; thread: boolean; created: boolean; presence: boolean; project: boolean }>(
     `SELECT
        EXISTS (
          SELECT 1 FROM pg_trigger
@@ -137,10 +139,11 @@ export async function runtimeSchemaReady(db: PgQueryable): Promise<boolean> {
        to_regclass('agent_bridge.messages_source') IS NOT NULL AS source,
        to_regclass('agent_bridge.messages_thread') IS NOT NULL AS thread,
        to_regclass('agent_bridge.messages_created') IS NOT NULL AS created,
+       to_regclass('agent_bridge.messages_project') IS NOT NULL AS project,
        to_regclass('agent_bridge.agent_instances_active') IS NOT NULL AS presence`,
   );
   const row = objects.rows[0];
-  return Boolean(row?.immutable && row.deliveryAudit && row.idempotency && row.claim && row.source && row.thread && row.created && row.presence);
+  return Boolean(row?.immutable && row.deliveryAudit && row.idempotency && row.claim && row.source && row.thread && row.created && row.presence && row.project);
 }
 
 export async function runMigrations(

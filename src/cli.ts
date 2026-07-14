@@ -1,4 +1,5 @@
 import { existsSync, mkdirSync, readFileSync, renameSync, rmSync, writeFileSync } from "node:fs";
+import { createHash } from "node:crypto";
 import { dirname, join } from "node:path";
 import { homedir, tmpdir } from "node:os";
 import { mkdtempSync } from "node:fs";
@@ -7,7 +8,8 @@ import pg from "pg";
 import type { MessageDraft } from "./bridge-domain.js";
 import { resolveClientConfig, type ClientConfig } from "./client-config.js";
 import { createClientRuntime } from "./client-runtime.js";
-import { runMigrations } from "./migrations.js";
+import { loadMigrationPlan, runMigrations } from "./migrations.js";
+import { reconcileLegacyProjects } from "./legacy-project-reconciliation.js";
 import { legacyContextMetadata, legacyNumericMessageId } from "./legacy-compat.js";
 import { BridgeHttpError } from "./http-bridge-store.js";
 import { LegacySupabaseError } from "./legacy-supabase-store.js";
@@ -27,8 +29,9 @@ const SUPPORTED_OPTIONS = new Set([
   "identity", "command", "scope",
   "runtime", "capability",
   "max-pages", "max-push",
+  "apply",
 ]);
-const BOOLEAN_OPTIONS = new Set(["dead", "force", "json"]);
+const BOOLEAN_OPTIONS = new Set(["apply", "dead", "force", "json"]);
 function parse(argv: string[]): { command: string; options: Options; positionals: string[] } {
   const command = argv[0] ?? "help"; const options: Options = {}; const positionals: string[] = [];
   for (let i = 1; i < argv.length; i++) {
@@ -71,7 +74,12 @@ function since(options: Options): string | undefined {
 function output(value: unknown): void { process.stdout.write(`${JSON.stringify(value, null, 2)}\n`); }
 function cursor(path: string): string | undefined { try { return readFileSync(path, "utf8").trim() || undefined; } catch { return undefined; } }
 function saveCursor(path: string, value: string | undefined): void { if (!value) return; mkdirSync(dirname(path), { recursive: true }); const temporary = `${path}.${process.pid}.tmp`; writeFileSync(temporary, `${value}\n`, { mode: 0o600 }); renameSync(temporary, path); }
-function help(): void { process.stdout.write(`agent-bridge: provider-neutral agent messaging\n\nCommands:\n  init, doctor, status, pending, migrate, sync, demo, join, presence\n  send (post), inbox (get), history, acknowledge, claim, extend, ack, nack, watch\n  clients install <codex|claude-code|claude-desktop> --identity <name>\n`); }
+function watchCursorPath(path: string, project: string | undefined): string {
+  if (!project) return path;
+  const scope = createHash("sha256").update(project).digest("hex").slice(0, 16);
+  return `${path}.project-${scope}`;
+}
+function help(): void { process.stdout.write(`agent-bridge: provider-neutral agent messaging\n\nCommands:\n  init, doctor, status, pending, migrate, reconcile-legacy-projects, sync, demo, join, presence\n  send (post), inbox (get), history, acknowledge, claim, extend, ack, nack, watch\n  clients install <codex|claude-code|claude-desktop> --identity <name>\n`); }
 function rejectUnknownOptions(options: Options): void {
   const unknown = Object.keys(options).filter((key) => !SUPPORTED_OPTIONS.has(key));
   if (unknown.length) throw new Error(`unknown option: --${unknown[0]}`);
@@ -136,19 +144,24 @@ function configFor(options: Options, command: string): ClientConfig {
     : command === "acknowledge" || (command === "ack" && Boolean(one(options, "ids")))
       ? one(options, "agent")
       : one(options, "as");
-  const project = one(options, "project");
   const environment = one(options, "instance")
     ? { ...process.env, AGENT_BRIDGE_INSTANCE: one(options, "instance") }
     : process.env;
   const config = resolveClientConfig(environment, explicit);
-  if (!project || project === config.principal.workspace) return config;
-  if (config.provider === "gateway") {
-    throw new Error("--project cannot override the workspace bound to a gateway credential");
+  const assertedWorkspace = one(options, "workspace");
+  if (config.provider === "gateway" && assertedWorkspace && assertedWorkspace !== config.principal.workspace) {
+    throw new Error("--workspace must match the workspace bound to the gateway credential");
   }
-  return resolveClientConfig(
-    { ...environment, AGENT_BRIDGE_WORKSPACE: project },
-    explicit,
-  );
+  if (config.provider === "legacy-supabase" && assertedWorkspace && assertedWorkspace !== "*") {
+    throw new Error("--workspace is not supported by the global legacy Supabase schema");
+  }
+  if (config.provider === "local" && assertedWorkspace && assertedWorkspace !== config.principal.workspace) {
+    return resolveClientConfig(
+      { ...environment, AGENT_BRIDGE_WORKSPACE: assertedWorkspace },
+      explicit,
+    );
+  }
+  return config;
 }
 function draft(options: Options, positionals: string[]): MessageDraft {
   const content = one(options, "content") ?? positionals.join(" ");
@@ -164,6 +177,7 @@ function draft(options: Options, positionals: string[]): MessageDraft {
   if (one(options, "payload-ciphertext")) envelope.payload_ciphertext = one(options, "payload-ciphertext");
   if (Object.keys(envelope).length) metadata.message_envelope = envelope;
   return {
+    project: one(options, "project"),
     type: one(options, "type") ?? one(options, "kind") ?? one(options, "category") ?? "operational", content,
     targets: [...list(options, "target"), ...list(options, "target-agent"), ...list(options, "target-agents")],
     priority: one(options, "priority") as MessageDraft["priority"], threadId: one(options, "thread-id"), replyToId: one(options, "reply-to-id"),
@@ -238,6 +252,24 @@ export async function runCli(argv = process.argv.slice(2)): Promise<void> {
     } finally { await pool.end(); }
     return;
   }
+  if (command === "reconcile-legacy-projects") {
+    const databaseUrl = process.env.AGENT_BRIDGE_DATABASE_URL;
+    if (!databaseUrl) throw new Error("AGENT_BRIDGE_DATABASE_URL is required");
+    const pool = new pg.Pool({ connectionString: databaseUrl, max: 1 });
+    try {
+      const directory = fileURLToPath(new URL("../sql/migrations", import.meta.url));
+      const migration = (await loadMigrationPlan(directory)).find((entry) => entry.version === 8);
+      if (!migration || migration.name !== "message_projects") {
+        throw new Error("migration 008_message_projects is missing from the migration plan");
+      }
+      output(await reconcileLegacyProjects(pool, {
+        apply: boolean(options, "apply"),
+        migrationChecksum: migration.checksum,
+      }));
+    }
+    finally { await pool.end(); }
+    return;
+  }
   const config = configFor(options, command); const runtime = await createClientRuntime(config);
   try {
     if (command === "doctor" || command === "status") { const diagnostics = await runtime.store.diagnostics?.(config.principal) ?? { schemaVersion: config.provider === "legacy-supabase" ? "legacy-v1" : "local-v2", deliverySupported: false, pending: null, claimed: null, retrying: null, dead: null }; const remoteReachable = "remoteReachable" in diagnostics ? diagnostics.remoteReachable : null; output({ status: remoteReachable === false ? "degraded" : "ok", localHealthy: true, connected: remoteReachable ?? true, remoteReachable, provider: config.provider, workspace: config.principal.workspace, agent: config.principal.agent, instance: config.principal.instance ?? null, schemaVersion: diagnostics.schemaVersion, endpoint: config.url ?? null, database: config.provider === "local" ? config.databasePath : null, cursorPath: config.cursorPath, lastCursor: cursor(config.cursorPath) ?? null, queue: diagnostics }); return; }
@@ -245,6 +277,7 @@ export async function runCli(argv = process.argv.slice(2)): Promise<void> {
       const diagnostics = await runtime.store.diagnostics?.(config.principal);
       const page = await runtime.service.history(config.principal, {
         limit: 1,
+        project: one(options, "project"),
         unacknowledgedBy: config.principal.agent,
       });
       const pendingDeliveries = diagnostics?.pending ?? 0;
@@ -289,7 +322,7 @@ export async function runCli(argv = process.argv.slice(2)): Promise<void> {
       }));
       return;
     }
-    if (command === "history" || command === "inbox") { const page = await runtime.service.history(config.principal, { cursor: one(options, "cursor"), limit: integer(options, "limit", 20), types: list(options, "type").concat(list(options, "category")), source: one(options, "source"), since: since(options), unacknowledgedBy: one(options, "unacked-by"), threadId: one(options, "thread-id"), latest: raw === "get" }); if (raw === "get") { output(page.messages.map((message) => ({ id: config.provider === "legacy-supabase" ? Number(message.sequence) : message.id, source: message.source, category: message.type, content: message.content, priority: message.priority, project: message.workspace === "*" ? null : message.workspace, metadata: legacyContextMetadata(message), created_at: message.createdAt }))); } else output(page); return; }
+    if (command === "history" || command === "inbox") { const page = await runtime.service.history(config.principal, { cursor: one(options, "cursor"), limit: integer(options, "limit", 20), types: list(options, "type").concat(list(options, "category")), source: one(options, "source"), project: one(options, "project"), since: since(options), unacknowledgedBy: one(options, "unacked-by"), threadId: one(options, "thread-id"), latest: raw === "get" }); if (raw === "get") { output(page.messages.map((message) => ({ id: config.provider === "legacy-supabase" ? Number(message.sequence) : message.id, source: message.source, category: message.type, content: message.content, priority: message.priority, project: message.project ?? null, metadata: legacyContextMetadata(message), created_at: message.createdAt }))); } else output(page); return; }
     if (command === "acknowledge" || (command === "ack" && one(options, "ids"))) {
       const rawIds = list(options, "ids");
       const acknowledged = config.provider === "legacy-supabase" &&
@@ -313,15 +346,21 @@ export async function runCli(argv = process.argv.slice(2)): Promise<void> {
       const baseInterval = Math.min(integer(options, "interval-ms", 1_000), 60_000);
       const maxInterval = Math.max(baseInterval, Math.min(integer(options, "max-interval-ms", 30_000), 300_000));
       let interval = baseInterval;
-      let current = cursor(config.cursorPath);
+      const project = one(options, "project");
+      const checkpointPath = watchCursorPath(config.cursorPath, project);
+      let current = cursor(checkpointPath);
       let seen = 0;
       for (let i = 0; i < polls; i++) {
         try {
-          const page = await runtime.service.history(config.principal, { cursor: current, limit: integer(options, "limit", 50) });
+          const page = await runtime.service.history(config.principal, {
+            cursor: current,
+            limit: integer(options, "limit", 50),
+            project,
+          });
           for (const message of page.messages) output(message);
           seen += page.messages.length;
           current = page.cursor;
-          saveCursor(config.cursorPath, current);
+          saveCursor(checkpointPath, current);
           interval = page.messages.length ? baseInterval : Math.min(maxInterval, Math.max(baseInterval, interval * 2));
         } catch (error) {
           const status = error instanceof BridgeHttpError || error instanceof LegacySupabaseError

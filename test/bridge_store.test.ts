@@ -1,12 +1,18 @@
+import { execFile } from "node:child_process";
 import { mkdtempSync, rmSync } from "node:fs";
+import { createRequire } from "node:module";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { pathToFileURL } from "node:url";
+import { promisify } from "node:util";
 import { afterEach, describe, expect, it } from "vitest";
 import { BridgeService } from "../src/bridge-service.js";
 import { SQLiteBridgeStore } from "../src/sqlite-bridge-store.js";
 
 const temporaryDirectories: string[] = [];
 const stores: SQLiteBridgeStore[] = [];
+const require = createRequire(import.meta.url);
+const execFileAsync = promisify(execFile);
 
 function createStore() {
   const directory = mkdtempSync(join(tmpdir(), "agent-bridge-v2-"));
@@ -71,6 +77,58 @@ function bridgeStoreContract(name: string, makeStore: () => SQLiteBridgeStore) {
         content: "changed intent",
         targets: ["other"],
         idempotencyKey: "stable-key",
+      })).rejects.toMatchObject({ code: "idempotency_conflict", status: 409 });
+    });
+
+    it("preserves project labels and filters them without changing workspace scope", async () => {
+      const service = new BridgeService(makeStore());
+      const principal = { workspace: "acme", agent: "codex" };
+      const alpha = await service.publish(principal, {
+        type: "agent-bridge.context",
+        content: "alpha",
+        project: "project-alpha",
+      });
+      const beta = await service.publish(principal, {
+        type: "agent-bridge.context",
+        content: "beta",
+        project: "project-beta",
+      });
+      const unlabeled = await service.publish(principal, {
+        type: "agent-bridge.context",
+        content: "unlabeled",
+      });
+
+      expect(alpha.message).toMatchObject({ workspace: "acme", project: "project-alpha" });
+      expect((await service.history(principal, { project: "project-alpha" })).messages)
+        .toEqual([alpha.message]);
+      expect((await service.history(principal)).messages.map((message) => message.id))
+        .toEqual([alpha.message.id, beta.message.id, unlabeled.message.id]);
+    });
+
+    it("accepts an asterisk project label and treats project as immutable intent", async () => {
+      const service = new BridgeService(makeStore());
+      const principal = { workspace: "acme", agent: "codex" };
+      const first = await service.publish(principal, {
+        type: "agent-bridge.context",
+        content: "legacy-compatible label",
+        project: "*",
+        idempotencyKey: "project-key",
+      });
+      expect(first.message.project).toBe("*");
+
+      const replay = await service.publish(principal, {
+        type: "agent-bridge.context",
+        content: "legacy-compatible label",
+        project: "*",
+        idempotencyKey: "project-key",
+      });
+      expect(replay).toMatchObject({ created: false, message: { id: first.message.id } });
+
+      await expect(service.publish(principal, {
+        type: "agent-bridge.context",
+        content: "legacy-compatible label",
+        project: "different-project",
+        idempotencyKey: "project-key",
       })).rejects.toMatchObject({ code: "idempotency_conflict", status: 409 });
     });
 
@@ -309,3 +367,83 @@ function bridgeStoreContract(name: string, makeStore: () => SQLiteBridgeStore) {
 }
 
 bridgeStoreContract("SQLite", createStore);
+
+describe("SQLite project schema upgrade", () => {
+  it("adds the project column without losing messages from the prior schema", async () => {
+    const directory = mkdtempSync(join(tmpdir(), "agent-bridge-v2-upgrade-"));
+    temporaryDirectories.push(directory);
+    const path = join(directory, "bridge.sqlite");
+    const { DatabaseSync } = require("node:sqlite") as typeof import("node:sqlite");
+    const legacy = new DatabaseSync(path);
+    legacy.exec(`
+      CREATE TABLE bridge_messages (
+        sequence INTEGER PRIMARY KEY AUTOINCREMENT, id TEXT NOT NULL UNIQUE,
+        workspace TEXT NOT NULL, source TEXT NOT NULL, type TEXT NOT NULL,
+        content TEXT NOT NULL, content_type TEXT NOT NULL, data TEXT,
+        targets TEXT NOT NULL DEFAULT '[]', thread_id TEXT, reply_to_id TEXT,
+        correlation_id TEXT, causation_id TEXT, priority TEXT NOT NULL,
+        expires_at TEXT, idempotency_key TEXT, atrib_receipt_id TEXT,
+        informed_by TEXT, metadata TEXT, created_at TEXT NOT NULL,
+        UNIQUE(workspace, id)
+      );
+      INSERT INTO bridge_messages
+        (id, workspace, source, type, content, content_type, targets, priority, created_at)
+      VALUES
+        ('018f4a70-0000-7000-8000-000000000099', 'acme', 'codex', 'note',
+         'before project labels', 'text/plain', '[]', 'info', '2026-07-14T00:00:00.000Z');
+    `);
+    legacy.close();
+
+    const store = new SQLiteBridgeStore(path);
+    stores.push(store);
+    await store.initialize();
+    const page = await store.listMessages({ workspace: "acme", agent: "codex" });
+    expect(page.messages).toHaveLength(1);
+    expect(page.messages[0]).toMatchObject({
+      id: "018f4a70-0000-7000-8000-000000000099",
+      content: "before project labels",
+    });
+    expect(page.messages[0]?.project).toBeUndefined();
+  });
+
+  it("allows concurrent processes to perform the first project-column upgrade", async () => {
+    const directory = mkdtempSync(join(tmpdir(), "agent-bridge-v2-concurrent-upgrade-"));
+    temporaryDirectories.push(directory);
+    const path = join(directory, "bridge.sqlite");
+    const { DatabaseSync } = require("node:sqlite") as typeof import("node:sqlite");
+    const legacy = new DatabaseSync(path);
+    legacy.exec(`
+      CREATE TABLE bridge_messages (
+        sequence INTEGER PRIMARY KEY AUTOINCREMENT, id TEXT NOT NULL UNIQUE,
+        workspace TEXT NOT NULL, source TEXT NOT NULL, type TEXT NOT NULL,
+        content TEXT NOT NULL, content_type TEXT NOT NULL, data TEXT,
+        targets TEXT NOT NULL DEFAULT '[]', thread_id TEXT, reply_to_id TEXT,
+        correlation_id TEXT, causation_id TEXT, priority TEXT NOT NULL,
+        expires_at TEXT, idempotency_key TEXT, atrib_receipt_id TEXT,
+        informed_by TEXT, metadata TEXT, created_at TEXT NOT NULL,
+        UNIQUE(workspace, id)
+      );
+    `);
+    legacy.close();
+
+    const sqliteModule = pathToFileURL(join(process.cwd(), "dist/sqlite.js")).href;
+    const script = `
+      import { SQLiteBridgeStore } from ${JSON.stringify(sqliteModule)};
+      const store = new SQLiteBridgeStore(process.env.AGENT_BRIDGE_TEST_DB);
+      await store.initialize();
+      await store.close();
+    `;
+    await Promise.all(Array.from({ length: 8 }, () => execFileAsync(
+      process.execPath,
+      ["--input-type=module", "--eval", script],
+      { env: { ...process.env, AGENT_BRIDGE_TEST_DB: path } },
+    )));
+
+    const upgraded = new DatabaseSync(path);
+    const columns = upgraded.prepare("PRAGMA table_info(bridge_messages)").all() as Array<{
+      name: string;
+    }>;
+    expect(columns.filter((column) => column.name === "project")).toHaveLength(1);
+    upgraded.close();
+  }, 15_000);
+});

@@ -2,6 +2,7 @@ import type { AgentPresence, BridgeDelivery, BridgeDeliveryEvent, BridgeMessage,
 
 export interface InsertMessageResult { message: BridgeMessage; created: boolean; }
 export interface MessageQuery {
+  project?: string;
   cursor?: string;
   limit?: number;
   types?: string[];
