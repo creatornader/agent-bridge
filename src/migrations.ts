@@ -19,6 +19,12 @@ const REQUIRED_COLUMNS = new Map([
   ["messages.project", "text"],
   ["messages.source", "text"],
   ["messages.targets", "jsonb"],
+  ["messages.delivery_mode", "text"],
+  ["messages.delivery_max_attempts", "int4"],
+  ["messages.delivery_retry_base_delay_ms", "int4"],
+  ["messages.delivery_retry_max_delay_ms", "int4"],
+  ["messages.delivery_retry_jitter_ratio", "float8"],
+  ["messages.delivery_not_before", "timestamptz"],
   ["receipts.workspace", "text"],
   ["receipts.message_id", "uuid"],
   ["receipts.principal", "text"],
@@ -28,8 +34,18 @@ const REQUIRED_COLUMNS = new Map([
   ["deliveries.recipient", "text"],
   ["deliveries.state", "text"],
   ["deliveries.lease_token", "uuid"],
+  ["deliveries.created_at", "timestamptz"],
+  ["deliveries.priority_rank", "int2"],
+  ["deliveries.cycle_attempt", "int4"],
+  ["deliveries.requeue_count", "int4"],
+  ["deliveries.last_actor", "text"],
+  ["deliveries.last_action", "text"],
   ["delivery_events.delivery_id", "uuid"],
   ["delivery_events.to_state", "text"],
+  ["delivery_events.cycle_attempt", "int4"],
+  ["delivery_events.requeue_count", "int4"],
+  ["delivery_events.actor", "text"],
+  ["delivery_events.action", "text"],
   ["agent_instances.workspace", "text"],
   ["agent_instances.instance", "text"],
   ["agent_instances.capabilities", "jsonb"],
@@ -55,6 +71,7 @@ export const REQUIRED_MIGRATIONS = [
   { version: 7, name: "runtime_role" },
   { version: 8, name: "message_projects" },
   { version: 9, name: "mailbox_query_indexes" },
+  { version: 10, name: "publisher_delivery_policy" },
 ] as const;
 
 function checksum(source: string): string {
@@ -123,7 +140,7 @@ export async function runtimeSchemaReady(db: PgQueryable): Promise<boolean> {
   );
   if ([...REQUIRED_COLUMNS].some(([name, type]) => actual.get(name) !== type)) return false;
 
-  const objects = await db.query<{ immutable: boolean; deliveryAudit: boolean; idempotency: boolean; claim: boolean; source: boolean; thread: boolean; created: boolean; presence: boolean; project: boolean; targets: boolean }>(
+  const objects = await db.query<{ immutable: boolean; deliveryAudit: boolean; idempotency: boolean; claim: boolean; publisher: boolean; terminal: boolean; source: boolean; thread: boolean; created: boolean; presence: boolean; project: boolean; targets: boolean }>(
     `SELECT
        EXISTS (
          SELECT 1 FROM pg_trigger
@@ -137,6 +154,8 @@ export async function runtimeSchemaReady(db: PgQueryable): Promise<boolean> {
        ) AS "deliveryAudit",
        to_regclass('agent_bridge.messages_idempotency') IS NOT NULL AS idempotency,
        to_regclass('agent_bridge.deliveries_claim') IS NOT NULL AS claim,
+       to_regclass('agent_bridge.deliveries_publisher_lookup') IS NOT NULL AS publisher,
+       to_regclass('agent_bridge.deliveries_terminal_lookup') IS NOT NULL AS terminal,
        to_regclass('agent_bridge.messages_source') IS NOT NULL AS source,
        to_regclass('agent_bridge.messages_thread') IS NOT NULL AS thread,
        to_regclass('agent_bridge.messages_created') IS NOT NULL AS created,
@@ -145,7 +164,7 @@ export async function runtimeSchemaReady(db: PgQueryable): Promise<boolean> {
        to_regclass('agent_bridge.agent_instances_active') IS NOT NULL AS presence`,
   );
   const row = objects.rows[0];
-  return Boolean(row?.immutable && row.deliveryAudit && row.idempotency && row.claim && row.source && row.thread && row.created && row.presence && row.project && row.targets);
+  return Boolean(row?.immutable && row.deliveryAudit && row.idempotency && row.claim && row.publisher && row.terminal && row.source && row.thread && row.created && row.presence && row.project && row.targets);
 }
 
 export async function runMigrations(

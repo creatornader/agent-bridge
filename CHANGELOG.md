@@ -8,6 +8,8 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and 
 
 ### Added
 
+- Immutable publisher-owned delivery policies with mailbox and leased modes. Leased delivery adds priority claims, monotonic cycle counters, publisher cancel and requeue controls, and authorized audit pagination. PostgreSQL migration 010 and the SQLite initializer upgrade existing stores. Legacy mode rejects leased policy.
+
 - Caller-bound `inbox`, `sent`, and `all` mailbox history plus `any`, `unread`, and `read` receipt state across MCP, CLI, HTTP, PostgreSQL, SQLite, legacy, and offline gateway mode.
 - Scope-bound v2 cursors with temporary v1 cursor compatibility and authoritative edge-cache backfill after the visibility contract upgrade.
 - Deprecated arbitrary-principal receipt filters. The CLI checks compatibility assertions before opening storage or contacting a gateway, and server surfaces reject mismatches before querying message storage.
@@ -16,6 +18,10 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and 
 
 - Offline inbox and pending fallback now label degraded cache data and unknown acknowledgement state; long-lived MCP clients replay with cancellable bounded backoff and expose manual `sync`.
 - CLI health separates local edge health from remote gateway reachability, and unknown publication outcomes retry idempotently.
+
+### Changed
+
+- Consumer-side `maxAttempts` on claim and `retryPolicy` on nack are validated but ignored for one compatibility release. Stored publisher policy now controls retry and exhaustion.
 
 ## [0.2.0] - 2026-07-14
 

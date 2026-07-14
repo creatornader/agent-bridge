@@ -203,6 +203,13 @@ export function createGateway(options: GatewayOptions) {
         mutationStarted = true;
         send(res, 200, await service.claim(principal, input), requestId); return;
       }
+      if (req.method === "GET" && url.pathname === "/v2/deliveries") {
+        send(res,200,await service.deliveries(principal,{cursor:url.searchParams.get("cursor")??undefined,limit:numberParam(url.searchParams.get("limit"),"limit"),role:url.searchParams.get("role")??undefined as any,messageId:url.searchParams.get("messageId")??undefined,recipient:url.searchParams.get("recipient")??undefined,states:url.searchParams.getAll("state") as any}),requestId);return;
+      }
+      const eventsMatch=url.pathname.match(/^\/v2\/deliveries\/([^/]+)\/events$/);
+      if(req.method==="GET"&&eventsMatch){send(res,200,await service.deliveryEvents(principal,eventsMatch[1]!,{cursor:url.searchParams.get("cursor")??undefined,limit:numberParam(url.searchParams.get("limit"),"limit")}),requestId);return;}
+      const controlMatch=url.pathname.match(/^\/v2\/deliveries\/([^/]+)\/(cancel|requeue)$/);
+      if(req.method==="POST"&&controlMatch){mutationStarted=true;const result=controlMatch[2]==="cancel"?await service.cancel(principal,controlMatch[1]!):await service.requeue(principal,controlMatch[1]!);if(!result)failure(res,404,"not_found",requestId);else send(res,200,result,requestId);return;}
       if (req.method === "POST" && url.pathname === "/v2/presence/heartbeat") {
         const input = await body(req, limit, abort.signal);
         active(abort.signal);
@@ -222,7 +229,14 @@ export function createGateway(options: GatewayOptions) {
           ? await service.extend(principal, id, input.leaseToken, input.leaseMs)
           : action === "ack"
             ? await service.ack(principal, id, input.leaseToken)
-            : await service.nack(principal, id, input.leaseToken, input.error, input.dead, input.retryPolicy);
+            : await service.nack(
+                principal,
+                id,
+                input.leaseToken,
+                input.error,
+                input.disposition ?? input.dead ?? "retry",
+                input.retryPolicy,
+              );
         if (!result) failure(res, 409, "lease_conflict", requestId);
         else send(res, 200, result, requestId);
         return;

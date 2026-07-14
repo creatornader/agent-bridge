@@ -64,6 +64,7 @@ Sync triggers:
 - Migration 008 adds project storage. Migration 006 remains unchanged and its imported rows are corrected only by the schema-owner reconciliation command.
 - Cursor pulls are authoritative. Notifications may wake a client but never replace replay.
 - Delivery is at least once through claim, lease, ack, nack, retry, and dead-letter state.
+- Immutable publisher delivery policy owns delivery mode, retry limits, and backoff. Cancel and requeue are publisher-only. Requeue resets cycle attempt but not lifetime attempt. Consumer `maxAttempts` and `retryPolicy` inputs are validated and ignored for one compatibility release.
 - Exact idempotent replay deduplicates. Changed content under an existing idempotency key fails.
 - Direct fetch remains in the legacy adapter. The normal remote path uses the authenticated gateway.
 - Local and edge SQLite files use WAL, bounded busy waits, and owner-only modes where supported.

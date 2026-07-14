@@ -19,15 +19,16 @@ type Options = Record<string, string | boolean | string[]>;
 const SUPPORTED_OPTIONS = new Set([
   "agent", "as", "atrib-receipt-id", "category", "causation-id", "config",
   "content", "content-type", "correlation-id", "cursor", "data", "db", "dead",
-  "delivery-id", "error", "expires-at", "force", "idempotency-key", "ids",
+  "delivery-id", "delivery-max-attempts", "delivery-mode", "delivery-policy",
+  "disposition", "error", "expires-at", "force", "idempotency-key", "ids",
   "informed-by", "instance", "interval-ms", "json", "key", "kind", "lease-ms",
   "lease-token", "limit", "max-attempts", "max-interval-ms", "message-id",
-  "metadata", "payload", "payload-ciphertext", "payload-mime", "payload-ref",
+  "metadata", "not-before", "payload", "payload-ciphertext", "payload-mime", "payload-ref",
   "polls", "priority", "project", "provider", "reply-to-id", "since", "source",
   "target", "target-agent", "target-agents", "thread-id", "token", "type",
   "unacked-by", "url", "workspace", "mailbox", "receipt-state",
   "identity", "command", "scope",
-  "runtime", "capability",
+  "recipient", "retry-base-ms", "retry-jitter", "retry-max-ms", "role", "runtime", "capability", "state",
   "max-pages", "max-push",
   "apply",
 ]);
@@ -79,7 +80,7 @@ function watchCursorPath(path: string, project: string | undefined): string {
   const scope = createHash("sha256").update(project).digest("hex").slice(0, 16);
   return `${path}.project-${scope}`;
 }
-function help(): void { process.stdout.write(`agent-bridge: provider-neutral agent messaging\n\nCommands:\n  init, doctor, status, pending, migrate, reconcile-legacy-projects, sync, demo, join, presence\n  send (post), inbox (get), sent, history, acknowledge, claim, extend, ack, nack, watch\n  clients install <codex|claude-code|claude-desktop> --identity <name>\n`); }
+function help(): void { process.stdout.write(`agent-bridge: provider-neutral agent messaging\n\nCommands:\n  init, doctor, status, pending, migrate, reconcile-legacy-projects, sync, demo, join, presence\n  send (post), inbox (get), sent, history, acknowledge, claim, extend, ack, nack, watch\n  deliveries, dead-letters, delivery-events, cancel, requeue\n  clients install <codex|claude-code|claude-desktop> --identity <name>\n`); }
 function rejectUnknownOptions(options: Options): void {
   const unknown = Object.keys(options).filter((key) => !SUPPORTED_OPTIONS.has(key));
   if (unknown.length) throw new Error(`unknown option: --${unknown[0]}`);
@@ -176,6 +177,11 @@ function draft(options: Options, positionals: string[]): MessageDraft {
   if (one(options, "payload-ref")) envelope.payload_ref = one(options, "payload-ref");
   if (one(options, "payload-ciphertext")) envelope.payload_ciphertext = one(options, "payload-ciphertext");
   if (Object.keys(envelope).length) metadata.message_envelope = envelope;
+  const deliveryMode = one(options, "delivery-mode");
+  const deliveryTuning = ["delivery-max-attempts", "retry-base-ms", "retry-max-ms", "retry-jitter", "not-before"]
+    .some((key) => one(options, key) !== undefined);
+  if (deliveryTuning && !deliveryMode) throw new Error("--delivery-mode is required with delivery policy flags");
+  if (deliveryMode === "mailbox" && deliveryTuning) throw new Error("mailbox delivery mode does not accept retry or scheduling flags");
   return {
     project: one(options, "project"),
     type: one(options, "type") ?? one(options, "kind") ?? one(options, "category") ?? "operational", content,
@@ -186,6 +192,7 @@ function draft(options: Options, positionals: string[]): MessageDraft {
     contentType: one(options, "content-type") ?? one(options, "payload-mime"), atribReceiptId: one(options, "atrib-receipt-id"), informedBy: list(options, "informed-by"),
     data: (json(options, "data") ?? json(options, "payload")) as MessageDraft["data"],
     metadata: metadata as MessageDraft["metadata"],
+    deliveryPolicy: (json(options,"delivery-policy") ?? (deliveryMode ? deliveryMode === "mailbox" ? { mode: "mailbox" } : { mode: deliveryMode, maxAttempts: integer(options,"delivery-max-attempts",5), retryBaseDelayMs: integer(options,"retry-base-ms",1000), retryMaxDelayMs: integer(options,"retry-max-ms",60000), retryJitterRatio: Number(one(options,"retry-jitter") ?? .2), notBefore: one(options,"not-before") } : undefined)) as MessageDraft["deliveryPolicy"],
   };
 }
 
@@ -335,12 +342,16 @@ export async function runCli(argv = process.argv.slice(2)): Promise<void> {
       output({ acknowledged, agent: config.principal.agent });
       return;
     }
-    if (command === "claim") { output(await runtime.service.claim(config.principal, { leaseMs: integer(options, "lease-ms", 30_000), maxAttempts: integer(options, "max-attempts", 5) })); return; }
+    if (command === "claim") { output(await runtime.service.claim(config.principal, { leaseMs: integer(options, "lease-ms", 30_000), maxAttempts: one(options,"max-attempts")===undefined?undefined:integer(options,"max-attempts",5) })); return; }
+    if(command==="deliveries"||command==="dead-letters"){output(await runtime.service.deliveries(config.principal,{cursor:one(options,"cursor"),limit:integer(options,"limit",50),role:one(options,"role") as any,messageId:one(options,"message-id"),recipient:one(options,"recipient"),states:command==="dead-letters"?["dead"]:list(options,"state") as any}));return;}
+    if(command==="delivery-events"){output(await runtime.service.deliveryEvents(config.principal,one(options,"delivery-id")??positionals[0]!,{cursor:one(options,"cursor"),limit:integer(options,"limit",50)}));return;}
+    if(command==="cancel"){output(await runtime.service.cancel(config.principal,one(options,"delivery-id")??positionals[0]!));return;}
+    if(command==="requeue"){output(await runtime.service.requeue(config.principal,one(options,"delivery-id")??positionals[0]!));return;}
     const deliveryId = one(options, "delivery-id") ?? positionals[0]; const leaseToken = one(options, "lease-token") ?? positionals[1];
     if (!deliveryId || !leaseToken) { if (["extend", "ack", "nack"].includes(command)) throw new Error("--delivery-id and --lease-token are required"); }
     if (command === "extend") { output(await runtime.service.extend(config.principal, deliveryId!, leaseToken!, integer(options, "lease-ms", 30_000))); return; }
     if (command === "ack") { output(await runtime.service.ack(config.principal, deliveryId!, leaseToken!)); return; }
-    if (command === "nack") { output(await runtime.service.nack(config.principal, deliveryId!, leaseToken!, one(options, "error") ?? "negative acknowledgment", boolean(options, "dead"))); return; }
+    if (command === "nack") { const disposition=one(options,"disposition")??(boolean(options,"dead")?"dead":"retry"); output(await runtime.service.nack(config.principal, deliveryId!, leaseToken!, one(options, "error") ?? "negative acknowledgment", disposition as "retry"|"dead")); return; }
     if (command === "watch") {
       const polls = one(options, "polls") === undefined ? Number.POSITIVE_INFINITY : integer(options, "polls", 0);
       const baseInterval = Math.min(integer(options, "interval-ms", 1_000), 60_000);

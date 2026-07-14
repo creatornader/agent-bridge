@@ -25,7 +25,6 @@ import {
   validateMessageDraft,
   type BridgePrincipal,
   type MessageDraft,
-  type RetryPolicy,
 } from "./bridge-domain.js";
 import { createStore } from "./client-runtime.js";
 import { legacyContextMetadata, legacyNumericMessageId } from "./legacy-compat.js";
@@ -385,6 +384,7 @@ export function createAgentBridgeServer(
             priority: { type: "string", enum: ["info", "high", "urgent"] }, expiresAt: { type: "string" },
             idempotencyKey: { type: "string" }, atribReceiptId: { type: "string" },
             informedBy: { type: "array", items: { type: "string" } }, metadata: {},
+            deliveryPolicy: { type: "object", properties: { mode: { type: "string", enum: ["mailbox","leased"] }, maxAttempts: { type: "number" }, retryBaseDelayMs: { type: "number" }, retryMaxDelayMs: { type: "number" }, retryJitterRatio: { type: "number" }, notBefore: { type: "string" } }, additionalProperties: false },
           },
           required: ["type", "content"],
           additionalProperties: false,
@@ -425,7 +425,10 @@ export function createAgentBridgeServer(
       ...(deliveryToolsAvailable ? [{
         name: "claim",
         description: "Atomically claim the next targeted delivery.",
-        inputSchema: { type: "object" as const, properties: { leaseMs: { type: "number" }, maxAttempts: { type: "number" } }, additionalProperties: false },
+        inputSchema: { type: "object" as const, properties: {
+          leaseMs: { type: "number" },
+          maxAttempts: { type: "number", description: "Deprecated. Stored publisher policy controls exhaustion." },
+        }, additionalProperties: false },
         outputSchema: { type: "object" as const, additionalProperties: true },
       },
       ...["extend", "acknowledge", "negative_acknowledge"].map((name) => ({
@@ -436,13 +439,27 @@ export function createAgentBridgeServer(
           properties: {
             deliveryId: { type: "string" }, leaseToken: { type: "string" },
             ...(name === "extend" ? { leaseMs: { type: "number" } } : {}),
-            ...(name === "negative_acknowledge" ? { error: { type: "string" }, dead: { type: "boolean" }, retryPolicy: { type: "object", additionalProperties: true } } : {}),
+            ...(name === "negative_acknowledge" ? {
+              error: { type: "string" },
+              disposition: { type: "string", enum: ["retry", "dead"] },
+              dead: { type: "boolean", description: "Deprecated. Use disposition." },
+              retryPolicy: {
+                type: "object",
+                description: "Deprecated. Stored publisher policy controls retry timing and exhaustion.",
+                properties: {
+                  maxAttempts: { type: "number" }, baseDelayMs: { type: "number" },
+                  maxDelayMs: { type: "number" }, jitterRatio: { type: "number" },
+                },
+                additionalProperties: false,
+              },
+            } : {}),
           },
           required: ["deliveryId", "leaseToken"],
           additionalProperties: false,
         },
         outputSchema: { type: "object" as const, additionalProperties: true },
       })),
+      ...["list_deliveries","list_delivery_events","cancel_delivery","requeue_delivery"].map((name)=>({name,description:`Agent Bridge v2 ${name.replace(/_/g," ")}.`,inputSchema:{type:"object" as const,properties:{deliveryId:{type:"string"},cursor:{type:"string"},limit:{type:"number"},role:{type:"string",enum:["recipient","publisher","all"]},messageId:{type:"string"},recipient:{type:"string"},states:{type:"array",items:{type:"string"}}},...(name==="list_deliveries"?{}:{required:["deliveryId"]}),additionalProperties:false},outputSchema:{type:"object" as const,additionalProperties:true}})),
       {
         name: "heartbeat",
         description: "Publish a leased runtime presence record and capabilities.",
@@ -706,8 +723,16 @@ export function createAgentBridgeServer(
       }
       case "claim": {
         if (!service || !principal) throw new McpError(ErrorCode.InvalidParams, "AGENT_BRIDGE_AGENT is required");
-        const result = await service.claim(principal, { leaseMs: args?.leaseMs as number | undefined, maxAttempts: args?.maxAttempts as number | undefined });
+        const result = await service.claim(principal, {
+          leaseMs: args?.leaseMs as number | undefined,
+          maxAttempts: args?.maxAttempts as number | undefined,
+        });
         return { content: [{ type: "text", text: JSON.stringify(result) }], structuredContent: (result ?? { delivery: null }) as unknown as Record<string, unknown> };
+      }
+      case "list_deliveries": case "list_delivery_events": case "cancel_delivery": case "requeue_delivery": {
+        if(!service||!principal) throw new McpError(ErrorCode.InvalidParams,"AGENT_BRIDGE_AGENT is required");
+        const result=name==="list_deliveries"?await service.deliveries(principal,args as any):name==="list_delivery_events"?await service.deliveryEvents(principal,String(args?.deliveryId??""),args as any):name==="cancel_delivery"?await service.cancel(principal,String(args?.deliveryId??"")):await service.requeue(principal,String(args?.deliveryId??""));
+        return {content:[{type:"text",text:JSON.stringify(result)}],structuredContent:(result??{delivery:null}) as any};
       }
       case "extend": case "acknowledge": case "negative_acknowledge": {
         if (!service || !principal) throw new McpError(ErrorCode.InvalidParams, "AGENT_BRIDGE_AGENT is required");
@@ -719,8 +744,8 @@ export function createAgentBridgeServer(
             id,
             token,
             (args?.error ?? "negative acknowledgment") as string,
-            (args?.dead ?? false) as boolean,
-            args?.retryPolicy as Partial<RetryPolicy> | undefined,
+            (args?.disposition ?? args?.dead ?? "retry") as "retry" | "dead" | boolean,
+            args?.retryPolicy,
           );
         return { content: [{ type: "text", text: JSON.stringify(result) }], structuredContent: (result ?? { delivery: null }) as unknown as Record<string, unknown> };
       }

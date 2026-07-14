@@ -1,4 +1,4 @@
-import type { AgentPresence, BridgeDelivery, BridgeMessage, BridgePrincipal, RetryPolicy } from "./bridge-domain.js";
+import type { AgentPresence, BridgeDelivery, BridgeMessage, BridgePrincipal } from "./bridge-domain.js";
 import type { BridgeDiagnostics, BridgeStore, ClaimOptions, InsertMessageResult, MessagePage, MessageQuery } from "./bridge-store.js";
 
 export interface HttpBridgeStoreOptions {
@@ -132,6 +132,12 @@ export class HttpBridgeStore implements BridgeStore {
     this.assertPrincipal(principal);
     return (await this.request("/v2/deliveries/claim", { method: "POST", body: options }))?.delivery ?? null;
   }
+  async listDeliveries(principal: BridgePrincipal, query: import("./bridge-store.js").DeliveryQuery = {}) {
+    this.assertPrincipal(principal); const params=new URLSearchParams(); if(query.cursor)params.set("cursor",query.cursor);if(query.limit)params.set("limit",String(query.limit));if(query.role)params.set("role",query.role);if(query.messageId)params.set("messageId",query.messageId);if(query.recipient)params.set("recipient",query.recipient);for(const state of query.states??[])params.append("state",state);return this.request(`/v2/deliveries${params.size?`?${params}`:""}`);
+  }
+  async listDeliveryEvents(principal: BridgePrincipal,id:string,query:{cursor?:string;limit?:number}={}) { this.assertPrincipal(principal);const params=new URLSearchParams();if(query.cursor)params.set("cursor",query.cursor);if(query.limit)params.set("limit",String(query.limit));return this.request(`/v2/deliveries/${id}/events${params.size?`?${params}`:""}`); }
+  async cancelDelivery(principal:BridgePrincipal,id:string){this.assertPrincipal(principal);return this.request(`/v2/deliveries/${id}/cancel`,{method:"POST",body:{}});}
+  async requeueDelivery(principal:BridgePrincipal,id:string){this.assertPrincipal(principal);return this.request(`/v2/deliveries/${id}/requeue`,{method:"POST",body:{}});}
   async renewDelivery(principal: BridgePrincipal, id: string, token: string, leaseMs: number): Promise<BridgeDelivery | null> {
     this.assertPrincipal(principal);
     try {
@@ -141,11 +147,11 @@ export class HttpBridgeStore implements BridgeStore {
       throw error;
     }
   }
-  async settleDelivery(principal: BridgePrincipal, id: string, token: string, state: "acked" | "retrying" | "dead", error: string | undefined, retryPolicy: RetryPolicy): Promise<BridgeDelivery | null> {
+  async settleDelivery(principal: BridgePrincipal, id: string, token: string, state: "acked" | "retrying" | "dead", error?: string, _retryPolicy?: import("./bridge-domain.js").RetryPolicy): Promise<BridgeDelivery | null> {
     this.assertPrincipal(principal);
     const action = state === "acked" ? "ack" : "nack";
     try {
-      return await this.request(`/v2/deliveries/${id}/${action}`, { method: "POST", body: { leaseToken: token, error, dead: state === "dead", retryPolicy } });
+      return await this.request(`/v2/deliveries/${id}/${action}`, { method: "POST", body: { leaseToken: token, error, disposition: state === "dead" ? "dead" : "retry" } });
     } catch (caught) {
       if (caught instanceof BridgeHttpError && caught.status === 409) return null;
       throw caught;

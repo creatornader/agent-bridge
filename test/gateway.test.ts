@@ -256,6 +256,52 @@ describe("authenticated v2 gateway", () => {
     }
   });
 
+  it("exposes caller-bound delivery listing and publisher controls", async () => {
+    const principals = new Map([
+      ["publisher-token", { workspace: "workspace-a", agent: "publisher" }],
+      ["worker-token", { workspace: "workspace-a", agent: "worker" }],
+      ["other-token", { workspace: "workspace-a", agent: "other" }],
+    ]);
+    const base = await gateway({
+      resolve: async (token) => {
+        const principal = principals.get(token);
+        return principal ? { id: `${principal.agent}-credential`, principal } : null;
+      },
+    });
+    const sent = await fetch(`${base}/v2/messages`, {
+      method: "POST", headers: auth("publisher-token"),
+      body: JSON.stringify({ type: "work", content: "controlled", targets: ["worker"] }),
+    });
+    expect(sent.status).toBe(201);
+    const claimed = await fetch(`${base}/v2/deliveries/claim`, {
+      method: "POST", headers: { ...auth("worker-token"), "x-agent-bridge-instance": "one" },
+      body: JSON.stringify({ leaseMs: 1_000 }),
+    });
+    const claim = await claimed.json();
+    const listed = await fetch(`${base}/v2/deliveries?role=recipient&recipient=worker`, {
+      headers: auth("worker-token"),
+    });
+    expect((await listed.json()).deliveries).toHaveLength(1);
+    const hidden = await fetch(`${base}/v2/deliveries/${claim.delivery.id}/cancel`, {
+      method: "POST", headers: auth("other-token"), body: "{}",
+    });
+    expect(hidden.status).toBe(404);
+    const cancelled = await fetch(`${base}/v2/deliveries/${claim.delivery.id}/cancel`, {
+      method: "POST", headers: auth("publisher-token"), body: "{}",
+    });
+    expect(cancelled.status).toBe(200);
+    expect((await cancelled.json()).state).toBe("cancelled");
+    const requeued = await fetch(`${base}/v2/deliveries/${claim.delivery.id}/requeue`, {
+      method: "POST", headers: auth("publisher-token"), body: "{}",
+    });
+    expect(requeued.status).toBe(200);
+    const conflict = await fetch(`${base}/v2/deliveries/${claim.delivery.id}/requeue`, {
+      method: "POST", headers: auth("publisher-token"), body: "{}",
+    });
+    expect(conflict.status).toBe(409);
+    expect(await conflict.json()).toMatchObject({ error: { code: "delivery_state_conflict" } });
+  });
+
   it("requires authentication for metrics", async () => {
     const base = await gateway();
     expect((await fetch(`${base}/metrics`)).status).toBe(401);

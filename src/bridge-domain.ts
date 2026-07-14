@@ -9,15 +9,37 @@ export type JsonValue =
   | JsonValue[]
   | { [key: string]: JsonValue };
 
-export type DeliveryState = "pending" | "claimed" | "acked" | "retrying" | "dead";
+export type DeliveryState = "pending" | "claimed" | "acked" | "retrying" | "dead" | "cancelled";
 export type MessagePriority = "info" | "high" | "urgent";
 
+export interface LeasedDeliveryPolicy {
+  mode: "leased";
+  maxAttempts: number;
+  retryBaseDelayMs: number;
+  retryMaxDelayMs: number;
+  retryJitterRatio: number;
+  notBefore?: string;
+}
+
+export type DeliveryPolicy = { mode: "mailbox" } | LeasedDeliveryPolicy;
+/** @deprecated Consumer retry policy is validated and ignored for one compatibility release. */
 export interface RetryPolicy {
   maxAttempts: number;
   baseDelayMs: number;
   maxDelayMs: number;
   jitterRatio: number;
 }
+export type DeliveryAction =
+  | "created"
+  | "claim"
+  | "ack"
+  | "nack_retry"
+  | "nack_dead"
+  | "lease_expired"
+  | "attempts_exhausted"
+  | "message_expired"
+  | "cancel"
+  | "requeue";
 
 export interface BridgePrincipal {
   workspace: string;
@@ -43,6 +65,7 @@ export interface MessageDraft {
   atribReceiptId?: string;
   informedBy?: string[];
   metadata?: JsonValue;
+  deliveryPolicy?: DeliveryPolicy | Record<string, unknown>;
 }
 
 export interface BridgeMessage
@@ -64,6 +87,7 @@ export interface BridgeMessage
   atribReceiptId?: string;
   informedBy?: string[];
   metadata?: JsonValue;
+  deliveryPolicy: DeliveryPolicy;
 }
 
 export interface BridgeDelivery {
@@ -73,11 +97,17 @@ export interface BridgeDelivery {
   recipient: string;
   state: DeliveryState;
   attempt: number;
+  cycleAttempt: number;
+  requeueCount: number;
+  createdAt: string;
+  priorityRank: number;
   availableAt: string;
   leaseToken?: string;
   leaseOwner?: string;
   leaseExpiresAt?: string;
   lastError?: string;
+  lastActor?: string;
+  lastAction: DeliveryAction;
 }
 
 export interface BridgeDeliveryEvent {
@@ -89,8 +119,12 @@ export interface BridgeDeliveryEvent {
   fromState?: DeliveryState;
   toState: DeliveryState;
   attempt: number;
+  cycleAttempt: number;
+  requeueCount: number;
   leaseOwner?: string;
   error?: string;
+  actor: string;
+  action: DeliveryAction;
   createdAt: string;
 }
 
@@ -118,6 +152,11 @@ export class BridgeValidationError extends Error {
 export class BridgePrincipalMismatchError extends Error {
   readonly code = "principal_mismatch";
   readonly status = 403;
+}
+
+export class DeliveryStateConflictError extends Error {
+  readonly code = "delivery_state_conflict";
+  readonly status = 409;
 }
 
 function clean(value: unknown, field: string, max = 512): string {
@@ -235,30 +274,65 @@ export function validateUuid(value: unknown, field: string): string {
   return result;
 }
 
-export function validateRetryPolicy(input: Partial<RetryPolicy> | null = {}): RetryPolicy {
-  if (input === null || typeof input !== "object" || Array.isArray(input)) {
-    throw new BridgeValidationError("retryPolicy must be an object");
+const LEASED_POLICY_KEYS = new Set([
+  "mode",
+  "maxAttempts",
+  "retryBaseDelayMs",
+  "retryMaxDelayMs",
+  "retryJitterRatio",
+  "notBefore",
+]);
+
+export function validateLeasedDeliveryPolicy(
+  input: Record<string, unknown> = {},
+): LeasedDeliveryPolicy {
+  for (const key of Object.keys(input)) {
+    if (!LEASED_POLICY_KEYS.has(key)) {
+      throw new BridgeValidationError(`deliveryPolicy.${key} is not supported`);
+    }
   }
-  const result: RetryPolicy = {
-    maxAttempts: input.maxAttempts ?? 5,
-    baseDelayMs: input.baseDelayMs ?? 1_000,
-    maxDelayMs: input.maxDelayMs ?? 60_000,
-    jitterRatio: input.jitterRatio ?? 0.2,
+  const notBefore = timestamp(input.notBefore, "deliveryPolicy.notBefore");
+  const result: LeasedDeliveryPolicy = {
+    mode: "leased",
+    maxAttempts: input.maxAttempts === undefined ? 5 : Number(input.maxAttempts),
+    retryBaseDelayMs: input.retryBaseDelayMs === undefined ? 1_000 : Number(input.retryBaseDelayMs),
+    retryMaxDelayMs: input.retryMaxDelayMs === undefined ? 60_000 : Number(input.retryMaxDelayMs),
+    retryJitterRatio: input.retryJitterRatio === undefined ? 0.2 : Number(input.retryJitterRatio),
+    ...(notBefore ? { notBefore } : {}),
   };
 
   if (!Number.isSafeInteger(result.maxAttempts) || result.maxAttempts < 1 || result.maxAttempts > 100) {
     throw new BridgeValidationError("maxAttempts must be between 1 and 100");
   }
-  if (!Number.isSafeInteger(result.baseDelayMs) || result.baseDelayMs < 1 || result.baseDelayMs > 3_600_000) {
-    throw new BridgeValidationError("baseDelayMs must be between 1 and 3600000");
+  if (!Number.isSafeInteger(result.retryBaseDelayMs) || result.retryBaseDelayMs < 1 || result.retryBaseDelayMs > 3_600_000) {
+    throw new BridgeValidationError("retryBaseDelayMs must be between 1 and 3600000");
   }
-  if (!Number.isSafeInteger(result.maxDelayMs) || result.maxDelayMs < result.baseDelayMs || result.maxDelayMs > 86_400_000) {
-    throw new BridgeValidationError("maxDelayMs must be at least baseDelayMs and at most 86400000");
+  if (!Number.isSafeInteger(result.retryMaxDelayMs) || result.retryMaxDelayMs < result.retryBaseDelayMs || result.retryMaxDelayMs > 86_400_000) {
+    throw new BridgeValidationError("retryMaxDelayMs must be at least retryBaseDelayMs and at most 86400000");
   }
-  if (!Number.isFinite(result.jitterRatio) || result.jitterRatio < 0 || result.jitterRatio > 1) {
-    throw new BridgeValidationError("jitterRatio must be between 0 and 1");
+  if (!Number.isFinite(result.retryJitterRatio) || result.retryJitterRatio < 0 || result.retryJitterRatio > 1) {
+    throw new BridgeValidationError("retryJitterRatio must be between 0 and 1");
   }
   return result;
+}
+
+export function validateDeliveryPolicy(
+  input: Record<string, unknown> | null | undefined,
+  targeted: boolean,
+): DeliveryPolicy {
+  if (input === null || input === undefined) return targeted ? validateLeasedDeliveryPolicy() : { mode: "mailbox" };
+  if (typeof input !== "object" || Array.isArray(input)) throw new BridgeValidationError("deliveryPolicy must be an object");
+  const mode = input.mode ?? (targeted ? "leased" : "mailbox");
+  if (mode !== "mailbox" && mode !== "leased") throw new BridgeValidationError("deliveryPolicy.mode is invalid");
+  if (mode === "leased" && !targeted) throw new BridgeValidationError("leased deliveryPolicy requires targets");
+  if (mode === "mailbox") {
+    const keys = Object.keys(input);
+    if (keys.some((key) => key !== "mode")) {
+      throw new BridgeValidationError("mailbox deliveryPolicy accepts only mode");
+    }
+    return { mode: "mailbox" };
+  }
+  return validateLeasedDeliveryPolicy(input);
 }
 
 export function validateMessageDraft(
@@ -281,6 +355,17 @@ export function validateMessageDraft(
     throw new BridgeValidationError("informedBy must contain atrib record hashes");
   }
 
+  const targets = stringArray(input.targets, "targets", 64, 128);
+  const expiresAt = timestamp(input.expiresAt, "expiresAt");
+  const deliveryPolicy = validateDeliveryPolicy(input.deliveryPolicy as Record<string, unknown> | undefined, targets.length > 0);
+  if (
+    deliveryPolicy.mode === "leased" &&
+    deliveryPolicy.notBefore &&
+    expiresAt &&
+    deliveryPolicy.notBefore >= expiresAt
+  ) {
+    throw new BridgeValidationError("deliveryPolicy.notBefore must be before expiresAt");
+  }
   return {
     id,
     project: validateProject(input.project),
@@ -288,17 +373,18 @@ export function validateMessageDraft(
     content: content(input.content),
     contentType: optional(input.contentType, "contentType", 128) ?? "text/plain",
     data: json(input.data, "data"),
-    targets: stringArray(input.targets, "targets", 64, 128),
+    targets,
     threadId: optional(input.threadId, "threadId", 128),
     replyToId: optional(input.replyToId, "replyToId", 128),
     correlationId: optional(input.correlationId, "correlationId", 128),
     causationId: optional(input.causationId, "causationId", 128),
     priority,
-    expiresAt: timestamp(input.expiresAt, "expiresAt"),
+    expiresAt,
     idempotencyKey: optional(input.idempotencyKey, "idempotencyKey", 256),
     atribReceiptId,
     informedBy: informedBy.map((hash) => hash.toLowerCase()),
     metadata: json(input.metadata, "metadata"),
+    deliveryPolicy,
   };
 }
 
@@ -358,4 +444,62 @@ export function decodeCursor(cursor: string | undefined, scope?: string): string
   } catch {
     throw new BridgeValidationError("cursor is invalid");
   }
+}
+
+export function scopedCursorScope(kind: string, principal: BridgePrincipal, filters: JsonValue): string {
+  return createHash("sha256").update(JSON.stringify({
+    kind,
+    workspace: principal.workspace,
+    agent: principal.agent,
+    filters,
+  })).digest("base64url");
+}
+
+export function encodeScopedCursor(scope: string, position: JsonValue): string {
+  return Buffer.from(JSON.stringify({ v: 1, scope, position })).toString("base64url");
+}
+
+export function decodeScopedCursor(cursor: string | undefined, scope: string): JsonValue | undefined {
+  if (!cursor) return undefined;
+  if (typeof cursor !== "string" || cursor.length > 1_024) throw new BridgeValidationError("cursor is invalid");
+  try {
+    const parsed = JSON.parse(Buffer.from(cursor, "base64url").toString("utf8"));
+    if (parsed?.v !== 1 || parsed.scope !== scope || parsed.position === undefined) throw new Error();
+    return parsed.position as JsonValue;
+  } catch {
+    throw new BridgeValidationError("cursor is invalid");
+  }
+}
+
+export function validateDeliveryCursorPosition(
+  position: JsonValue | undefined,
+): { createdAt: string; id: string } | undefined {
+  if (position === undefined) return undefined;
+  if (position === null || Array.isArray(position) || typeof position !== "object") {
+    throw new BridgeValidationError("cursor is invalid");
+  }
+  const createdAt = position.createdAt;
+  const id = position.id;
+  if (
+    typeof createdAt !== "string" ||
+    Number.isNaN(Date.parse(createdAt)) ||
+    new Date(createdAt).toISOString() !== createdAt ||
+    typeof id !== "string" ||
+    !UUID_RE.test(id)
+  ) {
+    throw new BridgeValidationError("cursor is invalid");
+  }
+  return { createdAt, id };
+}
+
+export function validateEventCursorPosition(position: JsonValue | undefined): string | undefined {
+  if (
+    position !== undefined &&
+    (typeof position !== "string" ||
+      !SEQUENCE_RE.test(position) ||
+      BigInt(position) > POSTGRES_BIGINT_MAX)
+  ) {
+    throw new BridgeValidationError("cursor is invalid");
+  }
+  return position;
 }

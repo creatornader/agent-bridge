@@ -22,10 +22,21 @@ export interface BridgeDiagnostics {
   claimed: number | null;
   retrying: number | null;
   dead: number | null;
+  cancelled?: number | null;
   oldestAvailableAt?: string;
   principal?: { workspace: string; agent: string };
 }
-export interface ClaimOptions { leaseMs: number; maxAttempts?: number; now?: Date; }
+export interface ClaimOptions { leaseMs: number; now?: Date; maxAttempts?: number; }
+export interface DeliveryQuery {
+  role?: "recipient" | "publisher" | "all";
+  states?: DeliveryState[];
+  messageId?: string;
+  recipient?: string;
+  cursor?: string;
+  limit?: number;
+}
+export interface DeliveryPage { deliveries: BridgeDelivery[]; cursor?: string; }
+export interface DeliveryEventPage { events: BridgeDeliveryEvent[]; cursor?: string; }
 export interface BridgeStore {
   initialize(options?: { signal?: AbortSignal }): Promise<void>;
   insertMessage(message: Omit<BridgeMessage, "sequence" | "createdAt">, options?: { signal?: AbortSignal }): Promise<InsertMessageResult>;
@@ -34,11 +45,14 @@ export interface BridgeStore {
   recordLegacyReceipt?(legacyIds: string[], principal: string): Promise<number>;
   claimDelivery(principal: BridgePrincipal, options: ClaimOptions): Promise<BridgeDelivery | null>;
   renewDelivery(principal: BridgePrincipal, deliveryId: string, leaseToken: string, leaseMs: number): Promise<BridgeDelivery | null>;
-  settleDelivery(principal: BridgePrincipal, deliveryId: string, leaseToken: string, state: Extract<DeliveryState, "acked" | "retrying" | "dead">, error: string | undefined, retryPolicy: RetryPolicy): Promise<BridgeDelivery | null>;
+  settleDelivery(principal: BridgePrincipal, deliveryId: string, leaseToken: string, state: Extract<DeliveryState, "acked" | "retrying" | "dead">, error?: string, retryPolicy?: RetryPolicy): Promise<BridgeDelivery | null>;
+  listDeliveries?(principal: BridgePrincipal, query?: DeliveryQuery): Promise<DeliveryPage>;
+  listDeliveryEvents?(principal: BridgePrincipal, deliveryId: string, query?: { cursor?: string; limit?: number }): Promise<DeliveryEventPage>;
+  cancelDelivery?(principal: BridgePrincipal, deliveryId: string): Promise<BridgeDelivery | null>;
+  requeueDelivery?(principal: BridgePrincipal, deliveryId: string): Promise<BridgeDelivery | null>;
   diagnostics?(principal: BridgePrincipal): Promise<BridgeDiagnostics>;
   heartbeat?(principal: BridgePrincipal, leaseMs: number, runtimeType?: string, capabilities?: string[]): Promise<AgentPresence>;
   listPresence?(principal: BridgePrincipal): Promise<AgentPresence[]>;
-  listDeliveryEvents?(deliveryId: string): Promise<BridgeDeliveryEvent[]>;
   sync?(options?: { maxPush?: number; maxPages?: number; signal?: AbortSignal }): Promise<unknown>;
   verifyRemote?(): Promise<void>;
   close?(): Promise<void>;

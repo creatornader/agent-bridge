@@ -3,7 +3,6 @@ import type {
   BridgeMessage,
   BridgePrincipal,
   DeliveryState,
-  RetryPolicy,
 } from "./bridge-domain.js";
 import type {
   BridgeDiagnostics,
@@ -471,13 +470,18 @@ export class SyncingBridgeStore implements BridgeStore {
     deliveryId: string,
     leaseToken: string,
     state: Extract<DeliveryState, "acked" | "retrying" | "dead">,
-    error: string | undefined,
-    retryPolicy: RetryPolicy,
+    error?: string,
+    _retryPolicy?: import("./bridge-domain.js").RetryPolicy,
   ): Promise<BridgeDelivery | null> {
     this.assertPrincipal(principal);
     await this.ensureRemote();
-    return this.remote.settleDelivery(principal, deliveryId, leaseToken, state, error, retryPolicy);
+    return this.remote.settleDelivery(principal, deliveryId, leaseToken, state, error);
   }
+
+  async listDeliveries(principal: BridgePrincipal, query: import("./bridge-store.js").DeliveryQuery = {}) { this.assertPrincipal(principal); await this.ensureRemote(); if(!this.remote.listDeliveries) throw new Error("delivery listing is not supported"); return this.remote.listDeliveries(principal,query); }
+  async listDeliveryEvents(principal: BridgePrincipal,id:string,query:{cursor?:string;limit?:number}={}) { this.assertPrincipal(principal);await this.ensureRemote();if(!this.remote.listDeliveryEvents)throw new Error("delivery event listing is not supported");return this.remote.listDeliveryEvents(principal,id,query); }
+  async cancelDelivery(principal:BridgePrincipal,id:string){this.assertPrincipal(principal);await this.ensureRemote();if(!this.remote.cancelDelivery)throw new Error("delivery cancellation is not supported");return this.remote.cancelDelivery(principal,id);}
+  async requeueDelivery(principal:BridgePrincipal,id:string){this.assertPrincipal(principal);await this.ensureRemote();if(!this.remote.requeueDelivery)throw new Error("delivery requeue is not supported");return this.remote.requeueDelivery(principal,id);}
 
   async diagnostics(principal: BridgePrincipal): Promise<SyncDiagnostics> {
     this.assertPrincipal(principal);
@@ -498,6 +502,7 @@ export class SyncingBridgeStore implements BridgeStore {
       claimed: remote?.claimed ?? null,
       retrying: remote?.retrying ?? null,
       dead: remote?.dead ?? null,
+      cancelled: remote?.cancelled ?? null,
       oldestAvailableAt: remote?.oldestAvailableAt,
       principal: { workspace: principal.workspace, agent: principal.agent },
       remoteReachable: Boolean(remote),

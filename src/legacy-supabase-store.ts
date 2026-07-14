@@ -1,4 +1,4 @@
-import { cursorScope, decodeCursor, encodeCursor, type BridgeDelivery, type BridgeMessage, type BridgePrincipal, type RetryPolicy } from "./bridge-domain.js";
+import { cursorScope, decodeCursor, encodeCursor, type BridgeDelivery, type BridgeMessage, type BridgePrincipal } from "./bridge-domain.js";
 import type {
   BridgeStore,
   BridgeDiagnostics,
@@ -69,6 +69,7 @@ function asMessage(row: LegacyRow, principal: BridgePrincipal): BridgeMessage {
     atribReceiptId: row.atrib_receipt_id ?? envelope?.atrib_receipt_id,
     informedBy: envelope?.informed_by,
     metadata: row.metadata,
+    deliveryPolicy: { mode: "mailbox" },
     createdAt: row.created_at,
   };
 }
@@ -151,6 +152,9 @@ export class LegacySupabaseRestStore implements BridgeStore {
       throw new Error(
         "legacy Supabase mode cannot enforce idempotency keys; migrate to shared mode",
       );
+    }
+    if (input.deliveryPolicy?.mode === "leased") {
+      throw Object.assign(new Error("leased delivery policy is not supported in legacy mode"), { code: "delivery_not_supported", status: 400 });
     }
     const existingMetadata = input.metadata &&
       typeof input.metadata === "object" &&
@@ -336,8 +340,8 @@ export class LegacySupabaseRestStore implements BridgeStore {
     _deliveryId: string,
     _leaseToken: string,
     _state: "acked" | "retrying" | "dead",
-    _error: string | undefined,
-    _retryPolicy: RetryPolicy,
+    _error?: string,
+    _retryPolicy?: import("./bridge-domain.js").RetryPolicy,
   ): Promise<BridgeDelivery | null> {
     throw new Error("legacy Supabase adapter does not support deliveries");
   }
