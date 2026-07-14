@@ -22,6 +22,7 @@ import {
   runtimeSchemaReady,
 } from "../src/migrations.js";
 import { PostgresBridgeStore } from "../src/postgres-bridge-store.js";
+import { PostgresRequestAuthority } from "../src/postgres-request-authority.js";
 import { installClient } from "../src/client-installer.js";
 import { resolveClientConfig } from "../src/client-config.js";
 import { createClientRuntime } from "../src/client-runtime.js";
@@ -34,11 +35,14 @@ async function withTemporaryDatabase(
   run: (database: pg.Pool) => Promise<void>,
 ): Promise<void> {
   const name = `bridge_upgrade_${randomUUID().replaceAll("-", "")}`;
-  const roleName = `agent_bridge_runtime_${createHash("md5").update(name).digest("hex").slice(0, 16)}`;
+  const suffix = createHash("md5").update(name).digest("hex").slice(0, 16);
+  const roleNames = ["runtime", "data_owner", "context_reader", "event_writer"]
+    .map((kind) => `agent_bridge_${kind}_${suffix}`);
   const adminUrl = new URL(databaseUrl!);
   adminUrl.pathname = "/postgres";
   const admin = new pg.Client({ connectionString: adminUrl.toString() });
   await admin.connect();
+  const failures: unknown[] = [];
   try {
     await admin.query(`CREATE DATABASE "${name}"`);
     const temporaryUrl = new URL(databaseUrl!);
@@ -46,13 +50,32 @@ async function withTemporaryDatabase(
     const temporary = new pg.Pool({ connectionString: temporaryUrl.toString(), max: 2 });
     try {
       await run(temporary);
+    } catch (error) {
+      failures.push(error);
     } finally {
-      await temporary.end();
+      try {
+        await temporary.end();
+      } catch (error) {
+        failures.push(error);
+      }
     }
-  } finally {
-    await admin.query(`DROP DATABASE IF EXISTS "${name}"`);
-    await admin.query(`DROP ROLE IF EXISTS ${roleName}`);
-    await admin.end();
+  } catch (error) {
+    failures.push(error);
+  }
+  for (const cleanup of [
+    () => admin.query(`DROP DATABASE IF EXISTS "${name}"`),
+    ...roleNames.map((roleName) => () => admin.query(`DROP ROLE IF EXISTS ${roleName}`)),
+    () => admin.end(),
+  ]) {
+    try {
+      await cleanup();
+    } catch (error) {
+      failures.push(error);
+    }
+  }
+  if (failures.length === 1) throw failures[0];
+  if (failures.length > 1) {
+    throw new AggregateError(failures, "temporary PostgreSQL database run and cleanup failed");
   }
 }
 
@@ -97,6 +120,43 @@ async function runtimeRole(database: { query: pg.Pool["query"] }): Promise<strin
     throw new Error("unexpected runtime role name");
   }
   return role;
+}
+
+async function withRuntimeAuthority<T>(
+  database: pg.Pool,
+  credentialId: string,
+  token: string,
+  run: (client: pg.PoolClient) => Promise<T>,
+): Promise<T> {
+  const client = await database.connect();
+  let transactionOpen = false;
+  try {
+    await client.query("BEGIN");
+    transactionOpen = true;
+    await client.query(
+      "SELECT * FROM agent_bridge.open_request_authority($1::uuid,$2::text,$3::uuid)",
+      [credentialId, hashCredential(token), randomUUID()],
+    );
+    const result = await run(client);
+    await client.query("SELECT agent_bridge.close_request_authority()");
+    await client.query("COMMIT");
+    transactionOpen = false;
+    return result;
+  } finally {
+    if (transactionOpen) await client.query("ROLLBACK");
+    client.release();
+  }
+}
+
+async function expectStatementRejected(
+  client: pg.PoolClient,
+  sql: string,
+  values: unknown[],
+  pattern: RegExp,
+): Promise<void> {
+  await client.query("SAVEPOINT hostile_statement");
+  await expect(client.query(sql, values)).rejects.toThrow(pattern);
+  await client.query("ROLLBACK TO SAVEPOINT hostile_statement");
 }
 
 integration("PostgreSQL BridgeStore integration", () => {
@@ -785,7 +845,7 @@ integration("PostgreSQL BridgeStore integration", () => {
     }
   });
 
-  it("runs gateway operations through the restricted database role", async () => {
+  it("fails closed when the restricted role has no request authority", async () => {
     const workspaceId = await workspace();
     const agent = await pool!.query<{ id: string }>(
       `INSERT INTO agent_bridge.agents (workspace_id, principal)
@@ -803,7 +863,7 @@ integration("PostgreSQL BridgeStore integration", () => {
     const client = await pool!.connect();
     try {
       await client.query(`SET ROLE ${await runtimeRole(client)}`);
-      expect(await runtimeSchemaReady(client)).toBe(true);
+      expect(await runtimeSchemaReady(client)).toBe(false);
       expect(await new PostgresCredentialResolver(client).resolve(token)).toMatchObject({
         principal: { workspace: workspaceId, agent: "worker" },
       });
@@ -836,29 +896,15 @@ integration("PostgreSQL BridgeStore integration", () => {
         ),
       ).rejects.toThrow(/permission denied/);
       const service = new BridgeService(new PostgresBridgeStore(client));
-      const published = await service.publish(
+      await expect(service.publish(
         { workspace: workspaceId, agent: "worker", instance: "runtime-one" },
         { type: "agent-bridge.work", content: "restricted role", targets: ["worker"] },
-      );
-      const claim = await service.claim(
-        { workspace: workspaceId, agent: "worker", instance: "runtime-one" },
-        { leaseMs: 1_000 },
-      );
-      expect(claim?.delivery.messageId).toBe(published.message.id);
-      expect((await service.ack(
-        { workspace: workspaceId, agent: "worker", instance: "runtime-one" },
-        claim!.delivery.id,
-        claim!.leaseToken,
-      ))?.state).toBe("acked");
-      await service.heartbeat(
-        { workspace: workspaceId, agent: "worker", instance: "runtime-one" },
-        { leaseMs: 1_000, capabilities: ["mcp"] },
-      );
+      )).rejects.toThrow(/row-level security policy/);
       await expect(
         client.query("INSERT INTO agent_bridge.workspaces (id, name) VALUES ('forbidden', 'forbidden')"),
       ).rejects.toThrow(/permission denied/);
       await expect(
-        client.query("UPDATE agent_bridge.messages SET content='changed' WHERE id=$1", [published.message.id]),
+        client.query("UPDATE agent_bridge.messages SET content='changed'"),
       ).rejects.toThrow(/permission denied/);
       await expect(
         client.query("CREATE TABLE agent_bridge.forbidden (id integer)"),
@@ -866,6 +912,282 @@ integration("PostgreSQL BridgeStore integration", () => {
     } finally {
       await client.query("RESET ROLE");
       client.release();
+    }
+  });
+
+  it("enforces row isolation for a real runtime login", async () => {
+    const publisherWorkspace = await workspace();
+    const outsiderWorkspace = await workspace();
+    const principals = [
+      { workspace: publisherWorkspace, principal: "publisher" },
+      { workspace: publisherWorkspace, principal: "recipient" },
+      { workspace: publisherWorkspace, principal: "bystander" },
+      { workspace: outsiderWorkspace, principal: "outsider" },
+    ];
+    const credentials = new Map<string, { id: string; token: string }>();
+    for (const entry of principals) {
+      const agent = await pool!.query<{ id: string }>(
+        `INSERT INTO agent_bridge.agents (workspace_id,principal)
+         VALUES ($1,$2) RETURNING id`,
+        [entry.workspace, entry.principal],
+      );
+      const token = `${entry.principal}-${randomUUID()}`;
+      const credential = await pool!.query<{ id: string }>(
+        `INSERT INTO agent_bridge.credentials (
+           workspace_id,agent_id,token_hash,scopes,scope_set_name
+         ) VALUES (
+           $1,$2,$3,
+           (SELECT scopes FROM agent_bridge.credential_scope_sets WHERE name='release-a-full'),
+           'release-a-full'
+         ) RETURNING id`,
+        [entry.workspace, agent.rows[0]!.id, hashCredential(token)],
+      );
+      credentials.set(entry.principal, { id: credential.rows[0]!.id, token });
+    }
+
+    const login = `bridge_rls_${randomUUID().replaceAll("-", "")}`;
+    const password = randomUUID();
+    await pool!.query(`CREATE ROLE ${login} LOGIN PASSWORD '${password}'`);
+    let runtime: pg.Pool | undefined;
+    try {
+      await pool!.query(`GRANT ${await runtimeRole(pool!)} TO ${login}`);
+      const runtimeUrl = new URL(databaseUrl!);
+      runtimeUrl.username = login;
+      runtimeUrl.password = password;
+      runtime = new pg.Pool({ connectionString: runtimeUrl.toString(), max: 3 });
+      expect(await runtimeSchemaReady(runtime)).toBe(true);
+      await pool!.query(`ALTER ROLE ${login} BYPASSRLS`);
+      expect(await runtimeSchemaReady(runtime)).toBe(false);
+      await pool!.query(`ALTER ROLE ${login} NOBYPASSRLS`);
+      expect(await runtimeSchemaReady(runtime)).toBe(true);
+      for (const [unsafe, safe] of [
+        ["CREATEROLE", "NOCREATEROLE"],
+        ["CREATEDB", "NOCREATEDB"],
+        ["REPLICATION", "NOREPLICATION"],
+      ] as const) {
+        await pool!.query(`ALTER ROLE ${login} ${unsafe}`);
+        expect(await runtimeSchemaReady(runtime), unsafe).toBe(false);
+        await pool!.query(`ALTER ROLE ${login} ${safe}`);
+        expect(await runtimeSchemaReady(runtime), safe).toBe(true);
+      }
+      const unexpectedRole = `bridge_extra_${randomUUID().replaceAll("-", "")}`;
+      await pool!.query(`CREATE ROLE ${unexpectedRole} NOLOGIN`);
+      try {
+        await pool!.query(`GRANT ${unexpectedRole} TO ${login}`);
+        expect(await runtimeSchemaReady(runtime)).toBe(false);
+        await pool!.query(`REVOKE ${unexpectedRole} FROM ${login}`);
+        expect(await runtimeSchemaReady(runtime)).toBe(true);
+      } finally {
+        await pool!.query(`REVOKE ${unexpectedRole} FROM ${login}`).catch(() => {});
+        await pool!.query(`DROP ROLE IF EXISTS ${unexpectedRole}`);
+      }
+      const outside = await runtime.connect();
+      try {
+        expect((await outside.query("SELECT agent_bridge.current_request_workspace() AS workspace")).rows[0]!.workspace).toBeNull();
+        await outside.query("SET agent_bridge.workspace='forged-workspace'");
+        expect((await outside.query("SELECT agent_bridge.current_request_workspace() AS workspace")).rows[0]!.workspace).toBeNull();
+        expect((await outside.query("SELECT count(*)::integer AS count FROM agent_bridge.messages")).rows[0]!.count).toBe(0);
+        await expect(outside.query(
+          `INSERT INTO agent_bridge.messages (
+             id,workspace,source,type,content,targets,delivery_mode,created_at
+           ) VALUES ($1,$2,'publisher','agent-bridge.work','forged','[]'::jsonb,'mailbox',now())`,
+          [uuidv7(), publisherWorkspace],
+        )).rejects.toThrow(/row-level security policy/);
+        await expect(outside.query(`SET ROLE ${await pool!.query<{ role_name: string }>(
+          `SELECT 'agent_bridge_data_owner_' || substr(md5(current_database()),1,16) AS role_name`,
+        ).then((result) => result.rows[0]!.role_name)}`)).rejects.toThrow(/permission denied/);
+      } finally {
+        outside.release();
+      }
+
+      const authority = new PostgresRequestAuthority(runtime);
+      const runService = async <T,>(
+        principal: string,
+        work: (service: BridgeService, principal: { workspace: string; agent: string }) => Promise<T>,
+      ) => {
+        const credential = credentials.get(principal)!;
+        return authority.run(
+          credential.id,
+          hashCredential(credential.token),
+          randomUUID(),
+          new AbortController().signal,
+          async (context) => {
+            await context.beginDomainWork();
+            return work(new BridgeService(context.store), context.credential.principal);
+          },
+        );
+      };
+      const publishThroughAuthority = async (principal: string, content: string, targets: string[]) =>
+        runService(principal, (service, authenticated) => service.publish(
+          authenticated,
+          { type: "agent-bridge.work", content, targets },
+        ));
+      const [published, outsiderMessage] = await Promise.all([
+        publishThroughAuthority("publisher", "isolated publisher message", ["recipient"]),
+        publishThroughAuthority("outsider", "isolated outsider message", ["outsider"]),
+      ]);
+
+      const publisherCredential = credentials.get("publisher")!;
+      await withRuntimeAuthority(runtime, publisherCredential.id, publisherCredential.token, async (client) => {
+        const visible = await client.query<{ id: string }>(
+          "SELECT id FROM agent_bridge.messages ORDER BY sequence",
+        );
+        expect(visible.rows.map((row) => row.id)).toContain(published.message.id);
+        expect(visible.rows.map((row) => row.id)).not.toContain(outsiderMessage.message.id);
+        const explain = await client.query<{ "QUERY PLAN": Array<{ Plan: Record<string, unknown> }> }>(
+          "EXPLAIN (ANALYZE, COSTS OFF, FORMAT JSON) SELECT * FROM agent_bridge.messages",
+        );
+        const planNodes: Array<Record<string, unknown>> = [];
+        const visitPlan = (node: Record<string, unknown>) => {
+          planNodes.push(node);
+          for (const child of (node.Plans as Array<Record<string, unknown>> | undefined) ?? []) {
+            visitPlan(child);
+          }
+        };
+        visitPlan(explain.rows[0]!["QUERY PLAN"][0]!.Plan);
+        const initPlans = planNodes.filter((node) => node["Parent Relationship"] === "InitPlan");
+        expect(initPlans.length).toBeGreaterThanOrEqual(2);
+        expect(initPlans.some((node) => node["Actual Loops"] === 1)).toBe(true);
+        expect(initPlans.every((node) => Number(node["Actual Loops"]) <= 1)).toBe(true);
+        expect(planNodes.filter((node) => node["Parent Relationship"] === "SubPlan")).toHaveLength(0);
+        await expectStatementRejected(
+          client,
+          "UPDATE agent_bridge.deliveries SET state='claimed',last_action='claim' WHERE message_id=$1",
+          [published.message.id],
+          /only the delivery recipient may update delivery state/,
+        );
+        await expectStatementRejected(
+          client,
+          "UPDATE agent_bridge.deliveries SET lease_owner='publisher-forged' WHERE message_id=$1",
+          [published.message.id],
+          /only the delivery recipient may update lease state/,
+        );
+        await expectStatementRejected(
+          client,
+          `UPDATE agent_bridge.deliveries
+           SET state='cancelled',last_action='cancel',last_actor='forged'
+           WHERE message_id=$1`,
+          [published.message.id],
+          /publisher delivery actor must match request authority/,
+        );
+        await expectStatementRejected(
+          client,
+          `INSERT INTO agent_bridge.deliveries (
+             id,message_id,workspace,publisher,recipient,state,last_actor,last_action
+           ) VALUES ($1,$2,$3,'publisher','recipient','acked','forged','ack')`,
+          [uuidv7(), published.message.id, publisherWorkspace],
+          /publisher delivery creation must use canonical initial state/,
+        );
+        await expectStatementRejected(
+          client,
+          `INSERT INTO agent_bridge.delivery_events (
+             delivery_id,message_id,workspace,publisher,recipient,to_state,actor,action
+           ) SELECT id,message_id,workspace,publisher,recipient,state,'forged','created'
+             FROM agent_bridge.deliveries WHERE message_id=$1`,
+          [published.message.id],
+          /permission denied/,
+        );
+        await expectStatementRejected(
+          client,
+          `INSERT INTO agent_bridge.messages (
+             id,workspace,source,type,content,targets,delivery_mode,created_at
+           ) VALUES ($1,$2,'publisher','agent-bridge.work','cross-workspace','[]'::jsonb,'mailbox',now())`,
+          [uuidv7(), outsiderWorkspace],
+          /row-level security policy/,
+        );
+      });
+
+      const recipientCredential = credentials.get("recipient")!;
+      await withRuntimeAuthority(runtime, recipientCredential.id, recipientCredential.token, async (client) => {
+        await expectStatementRejected(
+          client,
+          "UPDATE agent_bridge.deliveries SET state='cancelled',last_action='cancel' WHERE message_id=$1",
+          [published.message.id],
+          /only the delivery publisher may cancel/,
+        );
+        await expectStatementRejected(
+          client,
+          `UPDATE agent_bridge.deliveries
+           SET state='claimed',attempt=attempt+1,cycle_attempt=cycle_attempt+1,
+             last_action='claim',last_actor='publisher'
+           WHERE message_id=$1`,
+          [published.message.id],
+          /recipient delivery actor must match request authority/,
+        );
+      });
+
+      const settled = await runService("recipient", async (service, authenticated) => {
+        const principal = { ...authenticated, instance: "recipient-runtime" };
+        const claim = await service.claim(principal, { leaseMs: 5_000 });
+        expect(claim?.delivery.messageId).toBe(published.message.id);
+        expect((await service.ack(principal, claim!.delivery.id, claim!.leaseToken))?.state).toBe("acked");
+        expect(await service.acknowledge(principal, [published.message.id])).toBe(1);
+        await service.heartbeat(principal, { leaseMs: 5_000, runtimeType: "test", capabilities: ["claim"] });
+        return {
+          deliveryId: claim!.delivery.id,
+          actions: (await service.deliveryEvents(principal, claim!.delivery.id)).events.map((event) => event.action),
+        };
+      });
+      expect(settled.actions).toEqual(expect.arrayContaining(["created", "claim", "ack"]));
+
+      const bystanderCredential = credentials.get("bystander")!;
+      await withRuntimeAuthority(runtime, bystanderCredential.id, bystanderCredential.token, async (client) => {
+        for (const table of ["messages", "deliveries", "delivery_events", "receipts"] as const) {
+          const result = await client.query<{ count: number }>(
+            `SELECT count(*)::integer AS count FROM agent_bridge.${table}`,
+          );
+          expect(result.rows[0]!.count, table).toBe(0);
+        }
+        expect((await client.query(
+          "UPDATE agent_bridge.deliveries SET lease_owner='bystander' WHERE message_id=$1",
+          [published.message.id],
+        )).rowCount).toBe(0);
+      });
+
+      await runService("outsider", async (service, authenticated) => {
+        await service.heartbeat(
+          { ...authenticated, instance: "outsider-runtime" },
+          { leaseMs: 5_000, runtimeType: "test" },
+        );
+      });
+      const cancelledMessage = await publishThroughAuthority(
+        "publisher",
+        "publisher lifecycle message",
+        ["recipient"],
+      );
+      const publisherProof = await runService("publisher", async (service, authenticated) => {
+        const delivery = (await service.deliveries(authenticated, {
+          messageId: cancelledMessage.message.id,
+          role: "publisher",
+        })).deliveries[0]!;
+        expect((await service.cancel(authenticated, delivery.id))?.state).toBe("cancelled");
+        expect((await service.requeue(authenticated, delivery.id))?.state).toBe("pending");
+        const present = await service.presence(authenticated);
+        return {
+          deliveryId: delivery.id,
+          actions: (await service.deliveryEvents(authenticated, delivery.id)).events.map((event) => event.action),
+          presence: present.map((entry) => `${entry.agent}/${entry.instance}`),
+        };
+      });
+      expect(publisherProof.actions).toEqual(expect.arrayContaining(["created", "cancel", "requeue"]));
+      expect(publisherProof.presence).toContain("recipient/recipient-runtime");
+      expect(publisherProof.presence).not.toContain("outsider/outsider-runtime");
+      await withRuntimeAuthority(runtime, publisherCredential.id, publisherCredential.token, async (client) => {
+        expect((await client.query(
+          "SELECT count(*)::integer AS count FROM agent_bridge.receipts WHERE message_id=$1",
+          [published.message.id],
+        )).rows[0]!.count).toBe(0);
+      });
+
+      const reused = await runtime.connect();
+      try {
+        expect((await reused.query("SELECT agent_bridge.current_request_principal() AS principal")).rows[0]!.principal).toBeNull();
+      } finally {
+        reused.release();
+      }
+    } finally {
+      await runtime?.end();
+      await pool!.query(`DROP ROLE IF EXISTS ${login}`);
     }
   });
 
@@ -920,18 +1242,19 @@ integration("PostgreSQL BridgeStore integration", () => {
     const login = `bridge_gateway_${randomUUID().replaceAll("-", "")}`;
     const password = randomUUID();
     await pool!.query(`CREATE ROLE ${login} LOGIN PASSWORD '${password}'`);
-    await pool!.query(`GRANT ${await runtimeRole(pool!)} TO ${login}`);
-    const runtimeUrl = new URL(databaseUrl!);
-    runtimeUrl.username = login;
-    runtimeUrl.password = password;
-    const port = await freePort();
-    const gatewayUrl = `http://127.0.0.1:${port}`;
-    const home = mkdtempSync(join(tmpdir(), "agent-bridge-pg-gateway-"));
+    let home: string | undefined;
     let child: ChildProcess | undefined;
     let codexRuntime: Awaited<ReturnType<typeof createClientRuntime>> | undefined;
     let claudeRuntime: Awaited<ReturnType<typeof createClientRuntime>> | undefined;
     let stderr = "";
     try {
+      await pool!.query(`GRANT ${await runtimeRole(pool!)} TO ${login}`);
+      const runtimeUrl = new URL(databaseUrl!);
+      runtimeUrl.username = login;
+      runtimeUrl.password = password;
+      const port = await freePort();
+      const gatewayUrl = `http://127.0.0.1:${port}`;
+      home = mkdtempSync(join(tmpdir(), "agent-bridge-pg-gateway-"));
       child = spawn(process.execPath, [
         fileURLToPath(new URL("../dist/gateway-main.js", import.meta.url)),
       ], {
@@ -940,11 +1263,23 @@ integration("PostgreSQL BridgeStore integration", () => {
           AGENT_BRIDGE_RUNTIME_DATABASE_URL: runtimeUrl.toString(),
           AGENT_BRIDGE_HOST: "127.0.0.1",
           AGENT_BRIDGE_PORT: String(port),
+          AGENT_BRIDGE_DATABASE_POOL_SIZE: "1",
         },
         stdio: ["ignore", "ignore", "pipe"],
       });
       child.stderr?.on("data", (chunk) => { stderr += String(chunk); });
       await waitForGateway(child, gatewayUrl, () => stderr);
+      const capabilities = await fetch(`${gatewayUrl}/v2/capabilities`, {
+        headers: {
+          authorization: `Bearer ${codexToken}`,
+          "x-agent-bridge-protocol-version": "2.1",
+        },
+      });
+      expect(capabilities.status).toBe(200);
+      expect(await capabilities.json()).toMatchObject({
+        requestAuthority: true,
+        rowIsolation: true,
+      });
       const installEnvironment = {
         HOME: home,
         AGENT_BRIDGE_PROVIDER: "gateway",
@@ -1007,9 +1342,12 @@ integration("PostgreSQL BridgeStore integration", () => {
           exited,
           new Promise((resolve) => setTimeout(resolve, 2_000)),
         ]);
-        if (child.exitCode === null) child.kill("SIGKILL");
+        if (child.exitCode === null) {
+          child.kill("SIGKILL");
+          await exited;
+        }
       }
-      rmSync(home, { recursive: true, force: true });
+      if (home) rmSync(home, { recursive: true, force: true });
       await pool!.query(`DROP ROLE IF EXISTS ${login}`);
     }
   });
@@ -1038,30 +1376,23 @@ integration("PostgreSQL BridgeStore integration", () => {
   it("detects request-authority privilege and definer drift", async () => {
     const client = await pool!.connect();
     const role = await runtimeRole(client);
-    const asRuntime = async () => {
-      await client.query(`SET ROLE ${role}`);
-      try {
-        return await runtimeSchemaReady(client);
-      } finally {
-        await client.query("RESET ROLE");
-      }
-    };
+    const ready = () => runtimeSchemaReady(client, { allowPrivilegedCaller: true });
     try {
-      expect(await asRuntime()).toBe(true);
+      expect(await ready()).toBe(true);
 
       await client.query(`GRANT INSERT ON agent_bridge.request_authorities TO ${role}`);
-      expect(await asRuntime()).toBe(false);
+      expect(await ready()).toBe(false);
       await client.query(`REVOKE INSERT ON agent_bridge.request_authorities FROM ${role}`);
-      expect(await asRuntime()).toBe(true);
+      expect(await ready()).toBe(true);
 
       await client.query(
         "ALTER FUNCTION agent_bridge.open_request_authority(uuid,text,uuid) SECURITY INVOKER",
       );
-      expect(await asRuntime()).toBe(false);
+      expect(await ready()).toBe(false);
       await client.query(
         "ALTER FUNCTION agent_bridge.open_request_authority(uuid,text,uuid) SECURITY DEFINER",
       );
-      expect(await asRuntime()).toBe(true);
+      expect(await ready()).toBe(true);
     } finally {
       await client.query(`REVOKE INSERT ON agent_bridge.request_authorities FROM ${role}`);
       await client.query(
@@ -1237,25 +1568,209 @@ integration("PostgreSQL BridgeStore integration", () => {
     });
   });
 
+  it("upgrades populated deliveries to row isolation and serves them through request authority", async () => {
+    await withTemporaryDatabase(async (upgrade) => {
+      const directory = fileURLToPath(new URL("../sql/migrations", import.meta.url));
+      const plan = await loadMigrationPlan(directory);
+      for (const migration of plan.slice(0, 12)) {
+        await upgrade.query(
+          migration.source.split("__AGENT_BRIDGE_MIGRATION_CHECKSUM__").join(migration.checksum),
+        );
+      }
+      const rowIsolationMigration = plan[12]!;
+      expect(rowIsolationMigration).toMatchObject({ version: 13, name: "row_isolation" });
+
+      const workspaceId = "upgrade-row-isolation";
+      const messageId = "018f4a70-0000-7000-8000-000000000201";
+      const deliveryId = "018f4a70-0000-7000-8000-000000000211";
+      await upgrade.query(
+        "INSERT INTO agent_bridge.workspaces(id,name) VALUES ($1,$1)",
+        [workspaceId],
+      );
+      const credentialRecords = new Map<string, { id: string; token: string }>();
+      for (const principal of ["publisher", "recipient"] as const) {
+        const agent = await upgrade.query<{ id: string }>(
+          "INSERT INTO agent_bridge.agents(workspace_id,principal) VALUES ($1,$2) RETURNING id",
+          [workspaceId, principal],
+        );
+        const token = `${principal}-${randomUUID()}`;
+        const credential = await upgrade.query<{ id: string }>(
+          `INSERT INTO agent_bridge.credentials(
+             workspace_id,agent_id,token_hash,scopes,scope_set_name
+           ) VALUES (
+             $1,$2,$3,
+             (SELECT scopes FROM agent_bridge.credential_scope_sets WHERE name='release-a-full'),
+             'release-a-full'
+           ) RETURNING id`,
+          [workspaceId, agent.rows[0]!.id, hashCredential(token)],
+        );
+        credentialRecords.set(principal, { id: credential.rows[0]!.id, token });
+      }
+      await upgrade.query(
+        `INSERT INTO agent_bridge.messages (
+           id,workspace,source,type,content,targets,delivery_mode,
+           delivery_max_attempts,delivery_retry_base_delay_ms,
+           delivery_retry_max_delay_ms,delivery_retry_jitter_ratio,created_at
+         ) VALUES (
+           $1,$2,'publisher','agent-bridge.work','upgrade existing delivery',
+           '["recipient"]'::jsonb,'leased',5,1000,60000,0.2,
+           '2026-07-14T12:00:00.000Z'
+         )`,
+        [messageId, workspaceId],
+      );
+      await upgrade.query(
+        `INSERT INTO agent_bridge.deliveries (
+           id,message_id,workspace,recipient,state,created_at,available_at,last_actor,last_action
+         ) VALUES (
+           $1,$2,$3,'recipient','pending',
+           '2026-07-14T12:00:00.000Z','2026-07-14T12:00:00.000Z','publisher','created'
+         )`,
+        [deliveryId, messageId, workspaceId],
+      );
+      const before = await upgrade.query<{
+        delivery_id: string; event_sequence: string; action: string; actor: string;
+        delivery_created_at: string; event_created_at: string;
+      }>(`SELECT delivery.id AS delivery_id,event.sequence::text AS event_sequence,
+            event.action,event.actor,delivery.created_at::text AS delivery_created_at,
+            event.created_at::text AS event_created_at
+          FROM agent_bridge.deliveries delivery
+          JOIN agent_bridge.delivery_events event ON event.delivery_id=delivery.id
+          WHERE delivery.id=$1`, [deliveryId]);
+      expect(before.rows).toHaveLength(1);
+      expect(before.rows[0]).toMatchObject({ action: "created", actor: "publisher" });
+
+      await upgrade.query(
+        rowIsolationMigration.source
+          .split("__AGENT_BRIDGE_MIGRATION_CHECKSUM__")
+          .join(rowIsolationMigration.checksum),
+      );
+      expect(await migrationsReady(upgrade, plan)).toBe(true);
+      expect(await runtimeSchemaReady(upgrade, { allowPrivilegedCaller: true })).toBe(true);
+      expect((await upgrade.query(
+        "SELECT name,checksum FROM agent_bridge.schema_migrations WHERE version=13",
+      )).rows).toEqual([{ name: "row_isolation", checksum: rowIsolationMigration.checksum }]);
+      const after = await upgrade.query<{
+        delivery_id: string; event_sequence: string; action: string; actor: string;
+        publisher: string; event_publisher: string;
+        delivery_created_at: string; event_created_at: string;
+      }>(`SELECT delivery.id AS delivery_id,event.sequence::text AS event_sequence,
+            event.action,event.actor,delivery.publisher,event.publisher AS event_publisher,
+            delivery.created_at::text AS delivery_created_at,
+            event.created_at::text AS event_created_at
+          FROM agent_bridge.deliveries delivery
+          JOIN agent_bridge.delivery_events event ON event.delivery_id=delivery.id
+          WHERE delivery.id=$1`, [deliveryId]);
+      expect(after.rows).toHaveLength(1);
+      expect(after.rows[0]).toEqual({
+        ...before.rows[0],
+        publisher: "publisher",
+        event_publisher: "publisher",
+      });
+
+      const login = `bridge_upgrade_login_${randomUUID().replaceAll("-", "")}`;
+      const password = randomUUID();
+      let runtime: pg.Pool | undefined;
+      const loginFailures: unknown[] = [];
+      await upgrade.query(`CREATE ROLE ${login} LOGIN PASSWORD '${password}'`);
+      try {
+        await upgrade.query(`GRANT ${await runtimeRole(upgrade)} TO ${login}`);
+        const databaseName = (await upgrade.query<{ name: string }>(
+          "SELECT current_database() AS name",
+        )).rows[0]!.name;
+        const runtimeUrl = new URL(databaseUrl!);
+        runtimeUrl.pathname = `/${databaseName}`;
+        runtimeUrl.username = login;
+        runtimeUrl.password = password;
+        runtime = new pg.Pool({ connectionString: runtimeUrl.toString(), max: 2 });
+        expect(await runtimeSchemaReady(runtime)).toBe(true);
+
+        const authority = new PostgresRequestAuthority(runtime);
+        const runAs = async <T,>(
+          principal: "publisher" | "recipient",
+          work: (service: BridgeService, authenticated: { workspace: string; agent: string }) => Promise<T>,
+        ) => {
+          const credential = credentialRecords.get(principal)!;
+          return authority.run(
+            credential.id,
+            hashCredential(credential.token),
+            randomUUID(),
+            new AbortController().signal,
+            async (context) => {
+              await context.beginDomainWork();
+              return work(new BridgeService(context.store), context.credential.principal);
+            },
+          );
+        };
+        const recipientEvents = await runAs("recipient", async (service, authenticated) => {
+          const principal = { ...authenticated, instance: "upgrade-runtime" };
+          const claim = await service.claim(principal, { leaseMs: 5_000 });
+          expect(claim?.delivery).toMatchObject({ id: deliveryId, messageId });
+          expect((await service.ack(principal, deliveryId, claim!.leaseToken))?.state).toBe("acked");
+          return (await service.deliveryEvents(principal, deliveryId)).events.map((event) => event.action);
+        });
+        expect(recipientEvents).toEqual(["created", "claim", "ack"]);
+
+        await runAs("publisher", async (service, authenticated) => {
+          expect((await service.deliveries(authenticated, {
+            messageId,
+            role: "publisher",
+          })).deliveries).toEqual([expect.objectContaining({ id: deliveryId, state: "acked" })]);
+          expect((await service.deliveryEvents(authenticated, deliveryId)).events.map((event) => event.action))
+            .toEqual(["created", "claim", "ack"]);
+        });
+        expect((await upgrade.query(
+          "SELECT count(*)::integer AS count FROM agent_bridge.request_authorities",
+        )).rows[0]!.count).toBe(0);
+      } catch (error) {
+        loginFailures.push(error);
+      }
+      for (const cleanup of [
+        async () => { await runtime?.end(); },
+        async () => { await upgrade.query(`DROP ROLE IF EXISTS ${login}`); },
+      ]) {
+        try {
+          await cleanup();
+        } catch (error) {
+          loginFailures.push(error);
+        }
+      }
+      if (loginFailures.length === 1) throw loginFailures[0];
+      if (loginFailures.length > 1) {
+        throw new AggregateError(loginFailures, "temporary PostgreSQL login run and cleanup failed");
+      }
+    });
+  });
+
   it("reports a missing runtime table as not ready", async () => {
     const client = await pool!.connect();
     try {
       await client.query("BEGIN");
       await client.query("DROP TABLE agent_bridge.receipts");
-      expect(await runtimeSchemaReady(client)).toBe(false);
+      expect(await runtimeSchemaReady(client, { allowPrivilegedCaller: true })).toBe(false);
       await client.query("ROLLBACK");
     } finally {
       client.release();
     }
-    expect(await runtimeSchemaReady(pool!)).toBe(true);
+    expect(await runtimeSchemaReady(pool!, { allowPrivilegedCaller: true })).toBe(true);
   });
 
   it("reports security policy, trigger, and grant drift as not ready", async () => {
     const runtime = await runtimeRole(pool!);
+    const internal = (await pool!.query<{ context_reader: string; event_writer: string }>(
+      `SELECT
+         'agent_bridge_context_reader_' || substr(md5(current_database()),1,16) AS context_reader,
+         'agent_bridge_event_writer_' || substr(md5(current_database()),1,16) AS event_writer`,
+    )).rows[0]!;
     const cases = [
       "UPDATE agent_bridge.rate_limit_policies SET capacity=31 WHERE operation_id='status'",
       "ALTER TABLE agent_bridge.security_events DISABLE TRIGGER security_events_append_only",
       `GRANT SELECT ON agent_bridge.rate_limit_policies TO ${runtime}`,
+      `GRANT CREATE ON SCHEMA agent_bridge TO ${runtime}`,
+      `GRANT CREATE ON SCHEMA agent_bridge TO ${internal.context_reader}`,
+      `GRANT CREATE ON SCHEMA agent_bridge TO ${internal.event_writer}`,
+      `GRANT UPDATE ON SEQUENCE agent_bridge.delivery_events_sequence_seq TO ${runtime}`,
+      `GRANT SELECT ON agent_bridge.messages TO ${internal.context_reader}`,
+      `GRANT SELECT ON agent_bridge.messages TO ${internal.event_writer}`,
       `GRANT EXECUTE ON FUNCTION agent_bridge.replace_credential(uuid,character,text[],text,text,timestamptz,timestamptz,text,uuid) TO ${runtime}`,
       `GRANT EXECUTE ON FUNCTION agent_bridge.revoke_credential(uuid,text,text,uuid) TO ${runtime}`,
     ];
@@ -1264,13 +1779,47 @@ integration("PostgreSQL BridgeStore integration", () => {
       try {
         await client.query("BEGIN");
         await client.query(change);
-        expect(await runtimeSchemaReady(client), change).toBe(false);
+        expect(await runtimeSchemaReady(client, { allowPrivilegedCaller: true }), change).toBe(false);
       } finally {
         await client.query("ROLLBACK").catch(() => {});
         client.release();
       }
     }
-    expect(await runtimeSchemaReady(pool!)).toBe(true);
+    expect(await runtimeSchemaReady(pool!, { allowPrivilegedCaller: true })).toBe(true);
+  });
+
+  it("rejects broadened policies and same-name catalog replacements", async () => {
+    const runtime = await runtimeRole(pool!);
+    const cases = [
+      `DROP POLICY messages_runtime_select ON agent_bridge.messages;
+       CREATE POLICY messages_runtime_select ON agent_bridge.messages
+       FOR SELECT TO ${runtime} USING (true)`,
+      `ALTER TABLE agent_bridge.deliveries DROP CONSTRAINT deliveries_publisher_message_fk;
+       ALTER TABLE agent_bridge.deliveries ADD CONSTRAINT deliveries_publisher_message_fk
+       CHECK (publisher <> '')`,
+      `DROP TRIGGER deliveries_actor_role ON agent_bridge.deliveries;
+       CREATE TRIGGER deliveries_actor_role BEFORE UPDATE ON agent_bridge.deliveries
+       FOR EACH ROW EXECUTE FUNCTION agent_bridge.reject_delivery_identity_mutation()`,
+      `CREATE TRIGGER messages_unexpected BEFORE UPDATE ON agent_bridge.messages
+       FOR EACH ROW EXECUTE FUNCTION agent_bridge.reject_message_mutation()`,
+      "ALTER TABLE agent_bridge.deliveries ALTER COLUMN publisher DROP NOT NULL",
+      "ALTER TABLE agent_bridge.delivery_events ALTER COLUMN publisher DROP NOT NULL",
+      "UPDATE agent_bridge.row_isolation_attestations SET catalog_definition='forged' WHERE name='domain-v1'",
+      "GRANT EXECUTE ON FUNCTION agent_bridge.reject_delivery_identity_mutation() TO public",
+      `GRANT UPDATE ON agent_bridge.row_isolation_attestations TO ${runtime}`,
+    ];
+    for (const change of cases) {
+      const client = await pool!.connect();
+      try {
+        await client.query("BEGIN");
+        await client.query(change);
+        expect(await runtimeSchemaReady(client, { allowPrivilegedCaller: true }), change).toBe(false);
+      } finally {
+        await client.query("ROLLBACK").catch(() => {});
+        client.release();
+      }
+    }
+    expect(await runtimeSchemaReady(pool!, { allowPrivilegedCaller: true })).toBe(true);
   });
 
   it("imports a legacy shared_context database through fresh migrations", async () => {

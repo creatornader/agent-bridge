@@ -31,6 +31,8 @@ export interface GatewayOptions {
   bodyLimitBytes?: number;
   requestDeadlineMs?: number;
   ready?: () => Promise<boolean>;
+  /** Reports whether the configured database has verified row isolation. */
+  rowIsolationReady?: () => Promise<boolean>;
   /** Production PostgreSQL request authority. Other providers omit this. */
   requestAuthority?: RequestAuthority;
 }
@@ -382,7 +384,15 @@ export function createGateway(options: GatewayOptions) {
         await authorize("capabilities");
         closedQuery(url, "capabilities", []);
         validateRequest("capabilities", {});
-        sendOperation(response, 200, "capabilities", capabilityDocument({ surface: "http", provider: "gateway", selectedProtocolVersion: String(response.getHeader(PROTOCOL_HEADER)), requestAuthority: Boolean(options.requestAuthority) }), requestId); return;
+        let rowIsolation = false;
+        if (options.requestAuthority && options.rowIsolationReady) {
+          try {
+            rowIsolation = await options.rowIsolationReady();
+          } catch {
+            rowIsolation = false;
+          }
+        }
+        sendOperation(response, 200, "capabilities", capabilityDocument({ surface: "http", provider: "gateway", selectedProtocolVersion: String(response.getHeader(PROTOCOL_HEADER)), requestAuthority: Boolean(options.requestAuthority), rowIsolation }), requestId); return;
       }
 
       if (req.method === "GET" && url.pathname === "/v2/status") {

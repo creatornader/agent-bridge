@@ -335,7 +335,7 @@ export class SQLiteBridgeStore implements BridgeStore {
       const candidate = this.db.prepare("SELECT delivery.id FROM bridge_deliveries delivery JOIN bridge_messages message ON message.workspace=delivery.workspace AND message.id=delivery.message_id WHERE delivery.workspace=? AND delivery.recipient=? AND delivery.state IN ('pending','retrying') AND delivery.available_at<=? AND delivery.cycle_attempt<json_extract(message.delivery_policy,'$.maxAttempts') AND (message.expires_at IS NULL OR message.expires_at>?) ORDER BY delivery.priority_rank,delivery.available_at,delivery.created_at,delivery.id LIMIT 1").get(principal.workspace,principal.agent,nowText,nowText) as Row | undefined;
       if (!candidate) { this.db.exec("COMMIT"); return null; }
       const candidateId = String(candidate.id);
-      const token = randomUUID(); this.db.prepare("UPDATE bridge_deliveries SET state='claimed',attempt=attempt+1,cycle_attempt=cycle_attempt+1,lease_token=?,lease_owner=?,lease_expires_at=?,last_error=NULL,last_actor=?,last_action='claim' WHERE id=?").run(token,owner,expires,`${principal.agent}/${owner}`,candidateId);
+      const token = randomUUID(); this.db.prepare("UPDATE bridge_deliveries SET state='claimed',attempt=attempt+1,cycle_attempt=cycle_attempt+1,lease_token=?,lease_owner=?,lease_expires_at=?,last_error=NULL,last_actor=?,last_action='claim' WHERE id=?").run(token,owner,expires,principal.agent,candidateId);
       const claimed = this.db.prepare("SELECT * FROM bridge_deliveries WHERE id=?").get(candidateId) as Row; this.db.exec("COMMIT"); return delivery(claimed);
     } catch (e) { this.db.exec("ROLLBACK"); throw e; }
   }
@@ -354,7 +354,7 @@ export class SQLiteBridgeStore implements BridgeStore {
       const delay = nextState === "retrying" ? Math.max(1, Math.round(exponential * jitter)) : 0;
       const available = nextState === "retrying" ? new Date(now.getTime() + delay).toISOString() : String(current.available_at);
       const action = state === "acked" ? "ack" : state === "dead" ? "nack_dead" : exhausted ? "attempts_exhausted" : "nack_retry";
-      this.db.prepare("UPDATE bridge_deliveries SET state=?,available_at=?,last_error=?,lease_token=NULL,lease_owner=NULL,lease_expires_at=NULL,last_actor=?,last_action=? WHERE id=?").run(nextState,available,error?.slice(0,1024) ?? null,owner,action,id);
+      this.db.prepare("UPDATE bridge_deliveries SET state=?,available_at=?,last_error=?,lease_token=NULL,lease_owner=NULL,lease_expires_at=NULL,last_actor=?,last_action=? WHERE id=?").run(nextState,available,error?.slice(0,1024) ?? null,principal.agent,action,id);
       const result = delivery(this.db.prepare("SELECT * FROM bridge_deliveries WHERE id=?").get(id) as Row); this.db.exec("COMMIT"); return result;
     } catch (caught) { this.db.exec("ROLLBACK"); throw caught; }
   }

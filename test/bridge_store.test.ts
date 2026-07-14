@@ -508,6 +508,7 @@ function bridgeStoreContract(name: string, makeStore: () => SQLiteBridgeStore) {
       expect(await service.cancel({ ...publisher, agent: "other" }, claim!.delivery.id)).toBeNull();
       const events = await service.deliveryEvents(publisher, claim!.delivery.id);
       expect(events.events.map((event) => event.action)).toEqual(["created", "claim", "cancel"]);
+      expect(events.events.map((event) => event.actor)).toEqual(["publisher", "worker", "publisher"]);
       expect(events.events[0]?.fromState).toBeUndefined();
       expect(events.events[0]?.leaseOwner).toBeUndefined();
       expect(events.events[0]?.error).toBeUndefined();

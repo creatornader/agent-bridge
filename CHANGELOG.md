@@ -16,6 +16,7 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and 
 - Canonical gateway credential scopes, compatibility-safe migration 011, immutable replacement lineage, revocation helpers, and provider-specific capability truth.
 - Database-timed credential-wide and operation rate buckets with append-only scope, rate, replacement, and revocation security events.
 - Transaction-bound PostgreSQL request authority (migration 012). Node hashes credentials, PostgreSQL derives identity and scopes, and one client and transaction carry security accounting and request-local store operations. Domain savepoints preserve expected security effects when mutations fail. Ambiguous commits are never retried. Production gateway capabilities report request authority without claiming row isolation.
+- Forced PostgreSQL row isolation on the five domain tables (migration 013), with database-specific no-login owner roles, transaction-bound context policies, publisher and recipient lifecycle separation, immutable publisher bindings, and a protected catalog attestation. Gateway capabilities report row isolation only after live readiness checks pass.
 
 - Immutable publisher-owned delivery policies with mailbox and leased modes. Leased delivery adds priority claims, monotonic cycle counters, publisher cancel and requeue controls, and authorized audit pagination. PostgreSQL migration 010 and the SQLite initializer upgrade existing stores. Legacy mode rejects leased policy.
 
@@ -39,6 +40,7 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and 
 
 - Existing credentials retain full compatibility access without lifecycle metadata changes. New direct SQL inserts keep that default until owner provisioning commands land.
 - Credential grace can only shorten a predecessor after replacement. Ordinary expiry and revocation cannot be extended or bypassed.
+- Database policies isolate workspaces and principals. Lease transitions and target-to-delivery membership remain service-enforced. Gateway logins must not be superusers or hold `BYPASSRLS`.
 
 ## [0.2.0] - 2026-07-14
 

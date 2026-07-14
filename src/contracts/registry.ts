@@ -526,7 +526,7 @@ export function operationForCli(
       variant.command === command && cliVariantMatches(variant, selectedOptions)));
 }
 
-export function capabilityDocument(context: { surface: ContractSurface; provider: ContractProvider; selectedProtocolVersion?: string; requestAuthority?: boolean } = { surface: "http", provider: "gateway" }) {
+export function capabilityDocument(context: { surface: ContractSurface; provider: ContractProvider; selectedProtocolVersion?: string; requestAuthority?: boolean; rowIsolation?: boolean } = { surface: "http", provider: "gateway" }) {
   const selectedProtocolVersion = context.selectedProtocolVersion ?? PROTOCOL_VERSION;
   return {
     protocolVersion: selectedProtocolVersion,
@@ -535,7 +535,7 @@ export function capabilityDocument(context: { surface: ContractSurface; provider
     supportedProtocolVersions: [...SUPPORTED_PROTOCOL_VERSIONS],
     scopeEnforcement: context.provider === "gateway" ? SCOPE_ENFORCEMENT : false,
     requestAuthority: context.provider === "gateway" && context.requestAuthority === true,
-    rowIsolation: false,
+    rowIsolation: context.provider === "gateway" && context.requestAuthority === true && context.rowIsolation === true,
     authorizationModel: context.provider === "gateway"
       ? "scoped-credential"
       : context.provider === "local"

@@ -337,7 +337,13 @@ The gateway exposes unauthenticated `/readyz`. `/v2/status` and `/metrics` requi
 
 Each gateway operation checks the scopes in the canonical registry. `capabilities` needs an active credential but no named scope. For requests with bodies, the gateway validates media type, size, and JSON before it opens the request transaction. It then audits scope denials and applies both a credential-wide token bucket and an operation bucket before domain work begins. Missing policy state or a failed denial audit closes the request with `security_unavailable`. Rate denials return the same rounded delay in `Retry-After` and `error.details.retryAfterSeconds`.
 
-Migration 012 makes PostgreSQL the authority for each production gateway request that passes credential preflight. Node hashes the bearer credential before PostgreSQL receives it. The gateway checks out one connection, opens one explicit transaction, matches the credential ID and hash inside a narrow security-definer function, and derives the workspace, principal, and scopes from current database state. Security accounting and domain work share that transaction and backend; delivery claim, cancel, and requeue reuse it without nested `BEGIN`. Runtime logins cannot read credential hashes, agent records, workspace records, or request-authority records. Production gateway capabilities report `requestAuthority: true` and `rowIsolation: false`: this boundary does not add RLS or claim database row isolation.
+Migration 012 makes PostgreSQL the authority for each production gateway request that passes credential preflight. Node hashes the bearer credential before PostgreSQL receives it. The gateway checks out one connection, opens one explicit transaction, matches the credential ID and hash inside a narrow security-definer function, and derives the workspace, principal, and scopes from current database state. Security accounting and domain work share that transaction and backend. Delivery claim, cancel, and requeue reuse it without nested `BEGIN`. Runtime logins cannot read credential hashes, agent records, workspace records, or request-authority records.
+
+Migration 013 enables and forces row-level security on messages, receipts, deliveries, delivery events, and presence. Policies read workspace and principal from the transaction-bound request authority. The runtime role cannot set that authority through session variables, inherit a table-owner role, or bypass RLS. Separate no-login roles own domain tables, read request context, and write delivery audit events. Delivery identity and publisher bindings are immutable. A trigger lets recipients perform recipient lifecycle actions and reserves cancel and requeue for publishers.
+
+The migration records a catalog attestation after it creates the policies, constraints, triggers, and security functions. `/readyz` fails if the current catalog no longer matches that owner-created baseline. Gateway capabilities report `rowIsolation: true` only when request authority is enabled and the migration, catalog attestation, ownership, policy, privilege, and function checks all pass. An owner-approved schema change must update the attestation in its migration.
+
+RLS does not replace operation checks. The service still enforces lease tokens, valid state transitions, and target-to-delivery membership. The database binds each delivery to its publisher and message, but it does not prove that the recipient appears in the message target list. PostgreSQL superusers and roles with `BYPASSRLS` remain outside this boundary; do not use either for the gateway login.
 
 Credential replacement links are immutable and stay within one workspace and principal. A replacement grace period can shorten the predecessor's lifetime but cannot extend ordinary expiry or override revocation. Replacement, revocation, scope denial, and rate denial events use explicit append-only columns. They do not store tokens, hashes, authorization headers, request bodies, message content, arbitrary metadata, URLs, IP addresses, or database errors.
 
@@ -347,9 +353,21 @@ Before dropping an Agent Bridge database, remove its gateway login and database-
 drop role if exists agent_bridge_gateway;
 do $cleanup$
 declare
-  runtime_role text := 'agent_bridge_runtime_' || substr(md5(current_database()), 1, 16);
+  suffix text := substr(md5(current_database()), 1, 16);
+  role_name text;
 begin
-  execute format('drop role if exists %I', runtime_role);
+  foreach role_name in array array[
+    'agent_bridge_runtime_' || suffix,
+    'agent_bridge_data_owner_' || suffix,
+    'agent_bridge_context_reader_' || suffix,
+    'agent_bridge_event_writer_' || suffix
+  ] loop
+    if exists (select 1 from pg_roles where rolname=role_name) then
+      execute format('reassign owned by %I to %I', role_name, current_user);
+      execute format('drop owned by %I', role_name);
+      execute format('drop role %I', role_name);
+    end if;
+  end loop;
 end
 $cleanup$;
 ```

@@ -54,6 +54,9 @@ const REQUIRED_COLUMNS = new Map([
   ["request_authorities.principal", "text"],
   ["request_authorities.scopes", "_text"],
   ["request_authorities.opened_session_user", "name"],
+  ["row_isolation_attestations.name", "text"],
+  ["row_isolation_attestations.catalog_definition", "text"],
+  ["row_isolation_attestations.attested_at", "timestamptz"],
   ["messages.sequence", "int8"],
   ["messages.id", "uuid"],
   ["messages.workspace", "text"],
@@ -72,6 +75,7 @@ const REQUIRED_COLUMNS = new Map([
   ["deliveries.id", "uuid"],
   ["deliveries.message_id", "uuid"],
   ["deliveries.workspace", "text"],
+  ["deliveries.publisher", "text"],
   ["deliveries.recipient", "text"],
   ["deliveries.state", "text"],
   ["deliveries.lease_token", "uuid"],
@@ -82,6 +86,7 @@ const REQUIRED_COLUMNS = new Map([
   ["deliveries.last_actor", "text"],
   ["deliveries.last_action", "text"],
   ["delivery_events.delivery_id", "uuid"],
+  ["delivery_events.publisher", "text"],
   ["delivery_events.to_state", "text"],
   ["delivery_events.cycle_attempt", "int4"],
   ["delivery_events.requeue_count", "int4"],
@@ -115,6 +120,7 @@ export const REQUIRED_MIGRATIONS = [
   { version: 10, name: "publisher_delivery_policy" },
   { version: 11, name: "credential_security" },
   { version: 12, name: "request_authority" },
+  { version: 13, name: "row_isolation" },
 ] as const;
 
 function checksum(source: string): string {
@@ -172,7 +178,300 @@ export async function migrationsReady(
   ) && applied.length === expected.length;
 }
 
-export async function runtimeSchemaReady(db: PgQueryable): Promise<boolean> {
+async function rowIsolationReady(db: PgQueryable, allowPrivilegedCaller: boolean): Promise<boolean> {
+  const result = await db.query<{
+    rolesReady: boolean;
+    callerReady: boolean;
+    callerBypasses: boolean;
+    ownershipReady: boolean;
+    policiesReady: boolean;
+    functionsReady: boolean;
+    constraintsReady: boolean;
+    triggersReady: boolean;
+    grantsReady: boolean;
+    catalogReady: boolean;
+  }>(`WITH names AS (
+      SELECT
+        ('agent_bridge_runtime_' || substr(md5(current_database()),1,16))::name AS runtime_role,
+        ('agent_bridge_data_owner_' || substr(md5(current_database()),1,16))::name AS data_owner,
+        ('agent_bridge_context_reader_' || substr(md5(current_database()),1,16))::name AS context_reader,
+        ('agent_bridge_event_writer_' || substr(md5(current_database()),1,16))::name AS event_writer
+    ), required_roles(role_name) AS (
+      SELECT runtime_role FROM names UNION ALL SELECT data_owner FROM names
+      UNION ALL SELECT context_reader FROM names UNION ALL SELECT event_writer FROM names
+    ), domain_tables(table_name) AS (
+      VALUES ('messages'),('receipts'),('deliveries'),('delivery_events'),('agent_instances')
+    ), caller_role AS (
+      SELECT * FROM pg_roles WHERE rolname=current_user
+    ), expected_policies(table_name,policy_name,command_name,role_name,needs_workspace,needs_principal) AS (
+      SELECT 'messages','messages_owner_all','*',data_owner::text,false,false FROM names UNION ALL
+      SELECT 'messages','messages_runtime_select','r',runtime_role::text,true,true FROM names UNION ALL
+      SELECT 'messages','messages_runtime_insert','a',runtime_role::text,true,true FROM names UNION ALL
+      SELECT 'receipts','receipts_owner_all','*',data_owner::text,false,false FROM names UNION ALL
+      SELECT 'receipts','receipts_runtime_select','r',runtime_role::text,true,true FROM names UNION ALL
+      SELECT 'receipts','receipts_runtime_insert','a',runtime_role::text,true,true FROM names UNION ALL
+      SELECT 'deliveries','deliveries_owner_all','*',data_owner::text,false,false FROM names UNION ALL
+      SELECT 'deliveries','deliveries_runtime_select','r',runtime_role::text,true,true FROM names UNION ALL
+      SELECT 'deliveries','deliveries_runtime_insert','a',runtime_role::text,true,true FROM names UNION ALL
+      SELECT 'deliveries','deliveries_runtime_update','w',runtime_role::text,true,true FROM names UNION ALL
+      SELECT 'delivery_events','delivery_events_owner_all','*',data_owner::text,false,false FROM names UNION ALL
+      SELECT 'delivery_events','delivery_events_runtime_select','r',runtime_role::text,true,true FROM names UNION ALL
+      SELECT 'delivery_events','delivery_events_writer_insert','a',event_writer::text,false,false FROM names UNION ALL
+      SELECT 'agent_instances','agent_instances_owner_all','*',data_owner::text,false,false FROM names UNION ALL
+      SELECT 'agent_instances','agent_instances_runtime_select','r',runtime_role::text,true,false FROM names UNION ALL
+      SELECT 'agent_instances','agent_instances_runtime_insert','a',runtime_role::text,true,true FROM names UNION ALL
+      SELECT 'agent_instances','agent_instances_runtime_update','w',runtime_role::text,true,true FROM names UNION ALL
+      SELECT 'agent_instances','agent_instances_runtime_delete','d',runtime_role::text,true,true FROM names
+    ), actual_policies AS (
+      SELECT relation.relname AS table_name,policy.polname AS policy_name,
+        policy.polcmd AS command_name,policy.polpermissive,
+        ARRAY(SELECT role.rolname::text FROM unnest(policy.polroles) member(oid)
+          JOIN pg_roles role ON role.oid=member.oid ORDER BY role.rolname) AS role_names,
+        coalesce(pg_get_expr(policy.polqual,policy.polrelid),'') || ' ' ||
+          coalesce(pg_get_expr(policy.polwithcheck,policy.polrelid),'') AS expressions
+      FROM pg_policy policy
+      JOIN pg_class relation ON relation.oid=policy.polrelid
+      JOIN pg_namespace namespace ON namespace.oid=relation.relnamespace
+      WHERE namespace.nspname='agent_bridge'
+        AND relation.relname IN (SELECT table_name FROM domain_tables)
+    )
+    SELECT
+      (SELECT count(*)=4 AND bool_and(
+          role.rolname=(required.role_name::text)
+          AND NOT role.rolcanlogin AND NOT role.rolsuper AND NOT role.rolcreatedb
+          AND NOT role.rolcreaterole AND NOT role.rolreplication AND NOT role.rolbypassrls
+        )
+       FROM required_roles required JOIN pg_roles role ON role.rolname=required.role_name::text) AS "rolesReady",
+      ((SELECT rolsuper OR rolbypassrls FROM caller_role) OR (
+        (SELECT rolcanlogin AND rolinherit AND NOT rolsuper AND NOT rolcreatedb
+           AND NOT rolcreaterole AND NOT rolreplication AND NOT rolbypassrls
+         FROM caller_role)
+        AND pg_has_role(current_user,(SELECT runtime_role FROM names),'MEMBER')
+        AND NOT EXISTS (
+          SELECT 1 FROM pg_roles unexpected
+          WHERE unexpected.oid<>(SELECT oid FROM caller_role)
+            AND unexpected.rolname<>(SELECT runtime_role::text FROM names)
+            AND pg_has_role(current_user,unexpected.oid,'MEMBER')
+        )
+      )) AS "callerReady",
+      EXISTS (
+        SELECT 1 FROM pg_roles elevated
+        WHERE (elevated.rolsuper OR elevated.rolbypassrls)
+          AND pg_has_role(current_user,elevated.oid,'MEMBER')
+      ) AS "callerBypasses",
+      (SELECT count(*)=5 AND bool_and(
+          relation.relrowsecurity AND relation.relforcerowsecurity
+          AND owner.rolname=(SELECT data_owner::text FROM names)
+        )
+       FROM domain_tables required
+       JOIN pg_namespace namespace ON namespace.nspname='agent_bridge'
+       JOIN pg_class relation ON relation.relnamespace=namespace.oid AND relation.relname=required.table_name
+       JOIN pg_roles owner ON owner.oid=relation.relowner)
+        AND EXISTS (
+          SELECT 1 FROM pg_class attestation
+          JOIN pg_namespace namespace ON namespace.oid=attestation.relnamespace
+          WHERE namespace.nspname='agent_bridge'
+            AND attestation.relname='row_isolation_attestations'
+            AND attestation.relowner=namespace.nspowner
+        ) AS "ownershipReady",
+      ((SELECT count(*) FROM actual_policies)=18 AND NOT EXISTS (
+        SELECT 1 FROM expected_policies expected
+        LEFT JOIN actual_policies actual
+          ON actual.table_name=expected.table_name AND actual.policy_name=expected.policy_name
+        WHERE actual.policy_name IS NULL OR actual.command_name<>expected.command_name
+          OR NOT actual.polpermissive OR actual.role_names<>ARRAY[expected.role_name]
+          OR (expected.needs_workspace AND position('current_request_workspace' in actual.expressions)=0)
+          OR (expected.needs_principal AND position('current_request_principal' in actual.expressions)=0)
+          OR (NOT expected.needs_workspace AND NOT expected.needs_principal
+            AND position('true' in actual.expressions)=0)
+      )) AS "policiesReady",
+      (SELECT count(*)=4 AND bool_and(
+          procedure.proconfig @> ARRAY['search_path=""']::text[]
+          AND CASE procedure.proname
+            WHEN 'record_delivery_event' THEN owner.rolname=(SELECT event_writer::text FROM names)
+              AND procedure.prosecdef AND procedure.provolatile='v'
+            WHEN 'row_isolation_catalog_definition' THEN
+              owner.oid=(SELECT relation.relowner FROM pg_class relation
+                JOIN pg_namespace namespace ON namespace.oid=relation.relnamespace
+                WHERE namespace.nspname='agent_bridge'
+                  AND relation.relname='row_isolation_attestations')
+              AND NOT procedure.prosecdef AND procedure.provolatile='s'
+            ELSE owner.rolname=(SELECT context_reader::text FROM names)
+              AND procedure.prosecdef AND procedure.provolatile='s'
+          END
+        )
+       FROM pg_proc procedure
+       JOIN pg_namespace namespace ON namespace.oid=procedure.pronamespace
+       JOIN pg_roles owner ON owner.oid=procedure.proowner
+       WHERE namespace.nspname='agent_bridge'
+         AND procedure.proname IN (
+           'current_request_workspace','current_request_principal',
+           'record_delivery_event','row_isolation_catalog_definition'
+         ))
+        AND NOT EXISTS (
+          SELECT 1 FROM pg_proc private_function
+          JOIN pg_namespace private_namespace ON private_namespace.oid=private_function.pronamespace
+          WHERE private_namespace.nspname='agent_bridge'
+            AND has_function_privilege('public',private_function.oid,'EXECUTE')
+        )
+        AND has_function_privilege((SELECT runtime_role FROM names),'agent_bridge.current_request_workspace()','EXECUTE')
+        AND has_function_privilege((SELECT runtime_role FROM names),'agent_bridge.current_request_principal()','EXECUTE')
+        AND has_function_privilege((SELECT runtime_role FROM names),'agent_bridge.row_isolation_catalog_definition()','EXECUTE')
+        AND NOT has_function_privilege((SELECT runtime_role FROM names),'agent_bridge.record_delivery_event()','EXECUTE')
+        AND NOT has_function_privilege((SELECT runtime_role FROM names),'agent_bridge.reject_delivery_identity_mutation()','EXECUTE')
+        AND NOT has_function_privilege((SELECT runtime_role FROM names),'agent_bridge.enforce_delivery_actor_role()','EXECUTE')
+        AND NOT has_function_privilege((SELECT runtime_role FROM names),'agent_bridge.reject_delivery_event_mutation()','EXECUTE')
+        AS "functionsReady",
+      ((SELECT count(*)=5 AND bool_and(constraint_record.convalidated)
+       FROM (VALUES
+          ('agent_bridge.messages'::regclass,'messages_workspace_id_source_unique'),
+          ('agent_bridge.deliveries'::regclass,'deliveries_publisher_message_fk'),
+          ('agent_bridge.deliveries'::regclass,'deliveries_event_identity_unique'),
+          ('agent_bridge.delivery_events'::regclass,'delivery_events_delivery_publisher_fk'),
+          ('agent_bridge.row_isolation_attestations'::regclass,'row_isolation_attestation_name')
+       ) required(relation_id,constraint_name)
+       JOIN pg_constraint constraint_record
+         ON constraint_record.conrelid=required.relation_id
+        AND constraint_record.conname=required.constraint_name)
+        AND (SELECT count(*)=2 AND bool_and(attribute.attnotnull)
+          FROM pg_attribute attribute
+          WHERE (attribute.attrelid,attribute.attname) IN (
+            ('agent_bridge.deliveries'::regclass,'publisher'),
+            ('agent_bridge.delivery_events'::regclass,'publisher')
+          ) AND attribute.attnum>0 AND NOT attribute.attisdropped)
+      ) AS "constraintsReady",
+      (SELECT count(*)=4 AND bool_and(trigger.tgenabled='O')
+       FROM (VALUES
+          ('agent_bridge.deliveries'::regclass,'deliveries_record_event'),
+          ('agent_bridge.deliveries'::regclass,'deliveries_identity_immutable'),
+          ('agent_bridge.deliveries'::regclass,'deliveries_actor_role'),
+          ('agent_bridge.delivery_events'::regclass,'delivery_events_append_only')
+       ) required(relation_id,trigger_name)
+       JOIN pg_trigger trigger ON trigger.tgrelid=required.relation_id
+        AND trigger.tgname=required.trigger_name AND NOT trigger.tgisinternal) AS "triggersReady",
+      (has_schema_privilege((SELECT runtime_role FROM names),'agent_bridge','USAGE')
+        AND NOT has_schema_privilege((SELECT runtime_role FROM names),'agent_bridge','CREATE')
+        AND has_schema_privilege((SELECT data_owner FROM names),'agent_bridge','USAGE')
+        AND NOT has_schema_privilege((SELECT data_owner FROM names),'agent_bridge','CREATE')
+        AND has_schema_privilege((SELECT context_reader FROM names),'agent_bridge','USAGE')
+        AND NOT has_schema_privilege((SELECT context_reader FROM names),'agent_bridge','CREATE')
+        AND has_schema_privilege((SELECT event_writer FROM names),'agent_bridge','USAGE')
+        AND NOT has_schema_privilege((SELECT event_writer FROM names),'agent_bridge','CREATE')
+        AND has_table_privilege((SELECT runtime_role FROM names),'agent_bridge.messages','SELECT')
+        AND has_table_privilege((SELECT runtime_role FROM names),'agent_bridge.messages','INSERT')
+        AND NOT has_table_privilege((SELECT runtime_role FROM names),'agent_bridge.messages','UPDATE,DELETE,TRUNCATE,REFERENCES,TRIGGER')
+        AND has_table_privilege((SELECT runtime_role FROM names),'agent_bridge.receipts','SELECT')
+        AND has_table_privilege((SELECT runtime_role FROM names),'agent_bridge.receipts','INSERT')
+        AND NOT has_table_privilege((SELECT runtime_role FROM names),'agent_bridge.receipts','UPDATE,DELETE,TRUNCATE,REFERENCES,TRIGGER')
+        AND has_table_privilege((SELECT runtime_role FROM names),'agent_bridge.deliveries','SELECT')
+        AND has_table_privilege((SELECT runtime_role FROM names),'agent_bridge.deliveries','INSERT')
+        AND has_table_privilege((SELECT runtime_role FROM names),'agent_bridge.deliveries','UPDATE')
+        AND NOT has_table_privilege((SELECT runtime_role FROM names),'agent_bridge.deliveries','DELETE,TRUNCATE,REFERENCES,TRIGGER')
+        AND has_table_privilege((SELECT runtime_role FROM names),'agent_bridge.delivery_events','SELECT')
+        AND NOT has_table_privilege((SELECT runtime_role FROM names),'agent_bridge.delivery_events','INSERT,UPDATE,DELETE,TRUNCATE,REFERENCES,TRIGGER')
+        AND has_table_privilege((SELECT runtime_role FROM names),'agent_bridge.agent_instances','SELECT')
+        AND has_table_privilege((SELECT runtime_role FROM names),'agent_bridge.agent_instances','INSERT')
+        AND has_table_privilege((SELECT runtime_role FROM names),'agent_bridge.agent_instances','UPDATE')
+        AND has_table_privilege((SELECT runtime_role FROM names),'agent_bridge.agent_instances','DELETE')
+        AND NOT has_table_privilege((SELECT runtime_role FROM names),'agent_bridge.agent_instances','TRUNCATE,REFERENCES,TRIGGER')
+        AND has_sequence_privilege((SELECT runtime_role FROM names),'agent_bridge.messages_sequence_seq','USAGE')
+        AND NOT has_sequence_privilege((SELECT runtime_role FROM names),'agent_bridge.messages_sequence_seq','SELECT,UPDATE')
+        AND NOT has_sequence_privilege((SELECT runtime_role FROM names),'agent_bridge.delivery_events_sequence_seq','USAGE,SELECT,UPDATE')
+        AND has_table_privilege((SELECT context_reader FROM names),'agent_bridge.request_authorities','SELECT')
+        AND NOT has_table_privilege((SELECT context_reader FROM names),'agent_bridge.request_authorities','INSERT,UPDATE,DELETE,TRUNCATE,REFERENCES,TRIGGER')
+        AND has_table_privilege((SELECT event_writer FROM names),'agent_bridge.delivery_events','INSERT')
+        AND NOT has_table_privilege((SELECT event_writer FROM names),'agent_bridge.delivery_events','SELECT,UPDATE,DELETE,TRUNCATE,REFERENCES,TRIGGER')
+        AND NOT EXISTS (
+          SELECT 1 FROM pg_class relation
+          JOIN pg_namespace namespace ON namespace.oid=relation.relnamespace
+          WHERE namespace.nspname='agent_bridge' AND relation.relkind IN ('r','p','v','m','f')
+            AND (
+              (relation.relname<>'request_authorities' AND has_table_privilege(
+                (SELECT context_reader FROM names),relation.oid,
+                'SELECT,INSERT,UPDATE,DELETE,TRUNCATE,REFERENCES,TRIGGER'
+              ))
+              OR (relation.relname<>'delivery_events' AND has_table_privilege(
+                (SELECT event_writer FROM names),relation.oid,
+                'SELECT,INSERT,UPDATE,DELETE,TRUNCATE,REFERENCES,TRIGGER'
+              ))
+            )
+        )
+        AND has_sequence_privilege((SELECT event_writer FROM names),'agent_bridge.delivery_events_sequence_seq','USAGE')
+        AND NOT has_sequence_privilege((SELECT event_writer FROM names),'agent_bridge.delivery_events_sequence_seq','SELECT,UPDATE')
+        AND NOT EXISTS (
+          SELECT 1 FROM pg_class sequence
+          JOIN pg_namespace namespace ON namespace.oid=sequence.relnamespace
+          WHERE namespace.nspname='agent_bridge' AND sequence.relkind='S'
+            AND (
+              has_sequence_privilege((SELECT context_reader FROM names),sequence.oid,'USAGE,SELECT,UPDATE')
+              OR (sequence.relname<>'delivery_events_sequence_seq' AND has_sequence_privilege(
+                (SELECT event_writer FROM names),sequence.oid,'USAGE,SELECT,UPDATE'
+              ))
+            )
+        )
+        AND NOT has_sequence_privilege('public','agent_bridge.messages_sequence_seq','USAGE,SELECT,UPDATE')
+        AND NOT has_sequence_privilege('public','agent_bridge.delivery_events_sequence_seq','USAGE,SELECT,UPDATE')
+        AND has_table_privilege((SELECT runtime_role FROM names),'agent_bridge.row_isolation_attestations','SELECT')
+        AND NOT has_table_privilege((SELECT runtime_role FROM names),'agent_bridge.row_isolation_attestations','INSERT,UPDATE,DELETE,TRUNCATE,REFERENCES,TRIGGER')
+        AND NOT EXISTS (
+          SELECT 1
+          FROM unnest(ARRAY[
+            'agent_bridge.credentials','agent_bridge.agents',
+            'agent_bridge.workspaces','agent_bridge.request_authorities'
+          ]) protected_table(value)
+          CROSS JOIN unnest(ARRAY[
+            'SELECT','INSERT','UPDATE','DELETE','TRUNCATE','REFERENCES','TRIGGER'
+          ]) requested_privilege(value)
+          WHERE has_table_privilege(
+            (SELECT runtime_role FROM names),protected_table.value,requested_privilege.value
+          )
+        )
+        AND NOT EXISTS (
+          SELECT 1
+          FROM unnest(ARRAY[
+            'agent_bridge.credentials','agent_bridge.agents',
+            'agent_bridge.workspaces','agent_bridge.request_authorities'
+          ]) protected_table(value)
+          CROSS JOIN unnest(ARRAY['SELECT','INSERT','UPDATE','REFERENCES']) requested_privilege(value)
+          WHERE has_any_column_privilege(
+            (SELECT runtime_role FROM names),protected_table.value,requested_privilege.value
+          )
+        )
+        AND NOT has_table_privilege('public','agent_bridge.row_isolation_attestations','SELECT,INSERT,UPDATE,DELETE,TRUNCATE,REFERENCES,TRIGGER')
+        AND NOT pg_has_role((SELECT runtime_role FROM names),(SELECT data_owner FROM names),'MEMBER')
+        AND NOT pg_has_role((SELECT runtime_role FROM names),(SELECT context_reader FROM names),'MEMBER')
+        AND NOT pg_has_role((SELECT runtime_role FROM names),(SELECT event_writer FROM names),'MEMBER')
+        AND NOT EXISTS (
+          SELECT 1 FROM pg_proc private_function
+          JOIN pg_namespace namespace ON namespace.oid=private_function.pronamespace
+          WHERE namespace.nspname='agent_bridge'
+            AND (
+              (NOT (private_function.proname IN ('current_request_workspace','current_request_principal')
+                    AND private_function.pronargs=0)
+                AND has_function_privilege((SELECT context_reader FROM names),private_function.oid,'EXECUTE'))
+              OR (NOT (private_function.proname='record_delivery_event' AND private_function.pronargs=0)
+                AND has_function_privilege((SELECT event_writer FROM names),private_function.oid,'EXECUTE'))
+            )
+        )
+      ) AS "grantsReady",
+      (SELECT count(*)=1 AND bool_and(
+          attestation.catalog_definition=agent_bridge.row_isolation_catalog_definition()
+        )
+       FROM agent_bridge.row_isolation_attestations attestation
+       WHERE attestation.name='domain-v1') AS "catalogReady"
+  `);
+  const row = result.rows[0];
+  const callerReady = row?.callerReady && (allowPrivilegedCaller || !row.callerBypasses);
+  return Boolean(
+    row?.rolesReady && callerReady && row.ownershipReady && row.policiesReady &&
+    row.functionsReady && row.constraintsReady && row.triggersReady && row.grantsReady && row.catalogReady
+  );
+}
+
+export async function runtimeSchemaReady(
+  db: PgQueryable,
+  options: { allowPrivilegedCaller?: boolean } = {},
+): Promise<boolean> {
   const columns = await db.query<{ table_name: string; column_name: string; udt_name: string }>(
     `SELECT relation.relname AS table_name, attribute.attname AS column_name,
        type.typname AS udt_name
@@ -189,7 +488,9 @@ export async function runtimeSchemaReady(db: PgQueryable): Promise<boolean> {
   if ([...REQUIRED_COLUMNS].some(([name, type]) => actual.get(name) !== type)) return false;
 
   const objects = await db.query<{ immutable: boolean; deliveryAudit: boolean; idempotency: boolean; claim: boolean; publisher: boolean; terminal: boolean; source: boolean; thread: boolean; created: boolean; presence: boolean; project: boolean; targets: boolean; scopeSets: boolean; securityEvents: boolean; ratePolicies: boolean; rateBuckets: boolean; replacement: boolean; rateCleanup: boolean; credentialSecurity: boolean; eventAppendOnly: boolean; scopeAudit: boolean; rateConsume: boolean; securityReady: boolean; requestAuthorities: boolean; authorityOpen: boolean; authorityClose: boolean; credentialDigestHidden: boolean; authorityRowsHidden: boolean; principalTablesHidden: boolean; authorityTablesLocked: boolean; authorityCatalog: boolean }>(
-    `SELECT
+    `WITH names AS (
+       SELECT ('agent_bridge_runtime_' || substr(md5(current_database()),1,16))::name AS runtime_role
+     ) SELECT
        EXISTS (
          SELECT 1 FROM pg_trigger
          WHERE tgrelid='agent_bridge.messages'::regclass
@@ -233,14 +534,11 @@ export async function runtimeSchemaReady(db: PgQueryable): Promise<boolean> {
        to_regprocedure('agent_bridge.open_request_authority(uuid,text,uuid)') IS NOT NULL
          AND to_regprocedure('agent_bridge.resolve_credential_hash(text)') IS NOT NULL AS "authorityOpen",
        to_regprocedure('agent_bridge.close_request_authority()') IS NOT NULL AS "authorityClose",
-       ((SELECT usesuper FROM pg_user WHERE usename=current_user)
-         OR NOT has_table_privilege(current_user,'agent_bridge.credentials','SELECT')) AS "credentialDigestHidden",
-       ((SELECT usesuper FROM pg_user WHERE usename=current_user)
-         OR NOT has_table_privilege(current_user,'agent_bridge.request_authorities','SELECT')) AS "authorityRowsHidden",
-       ((SELECT usesuper FROM pg_user WHERE usename=current_user)
-         OR (NOT has_table_privilege(current_user,'agent_bridge.agents','SELECT')
-           AND NOT has_table_privilege(current_user,'agent_bridge.workspaces','SELECT'))) AS "principalTablesHidden",
-       ((SELECT usesuper FROM pg_user WHERE usename=current_user) OR (
+       NOT has_table_privilege((SELECT runtime_role FROM names),'agent_bridge.credentials','SELECT') AS "credentialDigestHidden",
+       NOT has_table_privilege((SELECT runtime_role FROM names),'agent_bridge.request_authorities','SELECT') AS "authorityRowsHidden",
+       (NOT has_table_privilege((SELECT runtime_role FROM names),'agent_bridge.agents','SELECT')
+         AND NOT has_table_privilege((SELECT runtime_role FROM names),'agent_bridge.workspaces','SELECT')) AS "principalTablesHidden",
+       (
          NOT EXISTS (
            SELECT 1
            FROM unnest(ARRAY[
@@ -250,7 +548,9 @@ export async function runtimeSchemaReady(db: PgQueryable): Promise<boolean> {
            CROSS JOIN unnest(ARRAY[
              'SELECT','INSERT','UPDATE','DELETE','TRUNCATE','REFERENCES','TRIGGER'
            ]) requested_privilege(value)
-           WHERE has_table_privilege(current_user,protected_table.value,requested_privilege.value)
+           WHERE has_table_privilege(
+             (SELECT runtime_role FROM names),protected_table.value,requested_privilege.value
+           )
          )
          AND NOT EXISTS (
            SELECT 1
@@ -259,19 +559,21 @@ export async function runtimeSchemaReady(db: PgQueryable): Promise<boolean> {
              'agent_bridge.workspaces','agent_bridge.request_authorities'
            ]) protected_table(value)
            CROSS JOIN unnest(ARRAY['SELECT','INSERT','UPDATE','REFERENCES']) requested_privilege(value)
-           WHERE has_any_column_privilege(current_user,protected_table.value,requested_privilege.value)
+           WHERE has_any_column_privilege(
+             (SELECT runtime_role FROM names),protected_table.value,requested_privilege.value
+           )
          )
-       )) AS "authorityTablesLocked",
-       ((SELECT usesuper FROM pg_user WHERE usename=current_user) OR (
-         has_function_privilege(current_user,'agent_bridge.resolve_credential_hash(text)','EXECUTE')
-         AND has_function_privilege(current_user,'agent_bridge.open_request_authority(uuid,text,uuid)','EXECUTE')
-         AND has_function_privilege(current_user,'agent_bridge.close_request_authority()','EXECUTE')
-         AND has_function_privilege(current_user,'agent_bridge.record_scope_denial(uuid,text,uuid)','EXECUTE')
-         AND has_function_privilege(current_user,'agent_bridge.consume_rate_limit(uuid,text,uuid)','EXECUTE')
-         AND NOT has_function_privilege(current_user,'agent_bridge.active_request_authority()','EXECUTE')
-         AND NOT has_function_privilege(current_user,'agent_bridge.assert_active_request_credential(uuid)','EXECUTE')
-         AND NOT has_function_privilege(current_user,'agent_bridge.record_scope_denial_unbound_011(uuid,text,uuid)','EXECUTE')
-         AND NOT has_function_privilege(current_user,'agent_bridge.consume_rate_limit_unbound_011(uuid,text,uuid)','EXECUTE')
+       ) AS "authorityTablesLocked",
+       (
+         has_function_privilege((SELECT runtime_role FROM names),'agent_bridge.resolve_credential_hash(text)','EXECUTE')
+         AND has_function_privilege((SELECT runtime_role FROM names),'agent_bridge.open_request_authority(uuid,text,uuid)','EXECUTE')
+         AND has_function_privilege((SELECT runtime_role FROM names),'agent_bridge.close_request_authority()','EXECUTE')
+         AND has_function_privilege((SELECT runtime_role FROM names),'agent_bridge.record_scope_denial(uuid,text,uuid)','EXECUTE')
+         AND has_function_privilege((SELECT runtime_role FROM names),'agent_bridge.consume_rate_limit(uuid,text,uuid)','EXECUTE')
+         AND NOT has_function_privilege((SELECT runtime_role FROM names),'agent_bridge.active_request_authority()','EXECUTE')
+         AND NOT has_function_privilege((SELECT runtime_role FROM names),'agent_bridge.assert_active_request_credential(uuid)','EXECUTE')
+         AND NOT has_function_privilege((SELECT runtime_role FROM names),'agent_bridge.record_scope_denial_unbound_011(uuid,text,uuid)','EXECUTE')
+         AND NOT has_function_privilege((SELECT runtime_role FROM names),'agent_bridge.consume_rate_limit_unbound_011(uuid,text,uuid)','EXECUTE')
          AND NOT has_function_privilege('public','agent_bridge.resolve_credential_hash(text)','EXECUTE')
          AND NOT has_function_privilege('public','agent_bridge.open_request_authority(uuid,text,uuid)','EXECUTE')
          AND NOT has_function_privilege('public','agent_bridge.close_request_authority()','EXECUTE')
@@ -294,7 +596,7 @@ export async function runtimeSchemaReady(db: PgQueryable): Promise<boolean> {
                OR NOT coalesce(procedure.proconfig @> ARRAY['search_path=""'],false)
              )
          )
-       )) AS "authorityCatalog"`,
+       ) AS "authorityCatalog"`,
   );
   const row = objects.rows[0];
   if (!Boolean(
@@ -310,7 +612,10 @@ export async function runtimeSchemaReady(db: PgQueryable): Promise<boolean> {
     const security = await db.query<{ ready: boolean }>(
       "SELECT agent_bridge.security_schema_ready() AS ready",
     );
-    return security.rows[0]?.ready === true;
+    return security.rows[0]?.ready === true && await rowIsolationReady(
+      db,
+      options.allowPrivilegedCaller === true,
+    );
   } catch {
     return false;
   }
