@@ -1,4 +1,4 @@
-import { randomUUID } from "node:crypto";
+import { uuidv7 } from "./bridge-domain.js";
 
 export const MESSAGE_ENVELOPE_SCHEMA = "agent-bridge.message-envelope.v1";
 
@@ -65,7 +65,7 @@ export function buildMessageEnvelope(
   const source = normalizeString(args?.source) ?? "unknown";
   const category = normalizeString(args?.category);
   const kind = normalizeString(args?.kind) ?? category ?? "operational";
-  const messageId = normalizeString(args?.message_id) ?? randomUUID();
+  const messageId = normalizeString(args?.message_id) ?? uuidv7();
 
   const envelope: JsonRecord = {
     schema: MESSAGE_ENVELOPE_SCHEMA,

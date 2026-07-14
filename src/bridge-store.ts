@@ -55,5 +55,6 @@ export interface BridgeStore {
   listPresence?(principal: BridgePrincipal): Promise<AgentPresence[]>;
   sync?(options?: { maxPush?: number; maxPages?: number; signal?: AbortSignal }): Promise<unknown>;
   verifyRemote?(): Promise<void>;
+  capabilities?(): Promise<unknown>;
   close?(): Promise<void>;
 }

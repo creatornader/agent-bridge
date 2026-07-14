@@ -17,6 +17,8 @@ The protocol must support informational context and executable work without trea
 
 [ADR-0001](decisions/0001-protocol-layers-and-acknowledgment-semantics.md) defines these layers and the distinct meanings of receipts, claims, leases, delivery settlement, and external task completion.
 
+[ADR-0002](decisions/0002-canonical-operation-contract-registry.md) defines the canonical cross-surface operation contract, deterministic artifacts, capability discovery, and protocol negotiation.
+
 ## Decisions
 
 ### PostgreSQL is the shared source of truth
@@ -151,7 +153,7 @@ Limits apply to content bytes, payload bytes, metadata depth, target count, batc
 
 The CLI provides `init`, `doctor`, `status`, `demo`, `send`, `inbox`, `history`, `claim`, `ack`, `nack`, `watch`, `sync`, and migration commands. Existing `post` and `get` aliases remain available.
 
-`/readyz` reports storage and schema readiness. Authenticated status output reports the bound principal, provider schema, delivery counts, the oldest due delivery, and local edge state when the caller uses a gateway client. Client `doctor` and `status` distinguish healthy local edge storage from remote gateway reachability rather than claiming connectivity from local startup alone.
+`/readyz` reports storage and schema readiness. Authenticated HTTP status reports the bound principal, provider schema, delivery counts, and the oldest due delivery. CLI `doctor` and `status` use a separate client-status contract that also reports local edge state and remote gateway reachability.
 
 Gateway responses carry a request ID, including stable error envelopes. Authenticated Prometheus output counts requests, errors, timeouts, and authentication failures. Responses and metrics exclude bearer tokens, database URLs, payload bodies, and credential material.
 
@@ -162,6 +164,12 @@ The unscoped npm name `agent-bridge` belongs to another project. This repository
 The package must contain built runtime files, migrations, client manifests, license, README, and changelog. A clean tarball install runs in CI. Releases use one version source, a tag-to-version check, npm provenance, and a human approval gate.
 
 ## Acceptance checks
+
+The TypeBox 1.x registry validates closed requests before domain semantics. Response schemas require known fields and accept additive properties. MCP and HTTP 2.1 claim and delivery-control results use object envelopes with nullable `delivery` fields. HTTP 2.0 and the unversioned CLI keep their released direct or null shapes.
+
+Compatibility is asymmetric. An upgraded gateway serves released headerless and explicit 2.0 clients. A new 2.1 client probes before mutation and accepts the gateway only when complete, consistent response headers select 2.1 and advertise 2.1 support. A headerless response, selected 2.0 response, or partial negotiation means the gateway must be upgraded. The client rejects mutation instead of using the d8184fe 2.0 contract. Deploy the gateway before 2.1 clients.
+
+The OpenAPI paths describe protocol 2.1. Embedded 2.0 vendor extensions carry only the frozen compatibility schemas and metadata needed to document released clients; they do not form a second OpenAPI description. `npm run contracts:check` proves that JSON Schema 2020-12, OpenAPI 3.1.2, MCP manifest, and capability artifacts match the registry. All schema references are local. Protocol, npm package, MCP implementation, and migration versions are independent. Reserved scope metadata is not enforced by current credential-wide gateway authorization.
 
 The v2 implementation is not accepted until all of these checks pass:
 

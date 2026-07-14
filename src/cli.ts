@@ -14,6 +14,7 @@ import { legacyContextMetadata, legacyNumericMessageId } from "./legacy-compat.j
 import { BridgeHttpError } from "./http-bridge-store.js";
 import { LegacySupabaseError } from "./legacy-supabase-store.js";
 import { installClient, type InstallableRuntime } from "./client-installer.js";
+import { capabilityDocument, operationForCli, parseCliResponse, validateRequest } from "./contracts/registry.js";
 
 type Options = Record<string, string | boolean | string[]>;
 const SUPPORTED_OPTIONS = new Set([
@@ -30,9 +31,10 @@ const SUPPORTED_OPTIONS = new Set([
   "identity", "command", "scope",
   "recipient", "retry-base-ms", "retry-jitter", "retry-max-ms", "role", "runtime", "capability", "state",
   "max-pages", "max-push",
+  "latest",
   "apply",
 ]);
-const BOOLEAN_OPTIONS = new Set(["apply", "dead", "force", "json"]);
+const BOOLEAN_OPTIONS = new Set(["apply", "dead", "force", "json", "latest"]);
 function parse(argv: string[]): { command: string; options: Options; positionals: string[] } {
   const command = argv[0] ?? "help"; const options: Options = {}; const positionals: string[] = [];
   for (let i = 1; i < argv.length; i++) {
@@ -73,6 +75,11 @@ function since(options: Options): string | undefined {
   return new Date(Date.now() - milliseconds).toISOString();
 }
 function output(value: unknown): void { process.stdout.write(`${JSON.stringify(value, null, 2)}\n`); }
+function cliOutput(
+  operationId: string,
+  value: unknown,
+  invocation?: { command: string; optionNames?: readonly string[] },
+): void { output(parseCliResponse(operationId, value, invocation)); }
 function cursor(path: string): string | undefined { try { return readFileSync(path, "utf8").trim() || undefined; } catch { return undefined; } }
 function saveCursor(path: string, value: string | undefined): void { if (!value) return; mkdirSync(dirname(path), { recursive: true }); const temporary = `${path}.${process.pid}.tmp`; writeFileSync(temporary, `${value}\n`, { mode: 0o600 }); renameSync(temporary, path); }
 function watchCursorPath(path: string, project: string | undefined): string {
@@ -80,10 +87,23 @@ function watchCursorPath(path: string, project: string | undefined): string {
   const scope = createHash("sha256").update(project).digest("hex").slice(0, 16);
   return `${path}.project-${scope}`;
 }
-function help(): void { process.stdout.write(`agent-bridge: provider-neutral agent messaging\n\nCommands:\n  init, doctor, status, pending, migrate, reconcile-legacy-projects, sync, demo, join, presence\n  send (post), inbox (get), sent, history, acknowledge, claim, extend, ack, nack, watch\n  deliveries, dead-letters, delivery-events, cancel, requeue\n  clients install <codex|claude-code|claude-desktop> --identity <name>\n`); }
+function help(): void { process.stdout.write(`agent-bridge: provider-neutral agent messaging\n\nCommands:\n  init, doctor, status, capabilities, pending, migrate, reconcile-legacy-projects, sync, demo, join, presence\n  send (post), inbox (get), sent, history, acknowledge, claim, extend, ack, nack, watch\n  deliveries, dead-letters, delivery-events, cancel, requeue\n  clients install <codex|claude-code|claude-desktop> --identity <name>\n`); }
 function rejectUnknownOptions(options: Options): void {
   const unknown = Object.keys(options).filter((key) => !SUPPORTED_OPTIONS.has(key));
   if (unknown.length) throw new Error(`unknown option: --${unknown[0]}`);
+}
+
+const CLI_CONTEXT_OPTIONS = new Set([
+  "agent", "as", "config", "db", "instance", "json", "key", "provider",
+  "token", "url", "workspace",
+]);
+
+function validateCanonicalCommandOptions(command: string, options: Options, config: ClientConfig): void {
+  const contract = operationForCli(command, config.provider, Object.keys(options));
+  if (!contract?.cli) return;
+  const allowed = new Set([...CLI_CONTEXT_OPTIONS, ...contract.cli.options]);
+  const invalid = Object.keys(options).find((key) => !allowed.has(key));
+  if (invalid) throw new Error(`--${invalid} is not valid for ${command}`);
 }
 
 async function initialize(options: Options): Promise<void> {
@@ -145,9 +165,16 @@ function configFor(options: Options, command: string): ClientConfig {
     : command === "acknowledge" || (command === "ack" && Boolean(one(options, "ids")))
       ? one(options, "agent")
       : one(options, "as");
-  const environment = one(options, "instance")
-    ? { ...process.env, AGENT_BRIDGE_INSTANCE: one(options, "instance") }
-    : process.env;
+  const environment = {
+    ...process.env,
+    ...(one(options, "config") ? { AGENT_BRIDGE_CONFIG: one(options, "config") } : {}),
+    ...(one(options, "provider") ? { AGENT_BRIDGE_PROVIDER: one(options, "provider") } : {}),
+    ...(one(options, "db") ? { AGENT_BRIDGE_DB: one(options, "db") } : {}),
+    ...(one(options, "url") ? { AGENT_BRIDGE_URL: one(options, "url") } : {}),
+    ...(one(options, "key") ? { AGENT_BRIDGE_KEY: one(options, "key") } : {}),
+    ...(one(options, "token") ? { AGENT_BRIDGE_TOKEN: one(options, "token") } : {}),
+    ...(one(options, "instance") ? { AGENT_BRIDGE_INSTANCE: one(options, "instance") } : {}),
+  };
   const config = resolveClientConfig(environment, explicit);
   const assertedWorkspace = one(options, "workspace");
   if (config.provider === "gateway" && assertedWorkspace && assertedWorkspace !== config.principal.workspace) {
@@ -277,9 +304,12 @@ export async function runCli(argv = process.argv.slice(2)): Promise<void> {
     finally { await pool.end(); }
     return;
   }
-  const config = configFor(options, command); const assertedUnackedBy = one(options, "unacked-by"); if (assertedUnackedBy !== undefined && assertedUnackedBy !== config.principal.agent) throw new Error("--unacked-by must equal the configured principal"); const runtime = await createClientRuntime(config);
+  const config = configFor(options, command);
+  validateCanonicalCommandOptions(raw, options, config);
+  const assertedUnackedBy = one(options, "unacked-by"); if (assertedUnackedBy !== undefined && assertedUnackedBy !== config.principal.agent) throw new Error("--unacked-by must equal the configured principal"); const runtime = await createClientRuntime(config);
   try {
-    if (command === "doctor" || command === "status") { const diagnostics = await runtime.store.diagnostics?.(config.principal) ?? { schemaVersion: config.provider === "legacy-supabase" ? "legacy-v1" : "local-v2", deliverySupported: false, pending: null, claimed: null, retrying: null, dead: null }; const remoteReachable = "remoteReachable" in diagnostics ? diagnostics.remoteReachable : null; output({ status: remoteReachable === false ? "degraded" : "ok", localHealthy: true, connected: remoteReachable ?? true, remoteReachable, provider: config.provider, workspace: config.principal.workspace, agent: config.principal.agent, instance: config.principal.instance ?? null, schemaVersion: diagnostics.schemaVersion, endpoint: config.url ?? null, database: config.provider === "local" ? config.databasePath : null, cursorPath: config.cursorPath, lastCursor: cursor(config.cursorPath) ?? null, queue: diagnostics }); return; }
+    if (command === "capabilities") { validateRequest("capabilities", {}); cliOutput("capabilities", capabilityDocument({ surface: "cli", provider: config.provider })); return; }
+    if (command === "doctor" || command === "status") { validateRequest("client_status", {}); const diagnostics = await runtime.store.diagnostics?.(config.principal) ?? { schemaVersion: config.provider === "legacy-supabase" ? "legacy-v1" : "local-v2", deliverySupported: false, pending: null, claimed: null, retrying: null, dead: null }; const remoteReachable = "remoteReachable" in diagnostics ? diagnostics.remoteReachable : null; cliOutput("client_status", { status: remoteReachable === false ? "degraded" : "ok", localHealthy: true, connected: remoteReachable ?? true, remoteReachable, provider: config.provider, workspace: config.principal.workspace, agent: config.principal.agent, instance: config.principal.instance ?? null, schemaVersion: diagnostics.schemaVersion, endpoint: config.url ?? null, database: config.provider === "local" ? config.databasePath : null, cursorPath: config.cursorPath, lastCursor: cursor(config.cursorPath) ?? null, queue: diagnostics }); return; }
     if (command === "pending") {
       const diagnostics = await runtime.store.diagnostics?.(config.principal);
       const page = await runtime.service.history(config.principal, {
@@ -318,20 +348,22 @@ export async function runCli(argv = process.argv.slice(2)): Promise<void> {
       if (!available) process.exitCode = authoritative ? 1 : 2;
       return;
     }
-    if (command === "send") { output(await runtime.service.publish(config.principal, draft(options, positionals))); return; }
-    if (command === "join") { output(await runtime.service.heartbeat(config.principal, { leaseMs: integer(options, "lease-ms", 60_000), runtimeType: one(options, "runtime"), capabilities: list(options, "capability") })); return; }
-    if (command === "presence") { output({ agents: await runtime.service.presence(config.principal) }); return; }
+    if (command === "send") { const message = draft(options, positionals); validateRequest("publish_message", { ...message, source: one(options, "source") }); cliOutput("publish_message", await runtime.service.publish(config.principal, message)); return; }
+    if (command === "join") { const input = validateRequest("heartbeat", { leaseMs: integer(options, "lease-ms", 60_000), runtimeType: one(options, "runtime"), capabilities: list(options, "capability") }); cliOutput("heartbeat", await runtime.service.heartbeat(config.principal, input)); return; }
+    if (command === "presence") { validateRequest("presence", {}); cliOutput("presence", { agents: await runtime.service.presence(config.principal) }); return; }
     if (command === "sync") {
       if (!runtime.store.sync) throw new Error("sync is available only with the gateway provider");
-      output(await runtime.store.sync({
+      const input = validateRequest("sync", {
         maxPush: integer(options, "max-push", integer(options, "limit", 100)),
         maxPages: integer(options, "max-pages", 20),
-      }));
+      });
+      cliOutput("sync", await runtime.store.sync(input));
       return;
     }
-    if (command === "history" || command === "inbox" || command === "sent") { const page = await runtime.service.history(config.principal, { cursor: one(options, "cursor"), limit: integer(options, "limit", 20), types: list(options, "type").concat(list(options, "category")), source: one(options, "source"), project: one(options, "project"), since: since(options), mailbox: command === "inbox" ? "inbox" : command === "sent" ? "sent" : one(options, "mailbox") as any, receiptState: one(options, "receipt-state") as any, unacknowledgedBy: assertedUnackedBy, threadId: one(options, "thread-id"), latest: raw === "get" }); if (raw === "get") { output(page.messages.map((message) => ({ id: config.provider === "legacy-supabase" ? Number(message.sequence) : message.id, source: message.source, category: message.type, content: message.content, priority: message.priority, project: message.project ?? null, metadata: legacyContextMetadata(message), created_at: message.createdAt }))); } else output(page); return; }
+    if (command === "history" || command === "inbox" || command === "sent") { const query = validateRequest("history", { cursor: one(options, "cursor"), limit: integer(options, "limit", 20), types: list(options, "type").concat(list(options, "category")), source: one(options, "source"), project: one(options, "project"), since: since(options), mailbox: command === "inbox" ? "inbox" : command === "sent" ? "sent" : one(options, "mailbox") as any, receiptState: one(options, "receipt-state") as any, unacknowledgedBy: assertedUnackedBy, threadId: one(options, "thread-id"), latest: raw === "get" || boolean(options, "latest") }); const page = await runtime.service.history(config.principal, query); if (raw === "get") { cliOutput("history", page.messages.map((message) => ({ id: config.provider === "legacy-supabase" ? Number(message.sequence) : message.id, source: message.source, category: message.type, content: message.content, priority: message.priority, project: message.project ?? null, metadata: legacyContextMetadata(message), created_at: message.createdAt })), { command: raw, optionNames: Object.keys(options) }); } else cliOutput("history", page); return; }
     if (command === "acknowledge" || (command === "ack" && one(options, "ids"))) {
       const rawIds = list(options, "ids");
+      validateRequest("record_receipt", { messageIds: rawIds });
       const acknowledged = config.provider === "legacy-supabase" &&
           runtime.store.recordLegacyReceipt && rawIds.every((id) => /^\d+$/.test(id))
         ? await runtime.store.recordLegacyReceipt(rawIds, config.principal.agent)
@@ -339,19 +371,22 @@ export async function runCli(argv = process.argv.slice(2)): Promise<void> {
             config.principal,
             rawIds.map(legacyNumericMessageId),
           );
-      output({ acknowledged, agent: config.principal.agent });
+      cliOutput("record_receipt", { acknowledged, agent: config.principal.agent }, {
+        command: raw,
+        optionNames: Object.keys(options),
+      });
       return;
     }
-    if (command === "claim") { output(await runtime.service.claim(config.principal, { leaseMs: integer(options, "lease-ms", 30_000), maxAttempts: one(options,"max-attempts")===undefined?undefined:integer(options,"max-attempts",5) })); return; }
-    if(command==="deliveries"||command==="dead-letters"){output(await runtime.service.deliveries(config.principal,{cursor:one(options,"cursor"),limit:integer(options,"limit",50),role:one(options,"role") as any,messageId:one(options,"message-id"),recipient:one(options,"recipient"),states:command==="dead-letters"?["dead"]:list(options,"state") as any}));return;}
-    if(command==="delivery-events"){output(await runtime.service.deliveryEvents(config.principal,one(options,"delivery-id")??positionals[0]!,{cursor:one(options,"cursor"),limit:integer(options,"limit",50)}));return;}
-    if(command==="cancel"){output(await runtime.service.cancel(config.principal,one(options,"delivery-id")??positionals[0]!));return;}
-    if(command==="requeue"){output(await runtime.service.requeue(config.principal,one(options,"delivery-id")??positionals[0]!));return;}
+    if (command === "claim") { const input = validateRequest("claim_delivery", { leaseMs: integer(options, "lease-ms", 30_000), maxAttempts: one(options,"max-attempts")===undefined?undefined:integer(options,"max-attempts",5) }); cliOutput("claim_delivery", await runtime.service.claim(config.principal, input)); return; }
+    if(command==="deliveries"||command==="dead-letters"){const input=validateRequest("list_deliveries",{cursor:one(options,"cursor"),limit:integer(options,"limit",50),role:one(options,"role") as any,messageId:one(options,"message-id"),recipient:one(options,"recipient"),states:command==="dead-letters"?["dead"]:list(options,"state") as any});cliOutput("list_deliveries",await runtime.service.deliveries(config.principal,input));return;}
+    if(command==="delivery-events"){const input=validateRequest("list_delivery_events",{deliveryId:one(options,"delivery-id")??positionals[0],cursor:one(options,"cursor"),limit:integer(options,"limit",50)});cliOutput("list_delivery_events",await runtime.service.deliveryEvents(config.principal,String(input.deliveryId),input));return;}
+    if(command==="cancel"){const input=validateRequest("cancel_delivery",{deliveryId:one(options,"delivery-id")??positionals[0]});cliOutput("cancel_delivery",await runtime.service.cancel(config.principal,String(input.deliveryId)));return;}
+    if(command==="requeue"){const input=validateRequest("requeue_delivery",{deliveryId:one(options,"delivery-id")??positionals[0]});cliOutput("requeue_delivery",await runtime.service.requeue(config.principal,String(input.deliveryId)));return;}
     const deliveryId = one(options, "delivery-id") ?? positionals[0]; const leaseToken = one(options, "lease-token") ?? positionals[1];
     if (!deliveryId || !leaseToken) { if (["extend", "ack", "nack"].includes(command)) throw new Error("--delivery-id and --lease-token are required"); }
-    if (command === "extend") { output(await runtime.service.extend(config.principal, deliveryId!, leaseToken!, integer(options, "lease-ms", 30_000))); return; }
-    if (command === "ack") { output(await runtime.service.ack(config.principal, deliveryId!, leaseToken!)); return; }
-    if (command === "nack") { const disposition=one(options,"disposition")??(boolean(options,"dead")?"dead":"retry"); output(await runtime.service.nack(config.principal, deliveryId!, leaseToken!, one(options, "error") ?? "negative acknowledgment", disposition as "retry"|"dead")); return; }
+    if (command === "extend") { const input=validateRequest("extend_delivery",{deliveryId,leaseToken,leaseMs:integer(options,"lease-ms",30_000)}); cliOutput("extend_delivery",await runtime.service.extend(config.principal,String(input.deliveryId),String(input.leaseToken),input.leaseMs as number)); return; }
+    if (command === "ack") { const input=validateRequest("acknowledge_delivery",{deliveryId,leaseToken}); cliOutput("acknowledge_delivery",await runtime.service.ack(config.principal,String(input.deliveryId),String(input.leaseToken))); return; }
+    if (command === "nack") { const disposition=one(options,"disposition")??(boolean(options,"dead")?"dead":"retry"); const input=validateRequest("negative_acknowledge_delivery",{deliveryId,leaseToken,error:one(options,"error")??"negative acknowledgment",disposition}); cliOutput("negative_acknowledge_delivery",await runtime.service.nack(config.principal,String(input.deliveryId),String(input.leaseToken),String(input.error),input.disposition as "retry"|"dead")); return; }
     if (command === "watch") {
       const polls = one(options, "polls") === undefined ? Number.POSITIVE_INFINITY : integer(options, "polls", 0);
       const baseInterval = Math.min(integer(options, "interval-ms", 1_000), 60_000);

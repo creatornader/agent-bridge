@@ -57,6 +57,9 @@ function bridgeStoreContract(name: string, makeStore: () => SQLiteBridgeStore) {
 
       expect(repeated.created).toBe(false);
       expect(repeated.message.id).toBe(first.message.id);
+      for (const field of ["threadId", "replyToId", "correlationId", "causationId", "expiresAt", "atribReceiptId"] as const) {
+        expect(first.message[field]).toBeUndefined();
+      }
       const page = await service.history(principal, { limit: 1 });
       expect(page.messages).toHaveLength(1);
       expect(page.messages[0]?.id).toBe(first.message.id);
@@ -505,6 +508,9 @@ function bridgeStoreContract(name: string, makeStore: () => SQLiteBridgeStore) {
       expect(await service.cancel({ ...publisher, agent: "other" }, claim!.delivery.id)).toBeNull();
       const events = await service.deliveryEvents(publisher, claim!.delivery.id);
       expect(events.events.map((event) => event.action)).toEqual(["created", "claim", "cancel"]);
+      expect(events.events[0]?.fromState).toBeUndefined();
+      expect(events.events[0]?.leaseOwner).toBeUndefined();
+      expect(events.events[0]?.error).toBeUndefined();
       expect(events.events.map((event) => [event.cycleAttempt, event.requeueCount]))
         .toEqual([[0, 0], [1, 0], [1, 0]]);
       expect((await service.requeue(publisher, claim!.delivery.id))?.state).toBe("pending");

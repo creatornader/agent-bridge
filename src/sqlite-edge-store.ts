@@ -197,7 +197,12 @@ export class SQLiteEdgeStore {
   private restrictFiles(): void {
     if (this.path === ":memory:") return;
     for (const path of [this.path, `${this.path}-wal`, `${this.path}-shm`]) {
-      if (existsSync(path)) chmodSync(path, 0o600);
+      if (!existsSync(path)) continue;
+      try {
+        chmodSync(path, 0o600);
+      } catch (error) {
+        if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+      }
     }
   }
 

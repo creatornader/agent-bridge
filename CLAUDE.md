@@ -16,6 +16,7 @@ Provider-neutral MCP server, CLI, and HTTPS gateway for messaging between AI age
 - `sql/setup.sql`: Legacy Supabase v1 schema
 - `docs/postmortems/2026-07-08-wrapper-source-drift.md`: Incident note for wrapper/source drift
 - `docs/decisions/0001-protocol-layers-and-acknowledgment-semantics.md`: Protocol boundary and acknowledgment semantics
+- `docs/decisions/0002-canonical-operation-contract-registry.md`: Canonical v2 contracts and version negotiation
 - `docs/architecture-v2.md`: Accepted v2 protocol, storage, security, delivery, and migration design
 - `SKILL.md`: Runtime-neutral instructions for agents using the bridge
 - `llms.txt`: Compact package and interface map for model tooling
@@ -74,6 +75,11 @@ Sync triggers:
 - `ack_context` uses a Postgres RPC function (`security definer`, `set search_path`) for atomic `array_append`: avoids race conditions and reduces network calls from 2 to 1
 - `bridge-meta` category enables agents to suggest improvements to the bridge itself
 - `agent-bridge-atrib` is an optional signed HTTP wrapper, not the canonical implementation; clients should keep a direct source-repo MCP path available when wrapper liveness is uncertain
+- `src/contracts/registry.ts` is the canonical v2 operation contract. Generated schema, OpenAPI, MCP, and capability artifacts must pass `npm run contracts:check`.
+- HTTP protocol 2.1 is current. The gateway accepts exactly 2.0 and 2.1; a missing request header selects the 2.0 compatibility shape, and every other version returns 426. Package, MCP implementation, protocol, and migration versions are independent.
+- Upgraded gateways preserve released 2.0 clients. New 2.1 clients require complete, consistent 2.1 negotiation before mutation and reject headerless or selected 2.0 gateways instead of downgrading. Upgrade the gateway before 2.1 clients.
+- OpenAPI paths describe protocol 2.1. The embedded 2.0 vendor extensions contain limited compatibility schema metadata, not a second OpenAPI description.
+- Capability scope names are reserved metadata until a later security migration. Current credentials remain credential-wide and generated documents set scope enforcement to false.
 
 ### Providers
 

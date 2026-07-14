@@ -38,6 +38,7 @@ function networkError(): Error {
 
 class SwitchableRemote implements BridgeStore {
   online = false;
+  initializeFailure?: Error;
   insertFailure?: Error;
   failAfterCommit = false;
   responseDeliveryPolicy?: BridgeMessage["deliveryPolicy"];
@@ -52,6 +53,7 @@ class SwitchableRemote implements BridgeStore {
 
   async initialize(): Promise<void> {
     this.check();
+    if (this.initializeFailure) throw this.initializeFailure;
     await this.inner.initialize();
   }
 
@@ -346,6 +348,45 @@ describe("offline SQLite synchronization", () => {
     await isolated.close();
   });
 
+  it("blocks replay when remote idempotency resolves to a different message ID", async () => {
+    const root = directory();
+    const sender = { workspace: "acme", agent: "sender" };
+    const remote = new SwitchableRemote();
+    remote.online = true;
+    await remote.inner.initialize();
+    const idempotencyKey = "shared-offline-key";
+    const authoritative = {
+      ...draft(sender, "018f4a70-0000-7000-8000-000000000201"),
+      idempotencyKey,
+    };
+    const queued = {
+      ...authoritative,
+      id: "018f4a70-0000-7000-8000-000000000202",
+    };
+
+    const inserted = await remote.inner.insertMessage(authoritative);
+    const directReplay = await remote.inner.insertMessage(queued);
+    expect(directReplay).toMatchObject({ created: false, message: { id: inserted.message.id } });
+    expect(edgeMessageFingerprint(queued)).toBe(edgeMessageFingerprint(inserted.message));
+
+    const localEdge = edge(join(root, "edge.sqlite3"), sender);
+    await localEdge.enqueue(queued);
+    const syncing = new SyncingBridgeStore(localEdge, remote, sender, { autoSync: false });
+    const report = await syncing.sync({ maxPages: 0 });
+
+    expect(report).toMatchObject({
+      pushed: 0,
+      deduplicated: 0,
+      pending: 0,
+      blocked: 1,
+      lastError: "idempotency_conflict",
+    });
+    expect((await remote.inner.listMessages(sender)).messages).toMatchObject([
+      { id: authoritative.id, idempotencyKey },
+    ]);
+    await syncing.close();
+  });
+
   it("retries an unknown publication outcome idempotently", async () => {
     const root = directory();
     const principal = { workspace: "acme", agent: "sender" };
@@ -527,6 +568,29 @@ describe("offline SQLite synchronization", () => {
       code: "network_error",
     });
     expect((await syncing.diagnostics(principal)).outboxPending).toBe(0);
+    await syncing.close();
+  });
+
+  it("rejects protocol mismatch before adding a message to the outbox", async () => {
+    const root = directory();
+    const principal = { workspace: "acme", agent: "sender" };
+    const remote = new SwitchableRemote();
+    remote.online = true;
+    remote.initializeFailure = Object.assign(new Error("gateway protocol is incompatible"), {
+      status: 502,
+      code: "protocol_mismatch",
+    });
+    const localEdge = edge(join(root, "edge.sqlite3"), principal);
+    const syncing = new SyncingBridgeStore(localEdge, remote, principal, {
+      autoSync: false,
+    });
+    await syncing.initialize();
+
+    await expect(syncing.insertMessage(draft(principal))).rejects.toMatchObject({
+      status: 502,
+      code: "protocol_mismatch",
+    });
+    expect(await localEdge.stats()).toMatchObject({ pending: 0, blocked: 0 });
     await syncing.close();
   });
 

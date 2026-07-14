@@ -7,7 +7,6 @@ import {
   McpError,
 } from "@modelcontextprotocol/sdk/types.js";
 import { homedir } from "node:os";
-import { createRequire } from "node:module";
 import { join } from "node:path";
 
 import { normalizeReceiptId } from "./atrib-receipt.js";
@@ -35,6 +34,13 @@ import {
   type ClientEnvironment,
   type ClientProvider,
 } from "./client-config.js";
+import {
+  availableOperations,
+  capabilityDocument,
+  ContractValidationError,
+  parseResponse,
+  validateRequest,
+} from "./contracts/registry.js";
 
 export interface AgentBridgeServerConfig {
   supabaseUrl?: string;
@@ -50,7 +56,7 @@ export interface AgentBridgeServerConfig {
   gatewayToken?: string;
 }
 
-const packageVersion = (createRequire(import.meta.url)("../package.json") as { version: string }).version;
+export const MCP_IMPLEMENTATION_VERSION = "2.0.0";
 
 export interface AgentBridgeServerEnv {
   AGENT_BRIDGE_URL?: string;
@@ -174,16 +180,13 @@ export function createAgentBridgeServer(
   } : undefined;
   const store = clientConfig ? createStore(clientConfig) : undefined;
   const service = store ? new BridgeService(store) : undefined;
-  const deliveryToolsAvailable = Boolean(
-    service && clientConfig?.provider !== "legacy-supabase",
-  );
   const server = new Server(
-    { name: "agent-bridge", version: packageVersion },
+    { name: "agent-bridge", version: MCP_IMPLEMENTATION_VERSION },
     { capabilities: { tools: {} } },
   );
 
-  server.setRequestHandler(ListToolsRequestSchema, async () => ({
-    tools: [
+  server.setRequestHandler(ListToolsRequestSchema, async () => {
+    const legacyTools = [
       {
         name: "post_context",
         description:
@@ -370,119 +373,34 @@ export function createAgentBridgeServer(
           required: ["ids"],
         },
       },
-      ...(service ? [{
-        name: "send",
-        description: "Create an immutable Agent Bridge v2 message.",
-        inputSchema: {
-          type: "object" as const,
-          properties: {
-            source: { type: "string", description: "Optional identity assertion; must match AGENT_BRIDGE_AGENT." },
-            project: { type: "string", description: "Optional immutable message label." },
-            type: { type: "string" }, content: { type: "string" }, contentType: { type: "string" },
-            data: {}, targets: { type: "array", items: { type: "string" } },
-            threadId: { type: "string" }, replyToId: { type: "string" }, correlationId: { type: "string" }, causationId: { type: "string" },
-            priority: { type: "string", enum: ["info", "high", "urgent"] }, expiresAt: { type: "string" },
-            idempotencyKey: { type: "string" }, atribReceiptId: { type: "string" },
-            informedBy: { type: "array", items: { type: "string" } }, metadata: {},
-            deliveryPolicy: { type: "object", properties: { mode: { type: "string", enum: ["mailbox","leased"] }, maxAttempts: { type: "number" }, retryBaseDelayMs: { type: "number" }, retryMaxDelayMs: { type: "number" }, retryJitterRatio: { type: "number" }, notBefore: { type: "string" } }, additionalProperties: false },
-          },
-          required: ["type", "content"],
-          additionalProperties: false,
-        },
-        outputSchema: { type: "object" as const, properties: { created: { type: "boolean" }, message: { type: "object", additionalProperties: true } }, required: ["created", "message"] },
-      },
-      {
-        name: "history",
-        description: "Read visible Agent Bridge v2 messages after an opaque cursor.",
-        inputSchema: { type: "object" as const, properties: {
-          cursor: { type: "string" }, limit: { type: "number", minimum: 1, maximum: 200 }, types: { type: "array", items: { type: "string" } },
-          mailbox: { type: "string", enum: ["inbox", "sent", "all"] }, receiptState: { type: "string", enum: ["any", "unread", "read"] },
-          includeExpired: { type: "boolean" }, source: { type: "string" }, project: { type: "string" }, since: { type: "string" }, unacknowledgedBy: { type: "string" },
-          threadId: { type: "string" }, latest: { type: "boolean" },
-        }, additionalProperties: false },
-        outputSchema: { type: "object" as const, properties: {
-          messages: { type: "array", items: { type: "object", additionalProperties: true } },
-          cursor: { type: "string" }, source: { type: "string", enum: ["remote", "cache"] },
-          stale: { type: "boolean" }, degraded: { type: "boolean" },
-          acknowledgements: { type: "string", enum: ["authoritative", "unknown"] },
-          lastSyncedAt: { type: "string" },
-        }, required: ["messages"], additionalProperties: false },
-      }] : []),
-      ...(store?.sync ? [{
-        name: "sync",
-        description: "Manually replay the gateway outbox and refresh the local inbox cache.",
-        inputSchema: { type: "object" as const, properties: {
-          maxPush: { type: "number", minimum: 0, maximum: 1000 },
-          maxPages: { type: "number", minimum: 0, maximum: 100 },
-        }, additionalProperties: false },
-        outputSchema: { type: "object" as const, properties: {
-          online: { type: "boolean" }, pushed: { type: "number" }, deduplicated: { type: "number" },
-          pulled: { type: "number" }, pending: { type: "number" }, blocked: { type: "number" },
-          cached: { type: "number" }, cursor: { type: "string" }, lastSyncedAt: { type: "string" },
-          lastError: { type: "string" }, failureRetryable: { type: "boolean" },
-        }, required: ["online", "pushed", "deduplicated", "pulled", "pending", "blocked", "cached"], additionalProperties: false },
-      }] : []),
-      ...(deliveryToolsAvailable ? [{
-        name: "claim",
-        description: "Atomically claim the next targeted delivery.",
-        inputSchema: { type: "object" as const, properties: {
-          leaseMs: { type: "number" },
-          maxAttempts: { type: "number", description: "Deprecated. Stored publisher policy controls exhaustion." },
-        }, additionalProperties: false },
-        outputSchema: { type: "object" as const, additionalProperties: true },
-      },
-      ...["extend", "acknowledge", "negative_acknowledge"].map((name) => ({
-        name,
-        description: `Agent Bridge v2 ${name.replace(/_/g, " ")} delivery operation.`,
-        inputSchema: {
-          type: "object" as const,
-          properties: {
-            deliveryId: { type: "string" }, leaseToken: { type: "string" },
-            ...(name === "extend" ? { leaseMs: { type: "number" } } : {}),
-            ...(name === "negative_acknowledge" ? {
-              error: { type: "string" },
-              disposition: { type: "string", enum: ["retry", "dead"] },
-              dead: { type: "boolean", description: "Deprecated. Use disposition." },
-              retryPolicy: {
-                type: "object",
-                description: "Deprecated. Stored publisher policy controls retry timing and exhaustion.",
-                properties: {
-                  maxAttempts: { type: "number" }, baseDelayMs: { type: "number" },
-                  maxDelayMs: { type: "number" }, jitterRatio: { type: "number" },
-                },
-                additionalProperties: false,
-              },
-            } : {}),
-          },
-          required: ["deliveryId", "leaseToken"],
-          additionalProperties: false,
-        },
-        outputSchema: { type: "object" as const, additionalProperties: true },
-      })),
-      ...["list_deliveries","list_delivery_events","cancel_delivery","requeue_delivery"].map((name)=>({name,description:`Agent Bridge v2 ${name.replace(/_/g," ")}.`,inputSchema:{type:"object" as const,properties:{deliveryId:{type:"string"},cursor:{type:"string"},limit:{type:"number"},role:{type:"string",enum:["recipient","publisher","all"]},messageId:{type:"string"},recipient:{type:"string"},states:{type:"array",items:{type:"string"}}},...(name==="list_deliveries"?{}:{required:["deliveryId"]}),additionalProperties:false},outputSchema:{type:"object" as const,additionalProperties:true}})),
-      {
-        name: "heartbeat",
-        description: "Publish a leased runtime presence record and capabilities.",
-        inputSchema: { type: "object" as const, properties: {
-          leaseMs: { type: "number", minimum: 1000, maximum: 900000 }, runtimeType: { type: "string" },
-          capabilities: { type: "array", items: { type: "string" } },
-        }, additionalProperties: false },
-        outputSchema: { type: "object" as const, additionalProperties: true },
-      },
-      {
-        name: "presence",
-        description: "List active agent runtime instances in this workspace.",
-        inputSchema: { type: "object" as const, properties: {}, additionalProperties: false },
-        outputSchema: { type: "object" as const, properties: { agents: { type: "array", items: { type: "object", additionalProperties: true } } }, required: ["agents"] },
-      }] : []),
-    ],
-  }));
+    ];
+    const canonical = service ? availableOperations({ surface: "mcp", provider }).map((operation) => ({
+      name: operation.mcp!.name,
+      description: operation.summary,
+      inputSchema: operation.request,
+      outputSchema: operation.response,
+    })) : [];
+    return { tools: [...legacyTools, ...canonical] as any };
+  });
 
   server.setRequestHandler(CallToolRequestSchema, async (request, extra) => {
     const { name, arguments: args } = request.params;
+    const canonicalResult = (operationId: string, value: unknown) => {
+      const parsed = parseResponse(operationId, value);
+      return {
+        content: [{ type: "text" as const, text: JSON.stringify(parsed) }],
+        ...(parsed !== null && typeof parsed === "object"
+          ? { structuredContent: parsed as Record<string, unknown> }
+          : {}),
+      };
+    };
 
     try {
       switch (name) {
+      case "capabilities": {
+        validateRequest("capabilities", args ?? {});
+        return canonicalResult("capabilities", capabilityDocument({ surface: "mcp", provider }));
+      }
       case "post_context": {
         let source: string | undefined;
         try {
@@ -703,65 +621,74 @@ export function createAgentBridgeServer(
 
       case "send": {
         if (!service || !principal) throw new McpError(ErrorCode.InvalidParams, "AGENT_BRIDGE_AGENT is required");
-        try { resolvePostSource(args?.source, principal.agent); } catch (error) { throw new McpError(ErrorCode.InvalidParams, error instanceof Error ? error.message : "source identity mismatch"); }
-        const result = await service.publish(principal, args as unknown as MessageDraft);
-        return { content: [{ type: "text", text: JSON.stringify(result) }], structuredContent: result as unknown as Record<string, unknown> };
+        const input = validateRequest("publish_message", args ?? {});
+        try { resolvePostSource(input.source, principal.agent); } catch (error) { throw new McpError(ErrorCode.InvalidParams, error instanceof Error ? error.message : "source identity mismatch"); }
+        const { source: _source, ...draft } = input;
+        return canonicalResult("publish_message", await service.publish(principal, draft as unknown as MessageDraft));
       }
       case "history": {
         if (!service || !principal) throw new McpError(ErrorCode.InvalidParams, "AGENT_BRIDGE_AGENT is required");
-        const result = await service.history(principal, args ?? {});
-        return { content: [{ type: "text", text: JSON.stringify(result) }], structuredContent: result as unknown as Record<string, unknown> };
+        const input = validateRequest("history", args ?? {});
+        return canonicalResult("history", await service.history(principal, input));
       }
       case "sync": {
         if (!store?.sync) throw new McpError(ErrorCode.InvalidParams, "sync is available only with the gateway provider");
+        const input = validateRequest("sync", args ?? {});
         const result = await store.sync({
-          maxPush: args?.maxPush as number | undefined,
-          maxPages: args?.maxPages as number | undefined,
+          maxPush: input.maxPush as number | undefined,
+          maxPages: input.maxPages as number | undefined,
           signal: extra.signal,
         });
-        return { content: [{ type: "text", text: JSON.stringify(result) }], structuredContent: result as Record<string, unknown> };
+        return canonicalResult("sync", result);
       }
       case "claim": {
         if (!service || !principal) throw new McpError(ErrorCode.InvalidParams, "AGENT_BRIDGE_AGENT is required");
+        const input = validateRequest("claim_delivery", args ?? {});
         const result = await service.claim(principal, {
-          leaseMs: args?.leaseMs as number | undefined,
-          maxAttempts: args?.maxAttempts as number | undefined,
+          leaseMs: input.leaseMs as number | undefined,
+          maxAttempts: input.maxAttempts as number | undefined,
         });
-        return { content: [{ type: "text", text: JSON.stringify(result) }], structuredContent: (result ?? { delivery: null }) as unknown as Record<string, unknown> };
+        return canonicalResult("claim_delivery", result ?? { delivery: null });
       }
       case "list_deliveries": case "list_delivery_events": case "cancel_delivery": case "requeue_delivery": {
         if(!service||!principal) throw new McpError(ErrorCode.InvalidParams,"AGENT_BRIDGE_AGENT is required");
-        const result=name==="list_deliveries"?await service.deliveries(principal,args as any):name==="list_delivery_events"?await service.deliveryEvents(principal,String(args?.deliveryId??""),args as any):name==="cancel_delivery"?await service.cancel(principal,String(args?.deliveryId??"")):await service.requeue(principal,String(args?.deliveryId??""));
-        return {content:[{type:"text",text:JSON.stringify(result)}],structuredContent:(result??{delivery:null}) as any};
+        const operationId = name === "list_deliveries" ? "list_deliveries" : name === "list_delivery_events" ? "list_delivery_events" : name === "cancel_delivery" ? "cancel_delivery" : "requeue_delivery";
+        const input = validateRequest(operationId, args ?? {});
+        const result=name==="list_deliveries"?await service.deliveries(principal,input as any):name==="list_delivery_events"?await service.deliveryEvents(principal,String(input.deliveryId),input as any):name==="cancel_delivery"?await service.cancel(principal,String(input.deliveryId)):await service.requeue(principal,String(input.deliveryId));
+        return canonicalResult(operationId, name === "list_deliveries" || name === "list_delivery_events" ? result : { delivery: result });
       }
       case "extend": case "acknowledge": case "negative_acknowledge": {
         if (!service || !principal) throw new McpError(ErrorCode.InvalidParams, "AGENT_BRIDGE_AGENT is required");
-        const id = String(args?.deliveryId ?? ""), token = String(args?.leaseToken ?? "");
-        const result = name === "extend" ? await service.extend(principal, id, token, args?.leaseMs as number | undefined)
+        const operationId = name === "extend" ? "extend_delivery" : name === "acknowledge" ? "acknowledge_delivery" : "negative_acknowledge_delivery";
+        const input = validateRequest(operationId, args ?? {});
+        const id = String(input.deliveryId), token = String(input.leaseToken);
+        const result = name === "extend" ? await service.extend(principal, id, token, input.leaseMs as number | undefined)
           : name === "acknowledge" ? await service.ack(principal, id, token)
           : await service.nack(
             principal,
             id,
             token,
-            (args?.error ?? "negative acknowledgment") as string,
-            (args?.disposition ?? args?.dead ?? "retry") as "retry" | "dead" | boolean,
-            args?.retryPolicy,
+            input.error as string,
+            (input.disposition ?? input.dead ?? "retry") as "retry" | "dead" | boolean,
+            input.retryPolicy,
           );
-        return { content: [{ type: "text", text: JSON.stringify(result) }], structuredContent: (result ?? { delivery: null }) as unknown as Record<string, unknown> };
+        return canonicalResult(operationId, { delivery: result });
       }
       case "heartbeat": {
         if (!service || !principal) throw new McpError(ErrorCode.InvalidParams, "AGENT_BRIDGE_AGENT is required");
+        const input = validateRequest("heartbeat", args ?? {});
         const result = await service.heartbeat(principal, {
-          leaseMs: args?.leaseMs as number | undefined,
-          runtimeType: args?.runtimeType as string | undefined,
-          capabilities: args?.capabilities as string[] | undefined,
+          leaseMs: input.leaseMs as number | undefined,
+          runtimeType: input.runtimeType as string | undefined,
+          capabilities: input.capabilities as string[] | undefined,
         });
-        return { content: [{ type: "text", text: JSON.stringify(result) }], structuredContent: result as unknown as Record<string, unknown> };
+        return canonicalResult("heartbeat", result);
       }
       case "presence": {
         if (!service || !principal) throw new McpError(ErrorCode.InvalidParams, "AGENT_BRIDGE_AGENT is required");
+        validateRequest("presence", args ?? {});
         const result = { agents: await service.presence(principal) };
-        return { content: [{ type: "text", text: JSON.stringify(result) }], structuredContent: result };
+        return canonicalResult("presence", result);
       }
 
       default:
@@ -769,7 +696,7 @@ export function createAgentBridgeServer(
       }
     } catch (error) {
       if (error instanceof McpError) throw error;
-      if (error instanceof BridgeValidationError || error instanceof BridgePrincipalMismatchError) {
+      if (error instanceof ContractValidationError || error instanceof BridgeValidationError || error instanceof BridgePrincipalMismatchError) {
         throw new McpError(ErrorCode.InvalidParams, error.message);
       }
       throw error;

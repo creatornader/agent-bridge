@@ -218,7 +218,7 @@ describe("createAgentBridgeServer", () => {
     await Promise.all([server.connect(serverTransport), client.connect(clientTransport)]);
     try {
       const names = (await client.listTools()).tools.map((tool) => tool.name);
-      expect(names).toEqual(["post_context", "get_context", "ack_context", "send", "history"]);
+      expect(names).toEqual(["post_context", "get_context", "ack_context", "capabilities", "send", "history"]);
       expect(names).not.toContain("claim");
       expect(names).not.toContain("negative_acknowledge");
     } finally {
@@ -266,6 +266,10 @@ describe("createAgentBridgeServer", () => {
     const root = mkdtempSync(join(tmpdir(), "agent-bridge-mcp-replay-"));
     let online = false;
     const published: any[] = [];
+    const protocolHeaders = {
+      "x-agent-bridge-protocol-version": "2.1",
+      "x-agent-bridge-supported-protocol-versions": "2.0,2.1",
+    };
     vi.spyOn(globalThis, "fetch").mockImplementation(async (input, init) => {
       if (!online) throw new Error("offline");
       const url = String(input);
@@ -274,17 +278,17 @@ describe("createAgentBridgeServer", () => {
         schemaVersion: "postgres-v2", deliverySupported: true,
         pending: 0, claimed: 0, retrying: 0, dead: 0,
         principal: { workspace: "workspace-a", agent: "codex" },
-      });
+      }, { headers: protocolHeaders });
       if (url.includes("/v2/messages")) {
         const body = JSON.parse(String(init?.body));
         const message = {
-          ...body, workspace: "workspace-a", source: "codex", sequence: "1",
+          ...body, id: body.id, workspace: "workspace-a", source: "codex", sequence: "1",
           createdAt: new Date(0).toISOString(),
         };
         published.push(message);
-        return Response.json({ message, created: true });
+        return Response.json({ message, created: true }, { headers: protocolHeaders });
       }
-      if (url.includes("/v2/history")) return Response.json({ messages: [] });
+      if (url.includes("/v2/history")) return Response.json({ messages: [] }, { headers: protocolHeaders });
       throw new Error(`unexpected request: ${url}`);
     });
     const server = createAgentBridgeServer({
@@ -437,7 +441,7 @@ describe("createAgentBridgeServer", () => {
         name: "extend",
         arguments: { deliveryId: delivery.id, leaseToken, leaseMs: 60_000 },
       });
-      expect((extended.structuredContent as any).state).toBe("claimed");
+      expect((extended.structuredContent as any).delivery.state).toBe("claimed");
       await expect(client.callTool({
         name: "negative_acknowledge",
         arguments: {
@@ -456,7 +460,7 @@ describe("createAgentBridgeServer", () => {
           dead: true,
         },
       });
-      expect((nacked.structuredContent as any).state).toBe("dead");
+      expect((nacked.structuredContent as any).delivery.state).toBe("dead");
 
       await client.callTool({
         name: "send",
@@ -474,7 +478,7 @@ describe("createAgentBridgeServer", () => {
           leaseToken: second.leaseToken,
         },
       });
-      expect((acknowledged.structuredContent as any).state).toBe("acked");
+      expect((acknowledged.structuredContent as any).delivery.state).toBe("acked");
 
       await expect(client.callTool({
         name: "claim",
@@ -515,7 +519,7 @@ describe("createAgentBridgeServer", () => {
           },
         },
       });
-      expect((compatibilityNack.structuredContent as any).state).toBe("dead");
+      expect((compatibilityNack.structuredContent as any).delivery.state).toBe("dead");
       const presence = await client.callTool({ name: "presence", arguments: {} });
       expect((presence.structuredContent as any).agents).toHaveLength(1);
       const legacyId = "00000000-0000-8000-8000-000000000003";

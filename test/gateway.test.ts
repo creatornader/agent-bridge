@@ -41,16 +41,245 @@ async function gateway(
   return `http://127.0.0.1:${port}`;
 }
 
-function auth(token = "good") { return { authorization: `Bearer ${token}`, "content-type": "application/json" }; }
+function auth(token = "good") { return { authorization: `Bearer ${token}`, "content-type": "application/json", "x-agent-bridge-protocol-version": "2.1" }; }
 
 describe("authenticated v2 gateway", () => {
-  it("binds source and workspace to the credential and isolates history", async () => {
+  it("preserves HTTP error metadata and classifies protocol failures", async () => {
+    const principal = { workspace: "workspace-a", agent: "agent-a" };
+    const protocolHeaders = {
+      "content-type": "application/json",
+      "x-agent-bridge-protocol-version": "2.1",
+      "x-agent-bridge-supported-protocol-versions": "2.0,2.1",
+    };
+    const rejected = new HttpBridgeStore({
+      baseUrl: "https://bridge.example.test",
+      token: "token",
+      principal,
+      fetch: async () => Response.json({
+        error: { code: "invalid_input", requestId: "request-one", details: { field: "type" } },
+      }, { status: 400, headers: protocolHeaders }),
+    });
+    await expect(rejected.capabilities()).rejects.toMatchObject({
+      status: 400,
+      code: "invalid_input",
+      requestId: "request-one",
+      details: { field: "type" },
+    });
+
+    const incompatible = new HttpBridgeStore({
+      baseUrl: "https://bridge.example.test",
+      token: "token",
+      principal,
+      fetch: async () => Response.json({}, { headers: {
+        ...protocolHeaders,
+        "x-agent-bridge-protocol-version": "2.7",
+      } }),
+    });
+    await expect(incompatible.capabilities()).rejects.toMatchObject({
+      status: 502,
+      code: "protocol_mismatch",
+    });
+
+    const invalidSuccess = new HttpBridgeStore({
+      baseUrl: "https://bridge.example.test",
+      token: "token",
+      principal,
+      fetch: async () => Response.json({}, { headers: protocolHeaders }),
+    });
+    await expect(invalidSuccess.capabilities()).rejects.toMatchObject({
+      status: 502,
+      code: "protocol_mismatch",
+      details: { operation: "capabilities" },
+    });
+
+    for (const headers of [
+      { "content-type": "application/json", "x-agent-bridge-protocol-version": "2.1" },
+      { "content-type": "application/json", "x-agent-bridge-supported-protocol-versions": "2.0,2.1" },
+      { ...protocolHeaders, "x-agent-bridge-protocol-version": "2.0" },
+    ]) {
+      const partial = new HttpBridgeStore({
+        baseUrl: "https://bridge.example.test",
+        token: "token",
+        principal,
+        fetch: async () => Response.json({}, { headers }),
+      });
+      await expect(partial.capabilities()).rejects.toMatchObject({ status: 502, code: "protocol_mismatch" });
+    }
+  });
+
+  it("rejects headerless and explicit 2.0 gateways before mutation", async () => {
+    const principal = { workspace: "workspace-a", agent: "sender" };
+    const baseMessage = {
+      id: "00000000-0000-7000-8000-000000000001", workspace: principal.workspace,
+      source: principal.agent, type: "note", content: "safe", contentType: "text/plain",
+      targets: [], priority: "info" as const, deliveryPolicy: { mode: "mailbox" as const },
+    };
+
+    for (const { headers, selected } of [
+      { headers: undefined, selected: null },
+      {
+        headers: {
+          "content-type": "application/json",
+          "x-agent-bridge-protocol-version": "2.0",
+          "x-agent-bridge-supported-protocol-versions": "2.0,2.1",
+        },
+        selected: "2.0",
+      },
+    ]) {
+      const calls: string[] = [];
+      const store = new HttpBridgeStore({
+        baseUrl: "https://bridge.example.test", token: "token", principal,
+        fetch: async (input, init) => {
+          const path = new URL(String(input)).pathname;
+          calls.push(`${init?.method ?? "GET"} ${path}`);
+          if (!path.endsWith("/status")) throw new Error(`unexpected mutation ${path}`);
+          return Response.json({
+            schemaVersion: "postgres-v2", deliverySupported: true,
+            pending: 0, claimed: 0, retrying: 0, dead: 0, principal,
+          }, { headers });
+        },
+      });
+
+      await expect(store.insertMessage(baseMessage)).rejects.toMatchObject({
+        status: 502,
+        code: "protocol_mismatch",
+        details: { expected: "2.1", selected },
+      });
+      expect(calls).toEqual(["GET /v2/status"]);
+    }
+  });
+
+  it("probes a complete 2.1 gateway once before mutations", async () => {
+    const principal = { workspace: "workspace-a", agent: "sender" };
+    const calls: string[] = [];
+    const drafts: Array<Record<string, unknown>> = [];
+    const responseHeaders = {
+      "content-type": "application/json",
+      "x-agent-bridge-protocol-version": "2.1",
+      "x-agent-bridge-supported-protocol-versions": "2.0,2.1",
+    };
+    const store = new HttpBridgeStore({
+      baseUrl: "https://bridge.example.test", token: "token", principal,
+      fetch: async (input, init) => {
+        const path = new URL(String(input)).pathname;
+        calls.push(`${init?.method ?? "GET"} ${path}`);
+        if (path.endsWith("/status")) return Response.json({
+          schemaVersion: "postgres-v2", deliverySupported: true,
+          pending: 0, claimed: 0, retrying: 0, dead: 0, principal,
+        }, { headers: responseHeaders });
+        if (path.endsWith("/messages")) {
+          const draft = JSON.parse(String(init?.body)) as Record<string, unknown>;
+          drafts.push(draft);
+          return Response.json({ created: true, message: {
+            ...draft, workspace: principal.workspace, source: principal.agent,
+            contentType: "text/plain", targets: [], priority: "info", sequence: "1",
+            createdAt: "2026-07-08T00:00:00.000Z",
+          } }, { headers: responseHeaders });
+        }
+        throw new Error(`unexpected ${path}`);
+      },
+    });
+    const baseMessage = {
+      id: "00000000-0000-7000-8000-000000000001", workspace: principal.workspace,
+      source: principal.agent, type: "note", content: "safe", contentType: "text/plain",
+      targets: [], priority: "info" as const, deliveryPolicy: { mode: "mailbox" as const },
+    };
+
+    await store.insertMessage(baseMessage);
+    await store.insertMessage({
+      ...baseMessage,
+      id: "00000000-0000-7000-8000-000000000002",
+      project: "current-contract",
+    });
+
+    expect(calls).toEqual(["GET /v2/status", "POST /v2/messages", "POST /v2/messages"]);
+    expect(drafts).toMatchObject([
+      { deliveryPolicy: { mode: "mailbox" } },
+      { deliveryPolicy: { mode: "mailbox" }, project: "current-contract" },
+    ]);
+  });
+
+  it("discovers capabilities and negotiates protocol versions", async () => {
+    const base = await gateway();
+    const capabilities = await fetch(`${base}/v2/capabilities`, { headers: auth() });
+    expect(capabilities.status).toBe(200);
+    expect(capabilities.headers.get("x-agent-bridge-protocol-version")).toBe("2.1");
+    expect(capabilities.headers.get("x-agent-bridge-supported-protocol-versions")).toBe("2.0,2.1");
+    expect(await capabilities.json()).toMatchObject({ protocolVersion: "2.1", supportedProtocolVersions: ["2.0", "2.1"], scopeEnforcement: false });
+
+    const legacy = await fetch(`${base}/v2/capabilities`, { headers: { authorization: "Bearer good" } });
+    expect(legacy.status).toBe(404);
+    expect(legacy.headers.get("x-agent-bridge-protocol-version")).toBe("2.0");
+    expect(await legacy.json()).toMatchObject({ error: { code: "not_found" } });
+
+    const incompatible = await fetch(`${base}/v2/history`, { headers: { ...auth(), "x-agent-bridge-protocol-version": "3.0" } });
+    expect(incompatible.status).toBe(426);
+    expect(await incompatible.json()).toMatchObject({ error: { code: "unsupported_protocol_version", supportedProtocolVersions: ["2.0", "2.1"] } });
+  });
+
+  it("returns 404 for 2.1-only routes selected as 2.0", async () => {
+    const base = await gateway();
+    const routes = [
+      { method: "GET", path: "/v2/capabilities" },
+      { method: "GET", path: "/v2/deliveries" },
+      { method: "GET", path: "/v2/deliveries/delivery-one/events" },
+      { method: "POST", path: "/v2/deliveries/delivery-one/cancel" },
+      { method: "POST", path: "/v2/deliveries/delivery-one/requeue" },
+    ];
+    const legacyHeaders = [
+      { authorization: "Bearer good", "content-type": "application/json" },
+      {
+        authorization: "Bearer good",
+        "content-type": "application/json",
+        "x-agent-bridge-protocol-version": "2.0",
+      },
+    ];
+
+    for (const headers of legacyHeaders) {
+      for (const route of routes) {
+        const response = await fetch(`${base}${route.path}`, {
+          method: route.method,
+          headers,
+          body: route.method === "POST" ? "{}" : undefined,
+        });
+        expect(response.status).toBe(404);
+        expect(response.headers.get("x-agent-bridge-protocol-version")).toBe("2.0");
+        expect(await response.json()).toMatchObject({ error: { code: "not_found" } });
+      }
+    }
+  });
+
+  it("rejects unknown request properties with a stable schema error", async () => {
+    const base = await gateway();
+    const response = await fetch(`${base}/v2/messages`, { method: "POST", headers: auth(), body: JSON.stringify({ type: "note", content: "hello", surprise: true }) });
+    expect(response.status).toBe(400);
+    expect(await response.json()).toMatchObject({ error: { code: "invalid_input", operation: "publish_message" } });
+  });
+
+  it("rejects non-boolean query values", async () => {
+    const base = await gateway();
+    for (const query of ["includeExpired=banana", "latest=banana"]) {
+      const response = await fetch(`${base}/v2/history?${query}`, { headers: auth() });
+      expect(response.status).toBe(400);
+      expect(await response.json()).toMatchObject({ error: { code: "invalid_input" } });
+    }
+  });
+  it("checks the source assertion and rejects client-selected workspace", async () => {
     const base = await gateway();
     const created = await fetch(`${base}/v2/messages`, {
-      method: "POST", headers: auth(), body: JSON.stringify({ type: "note", content: "hello", workspace: "evil", source: "evil" }),
+      method: "POST", headers: auth(), body: JSON.stringify({ type: "note", content: "hello", source: "agent-a" }),
     });
     expect(created.status).toBe(201);
     expect((await created.json()).message).toMatchObject({ workspace: "workspace-a", source: "agent-a" });
+
+    const sourceMismatch = await fetch(`${base}/v2/messages`, {
+      method: "POST", headers: auth(), body: JSON.stringify({ type: "note", content: "wrong source", source: "evil" }),
+    });
+    expect(sourceMismatch.status).toBe(403);
+    const workspace = await fetch(`${base}/v2/messages`, {
+      method: "POST", headers: auth(), body: JSON.stringify({ type: "note", content: "wrong workspace", workspace: "evil" }),
+    });
+    expect(workspace.status).toBe(400);
 
     const history = await fetch(`${base}/v2/history`, { headers: auth() });
     expect((await history.json()).messages).toHaveLength(1);
@@ -130,7 +359,7 @@ describe("authenticated v2 gateway", () => {
       const response = await fetch(`${base}/v2/messages`, {
         method: "POST",
         headers: auth(),
-        body: JSON.stringify({ ...body, workspace: "spoofed", source: "spoofed" }),
+        body: JSON.stringify({ ...body, source: "agent-a" }),
       });
       expect(response.status).toBe(201);
       expect((await response.json()).message).toMatchObject({
@@ -286,13 +515,18 @@ describe("authenticated v2 gateway", () => {
       method: "POST", headers: auth("other-token"), body: "{}",
     });
     expect(hidden.status).toBe(404);
+    const contradictory = await fetch(`${base}/v2/deliveries/${claim.delivery.id}/cancel`, {
+      method: "POST", headers: auth("publisher-token"), body: JSON.stringify({ deliveryId: "other-delivery" }),
+    });
+    expect(contradictory.status).toBe(400);
+    expect(await contradictory.json()).toMatchObject({ error: { code: "invalid_input", operation: "cancel_delivery" } });
     const cancelled = await fetch(`${base}/v2/deliveries/${claim.delivery.id}/cancel`, {
-      method: "POST", headers: auth("publisher-token"), body: "{}",
+      method: "POST", headers: auth("publisher-token"),
     });
     expect(cancelled.status).toBe(200);
-    expect((await cancelled.json()).state).toBe("cancelled");
+    expect((await cancelled.json()).delivery.state).toBe("cancelled");
     const requeued = await fetch(`${base}/v2/deliveries/${claim.delivery.id}/requeue`, {
-      method: "POST", headers: auth("publisher-token"), body: "{}",
+      method: "POST", headers: auth("publisher-token"),
     });
     expect(requeued.status).toBe(200);
     const conflict = await fetch(`${base}/v2/deliveries/${claim.delivery.id}/requeue`, {
@@ -300,6 +534,48 @@ describe("authenticated v2 gateway", () => {
     });
     expect(conflict.status).toBe(409);
     expect(await conflict.json()).toMatchObject({ error: { code: "delivery_state_conflict" } });
+  });
+
+  it("serves released delivery operations to a headerless 2.0 client", async () => {
+    const base = await gateway({
+      resolve: async (token) => token === "sender-token"
+        ? { id: "sender", principal: { workspace: "workspace-a", agent: "sender" } }
+        : token === "worker-token"
+          ? { id: "worker", principal: { workspace: "workspace-a", agent: "worker" } }
+          : null,
+    });
+    await fetch(`${base}/v2/messages`, {
+      method: "POST",
+      headers: auth("sender-token"),
+      body: JSON.stringify({ type: "work", content: "legacy worker", targets: ["worker"] }),
+    });
+    const legacyHeaders = {
+      authorization: "Bearer worker-token",
+      "content-type": "application/json",
+      "x-agent-bridge-instance": "legacy-instance",
+    };
+    const claimed = await fetch(`${base}/v2/deliveries/claim`, {
+      method: "POST", headers: legacyHeaders, body: "{}",
+    });
+    expect(claimed.headers.get("x-agent-bridge-protocol-version")).toBe("2.0");
+    const claim = await claimed.json();
+    expect(claim).toMatchObject({ delivery: { state: "claimed" }, leaseToken: expect.any(String) });
+
+    const contradictory = await fetch(`${base}/v2/deliveries/${claim.delivery.id}/nack`, {
+      method: "POST",
+      headers: legacyHeaders,
+      body: JSON.stringify({ deliveryId: "other", leaseToken: claim.leaseToken }),
+    });
+    expect(contradictory.status).toBe(400);
+    expect(await contradictory.json()).toMatchObject({ error: { code: "invalid_input", operation: "negative_acknowledge_delivery" } });
+
+    const nacked = await fetch(`${base}/v2/deliveries/${claim.delivery.id}/nack`, {
+      method: "POST",
+      headers: legacyHeaders,
+      body: JSON.stringify({ leaseToken: claim.leaseToken, disposition: "dead" }),
+    });
+    expect(nacked.status).toBe(200);
+    expect(await nacked.json()).toMatchObject({ state: "dead", lastError: "negative acknowledgment" });
   });
 
   it("requires authentication for metrics", async () => {
@@ -484,11 +760,23 @@ describe("authenticated v2 gateway", () => {
     expect(present).toMatchObject({ agent: "worker", instance: "two", capabilities: ["claim"] });
     expect((await worker.presence(workerPrincipal)).map((entry) => entry.agent)).toContain("worker");
 
+    const messageId = "11111111-1111-7111-8111-111111111111";
     const created = await sender.publish(senderPrincipal, {
+      id: messageId,
       type: "agent-bridge.work",
       content: "run through HTTP",
       targets: ["worker"],
+      idempotencyKey: "http-explicit-id",
     });
+    expect(created.message.id).toBe(messageId);
+    const replay = await sender.publish(senderPrincipal, {
+      id: messageId,
+      type: "agent-bridge.work",
+      content: "run through HTTP",
+      targets: ["worker"],
+      idempotencyKey: "http-explicit-id",
+    });
+    expect(replay).toMatchObject({ created: false, message: { id: messageId } });
     expect((await worker.history(workerPrincipal)).messages[0]?.id).toBe(created.message.id);
     expect(await worker.acknowledge(workerPrincipal, [created.message.id])).toBe(1);
     const claim = await worker.claim(workerPrincipal, { leaseMs: 1_000 });

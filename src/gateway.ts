@@ -1,9 +1,23 @@
 import { randomUUID } from "node:crypto";
 import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
-import { BridgeValidationError, type MessageDraft } from "./bridge-domain.js";
+import { BridgePrincipalMismatchError, BridgeValidationError, type MessageDraft } from "./bridge-domain.js";
 import { BridgeService } from "./bridge-service.js";
 import type { BridgeStore } from "./bridge-store.js";
 import { bearerToken, type CredentialResolver } from "./gateway-auth.js";
+import {
+  capabilityDocument,
+  ContractResponseError,
+  ContractValidationError,
+  LEGACY_PROTOCOL_VERSION,
+  negotiateProtocolVersion,
+  parseResponse,
+  PROTOCOL_HEADER,
+  PROTOCOL_VERSION,
+  SUPPORTED_PROTOCOL_HEADER,
+  SUPPORTED_PROTOCOL_VERSIONS,
+  validateRequest,
+  validateRequestForProtocol,
+} from "./contracts/registry.js";
 
 export interface GatewayOptions {
   store: BridgeStore;
@@ -19,12 +33,39 @@ const jsonHeaders = { "content-type": "application/json; charset=utf-8", "cache-
 
 function send(res: ServerResponse, status: number, value: unknown, requestId: string): void {
   if (res.writableEnded) return;
-  res.writeHead(status, { ...jsonHeaders, "x-request-id": requestId });
+  res.writeHead(status, {
+    ...jsonHeaders,
+    "x-request-id": requestId,
+  });
   res.end(JSON.stringify(value));
 }
 
-function failure(res: ServerResponse, status: number, code: string, requestId: string): void {
-  send(res, status, { error: { code, requestId } }, requestId);
+function sendOperation(res: ServerResponse, status: number, operation: string, value: unknown, requestId: string): void {
+  const canonical = parseResponse(operation, value) as Record<string, unknown>;
+  const protocolVersion = String(res.getHeader(PROTOCOL_HEADER) ?? PROTOCOL_VERSION);
+  if (protocolVersion !== LEGACY_PROTOCOL_VERSION) {
+    send(res, status, canonical, requestId);
+    return;
+  }
+  if (operation === "claim_delivery") {
+    send(res, status, canonical.delivery === null ? null : canonical, requestId);
+    return;
+  }
+  if (["cancel_delivery", "requeue_delivery", "extend_delivery", "acknowledge_delivery", "negative_acknowledge_delivery"].includes(operation)) {
+    send(res, status, canonical.delivery, requestId);
+    return;
+  }
+  send(res, status, canonical, requestId);
+}
+
+function failure(
+  res: ServerResponse,
+  status: number,
+  code: string,
+  requestId: string,
+  details: Record<string, unknown> = {},
+): void {
+  send(res, status, { error: { code, requestId, ...details } }, requestId);
 }
 
 async function body(
@@ -91,8 +132,53 @@ function numberParam(value: string | null, name: string): number | undefined {
   return result;
 }
 
+function booleanParam(value: string | null, name: string): boolean | undefined {
+  if (value === null) return undefined;
+  if (value === "true") return true;
+  if (value === "false") return false;
+  throw new BridgeValidationError(`${name} must be true or false`);
+}
+
+function hasRequestBody(req: IncomingMessage): boolean {
+  const length = req.headers["content-length"];
+  return req.headers["transfer-encoding"] !== undefined || (length !== undefined && length !== "0");
+}
+
+function pathBoundInput(
+  operation: string,
+  deliveryId: string,
+  rawInput: Record<string, unknown>,
+  protocolVersion?: string,
+): Record<string, unknown> {
+  if (Object.prototype.hasOwnProperty.call(rawInput, "deliveryId")) {
+    throw new ContractValidationError(operation, [{ path: "/deliveryId", message: "deliveryId is supplied by the request path" }]);
+  }
+  const value = { ...rawInput, deliveryId };
+  return protocolVersion
+    ? validateRequestForProtocol(operation, value, protocolVersion)
+    : validateRequest(operation, value);
+}
+
 function active(signal: AbortSignal): void {
   if (signal.aborted) throw signal.reason;
+}
+
+function closedQuery(url: URL, operation: string, allowed: readonly string[]): void {
+  const unknown = [...url.searchParams.keys()].find((key) => !allowed.includes(key));
+  if (unknown) throw new ContractValidationError(operation, [{ path: `/${unknown}`, message: "Unexpected query parameter" }]);
+}
+
+function selectedProtocol(res: ServerResponse): string {
+  return String(res.getHeader(PROTOCOL_HEADER) ?? PROTOCOL_VERSION);
+}
+
+function requireCurrentProtocol(res: ServerResponse): void {
+  if (selectedProtocol(res) === LEGACY_PROTOCOL_VERSION) {
+    const error = new Error("Operation is not available in protocol 2.0") as Error & { status: number; code: string };
+    error.status = 404;
+    error.code = "not_found";
+    throw error;
+  }
 }
 
 export function createGateway(options: GatewayOptions) {
@@ -107,6 +193,15 @@ export function createGateway(options: GatewayOptions) {
     const abort = new AbortController();
     let mutationStarted = false;
     metrics.requests += 1;
+    const requestedProtocol = req.headers[PROTOCOL_HEADER];
+    const rawRequestedProtocol = Array.isArray(requestedProtocol) ? requestedProtocol[0] : requestedProtocol;
+    const initialProtocol = rawRequestedProtocol === undefined || rawRequestedProtocol.trim() === ""
+      ? LEGACY_PROTOCOL_VERSION
+      : (SUPPORTED_PROTOCOL_VERSIONS as readonly string[]).includes(rawRequestedProtocol.trim())
+        ? rawRequestedProtocol.trim()
+        : PROTOCOL_VERSION;
+    res.setHeader(PROTOCOL_HEADER, initialProtocol);
+    res.setHeader(SUPPORTED_PROTOCOL_HEADER, SUPPORTED_PROTOCOL_VERSIONS.join(","));
     const timer = setTimeout(() => {
       abort.abort(new Error("request deadline exceeded"));
       metrics.timeouts += 1; metrics.errors += 1;
@@ -144,9 +239,19 @@ export function createGateway(options: GatewayOptions) {
         metrics.authFailures += 1;
         failure(res, 401, "unauthorized", requestId); return;
       }
+      if (url.pathname.startsWith("/v2/") || url.pathname === "/metrics") {
+        res.setHeader(PROTOCOL_HEADER, negotiateProtocolVersion(req.headers[PROTOCOL_HEADER]));
+      }
       if (req.method === "GET" && url.pathname === "/metrics") {
-        res.writeHead(200, { ...jsonHeaders, "content-type": "text/plain; version=0.0.4", "x-request-id": requestId });
-        res.end(Object.entries(metrics).map(([key, value]) => `agent_bridge_gateway_${key}_total ${value}`).join("\n") + "\n");
+        validateRequest("gateway_metrics", {});
+        const result = Object.entries(metrics).map(([key, value]) => `agent_bridge_gateway_${key}_total ${value}`).join("\n") + "\n";
+        parseResponse("gateway_metrics", result);
+        res.writeHead(200, {
+          ...jsonHeaders,
+          "content-type": "text/plain; version=0.0.4",
+          "x-request-id": requestId,
+        });
+        res.end(result);
         return;
       }
       const instanceHeader = req.headers["x-agent-bridge-instance"];
@@ -155,98 +260,128 @@ export function createGateway(options: GatewayOptions) {
         instance: Array.isArray(instanceHeader) ? instanceHeader[0] : instanceHeader,
       };
 
+      if (req.method === "GET" && url.pathname === "/v2/capabilities") {
+        requireCurrentProtocol(res);
+        closedQuery(url, "capabilities", []);
+        validateRequest("capabilities", {});
+        sendOperation(res, 200, "capabilities", capabilityDocument({ surface: "http", provider: "gateway", selectedProtocolVersion: String(res.getHeader(PROTOCOL_HEADER)) }), requestId); return;
+      }
+
       if (req.method === "GET" && url.pathname === "/v2/status") {
+        closedQuery(url, "status", []);
+        validateRequest("status", {});
         if (!options.store.diagnostics) {
-          send(res, 200, { schemaVersion: "postgres-v2", deliverySupported: false, pending: null, claimed: null, retrying: null, dead: null, principal: credential.principal }, requestId);
+          sendOperation(res, 200, "status", { schemaVersion: "postgres-v2", deliverySupported: false, pending: null, claimed: null, retrying: null, dead: null, principal: credential.principal }, requestId);
         } else {
-          send(res, 200, { ...await options.store.diagnostics(principal), principal: credential.principal }, requestId);
+          sendOperation(res, 200, "status", { ...await options.store.diagnostics(principal), principal: credential.principal }, requestId);
         }
         return;
       }
 
-      if (req.method === "POST" && req.headers["content-type"]?.split(";", 1)[0] !== "application/json") {
+      if (req.method === "POST" && hasRequestBody(req) && req.headers["content-type"]?.split(";", 1)[0] !== "application/json") {
         failure(res, 415, "unsupported_media_type", requestId); return;
       }
 
       if (req.method === "POST" && url.pathname === "/v2/messages") {
-        const input = await body(req, limit, abort.signal) as unknown as MessageDraft;
+        const input = validateRequestForProtocol("publish_message", await body(req, limit, abort.signal), String(res.getHeader(PROTOCOL_HEADER)));
+        if (input.source !== undefined && input.source !== principal.agent) {
+          throw new BridgePrincipalMismatchError("source must match the authenticated principal");
+        }
+        const { source: _source, ...draft } = input;
         active(abort.signal);
         mutationStarted = true;
-        send(res, 201, await service.publish(principal, input), requestId); return;
+        sendOperation(res, 201, "publish_message", await service.publish(principal, draft as unknown as MessageDraft), requestId); return;
       }
       if (req.method === "GET" && url.pathname === "/v2/history") {
+        closedQuery(url, "history", ["cursor", "mailbox", "receiptState", "limit", "type", "includeExpired", "source", "project", "since", "unacknowledgedBy", "unacked_by", "threadId", "latest"]);
         const types = url.searchParams.getAll("type");
-        send(res, 200, await service.history(principal, {
+        const input = validateRequestForProtocol("history", {
           cursor: url.searchParams.get("cursor") ?? undefined,
           mailbox: url.searchParams.get("mailbox") ?? undefined as any,
           receiptState: url.searchParams.get("receiptState") ?? undefined as any,
           limit: numberParam(url.searchParams.get("limit"), "limit"),
           types: types.length ? types : undefined,
-          includeExpired: url.searchParams.get("includeExpired") === "true",
+          includeExpired: booleanParam(url.searchParams.get("includeExpired"), "includeExpired"),
           source: url.searchParams.get("source") ?? undefined,
           project: url.searchParams.get("project") ?? undefined,
           since: url.searchParams.get("since") ?? undefined,
           unacknowledgedBy: url.searchParams.get("unacknowledgedBy") ?? url.searchParams.get("unacked_by") ?? undefined,
           threadId: url.searchParams.get("threadId") ?? undefined,
-          latest: url.searchParams.get("latest") === "true",
-        }), requestId); return;
+          latest: booleanParam(url.searchParams.get("latest"), "latest"),
+        }, String(res.getHeader(PROTOCOL_HEADER)));
+        sendOperation(res, 200, "history", await service.history(principal, input), requestId); return;
       }
       if (req.method === "POST" && url.pathname === "/v2/receipts") {
-        const input = await body(req, limit, abort.signal);
+        const input = validateRequest("record_receipt", await body(req, limit, abort.signal));
         active(abort.signal);
         mutationStarted = true;
-        send(res, 200, { recorded: await service.acknowledge(principal, input.messageIds) }, requestId); return;
+        sendOperation(res, 200, "record_receipt", { recorded: await service.acknowledge(principal, input.messageIds as string[]) }, requestId); return;
       }
       if (req.method === "POST" && url.pathname === "/v2/deliveries/claim") {
-        const input = await body(req, limit, abort.signal);
+        const input = validateRequest("claim_delivery", await body(req, limit, abort.signal));
         active(abort.signal);
         mutationStarted = true;
-        send(res, 200, await service.claim(principal, input), requestId); return;
+        sendOperation(res, 200, "claim_delivery", await service.claim(principal, input) ?? { delivery: null }, requestId); return;
       }
       if (req.method === "GET" && url.pathname === "/v2/deliveries") {
-        send(res,200,await service.deliveries(principal,{cursor:url.searchParams.get("cursor")??undefined,limit:numberParam(url.searchParams.get("limit"),"limit"),role:url.searchParams.get("role")??undefined as any,messageId:url.searchParams.get("messageId")??undefined,recipient:url.searchParams.get("recipient")??undefined,states:url.searchParams.getAll("state") as any}),requestId);return;
+        requireCurrentProtocol(res);
+        closedQuery(url, "list_deliveries", ["cursor", "limit", "role", "messageId", "recipient", "state"]);
+        const input = validateRequest("list_deliveries", {cursor:url.searchParams.get("cursor")??undefined,limit:numberParam(url.searchParams.get("limit"),"limit"),role:url.searchParams.get("role")??undefined,messageId:url.searchParams.get("messageId")??undefined,recipient:url.searchParams.get("recipient")??undefined,states:url.searchParams.getAll("state")});
+        sendOperation(res,200,"list_deliveries",await service.deliveries(principal,input as any),requestId);return;
       }
       const eventsMatch=url.pathname.match(/^\/v2\/deliveries\/([^/]+)\/events$/);
-      if(req.method==="GET"&&eventsMatch){send(res,200,await service.deliveryEvents(principal,eventsMatch[1]!,{cursor:url.searchParams.get("cursor")??undefined,limit:numberParam(url.searchParams.get("limit"),"limit")}),requestId);return;}
+      if(req.method==="GET"&&eventsMatch){requireCurrentProtocol(res);closedQuery(url,"list_delivery_events",["cursor","limit"]);const input=validateRequest("list_delivery_events",{deliveryId:eventsMatch[1],cursor:url.searchParams.get("cursor")??undefined,limit:numberParam(url.searchParams.get("limit"),"limit")});sendOperation(res,200,"list_delivery_events",await service.deliveryEvents(principal,eventsMatch[1]!,input as any),requestId);return;}
       const controlMatch=url.pathname.match(/^\/v2\/deliveries\/([^/]+)\/(cancel|requeue)$/);
-      if(req.method==="POST"&&controlMatch){mutationStarted=true;const result=controlMatch[2]==="cancel"?await service.cancel(principal,controlMatch[1]!):await service.requeue(principal,controlMatch[1]!);if(!result)failure(res,404,"not_found",requestId);else send(res,200,result,requestId);return;}
+      if(req.method==="POST"&&controlMatch){requireCurrentProtocol(res);const operation=controlMatch[2]==="cancel"?"cancel_delivery":"requeue_delivery";pathBoundInput(operation,controlMatch[1]!,await body(req,limit,abort.signal));mutationStarted=true;const result=controlMatch[2]==="cancel"?await service.cancel(principal,controlMatch[1]!):await service.requeue(principal,controlMatch[1]!);if(!result)failure(res,404,"not_found",requestId);else sendOperation(res,200,operation,{delivery:result},requestId);return;}
       if (req.method === "POST" && url.pathname === "/v2/presence/heartbeat") {
-        const input = await body(req, limit, abort.signal);
+        const input = validateRequest("heartbeat", await body(req, limit, abort.signal));
         active(abort.signal);
         mutationStarted = true;
-        send(res, 200, await service.heartbeat(principal, input), requestId); return;
+        sendOperation(res, 200, "heartbeat", await service.heartbeat(principal, input), requestId); return;
       }
       if (req.method === "GET" && url.pathname === "/v2/presence") {
-        send(res, 200, { agents: await service.presence(principal) }, requestId); return;
+        closedQuery(url, "presence", []);
+        validateRequest("presence", {});
+        sendOperation(res, 200, "presence", { agents: await service.presence(principal) }, requestId); return;
       }
       const match = url.pathname.match(/^\/v2\/deliveries\/([^/]+)\/(extend|ack|nack)$/);
       if (req.method === "POST" && match) {
-        const input = await body(req, limit, abort.signal);
+        const rawInput = await body(req, limit, abort.signal);
+        const operationId = match[2] === "extend" ? "extend_delivery" : match[2] === "ack" ? "acknowledge_delivery" : "negative_acknowledge_delivery";
+        const protocolVersion = String(res.getHeader(PROTOCOL_HEADER) ?? PROTOCOL_VERSION);
+        const input = pathBoundInput(operationId, match[1]!, rawInput, protocolVersion);
         active(abort.signal);
         mutationStarted = true;
         const [, id, action] = match;
         const result = action === "extend"
-          ? await service.extend(principal, id, input.leaseToken, input.leaseMs)
+          ? await service.extend(principal, id, input.leaseToken as string, input.leaseMs as number)
           : action === "ack"
-            ? await service.ack(principal, id, input.leaseToken)
+            ? await service.ack(principal, id, input.leaseToken as string)
             : await service.nack(
                 principal,
                 id,
-                input.leaseToken,
-                input.error,
-                input.disposition ?? input.dead ?? "retry",
+                input.leaseToken as string,
+                (input.error as string | undefined) ?? "negative acknowledgment",
+                (input.disposition ?? input.dead ?? "retry") as "retry" | "dead" | boolean,
                 input.retryPolicy,
               );
         if (!result) failure(res, 409, "lease_conflict", requestId);
-        else send(res, 200, result, requestId);
+        else sendOperation(res, 200, operationId, { delivery: result }, requestId);
         return;
       }
       failure(res, 404, "not_found", requestId);
     })().catch((error: any) => {
       if (res.writableEnded) return;
       metrics.errors += 1;
-      if (error instanceof BridgeValidationError) failure(res, 400, error.code, requestId);
-      else failure(res, error?.status ?? 500, error?.code ?? "internal_error", requestId);
+      if (error instanceof ContractValidationError || error instanceof ContractResponseError) {
+        failure(res, error.status, error.code, requestId, { operation: error.operation, issues: error.issues });
+      } else if (error?.status === 426) {
+        failure(res, 426, error.code, requestId, { supportedProtocolVersions: [...SUPPORTED_PROTOCOL_VERSIONS] });
+      } else if (error instanceof BridgeValidationError || error instanceof BridgePrincipalMismatchError) {
+        failure(res, "status" in error ? error.status : 400, error.code, requestId, { message: error.message });
+      } else {
+        failure(res, error?.status ?? 500, error?.code ?? "internal_error", requestId);
+      }
     }).finally(() => clearTimeout(timer));
   });
 }

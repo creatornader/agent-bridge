@@ -43,6 +43,13 @@ describe("agent-bridge CLI", () => {
     expect(result.status).toBe(0);
     expect(result.stderr).not.toContain("ExperimentalWarning: SQLite");
   });
+  it("rejects options outside the canonical command contract", () => {
+    const result = run(["capabilities", "--as", "worker", "--content", "surprise"], {
+      AGENT_BRIDGE_AGENT: undefined,
+    });
+    expect(result.status).toBe(1);
+    expect(result.stderr).toContain("--content is not valid for capabilities");
+  });
   it("keeps post as an alias and defaults source from runtime identity", () => {
     const result = run(["post", "--category", "operational", "Bridge is ready"], { AGENT_BRIDGE_AGENT: "codex" });
     expect(result.status).toBe(0); expect(JSON.parse(result.stdout).message).toMatchObject({ source: "codex", type: "operational", content: "Bridge is ready" });
@@ -111,9 +118,11 @@ describe("agent-bridge CLI", () => {
     });
     expect(JSON.parse(all.stdout).messages).toHaveLength(2);
 
-    expect(runAt(home, [
-      "acknowledge", "--agent", "worker", "--ids", targetedId,
-    ], { AGENT_BRIDGE_AGENT: undefined }).status).toBe(0);
+    const acknowledgement = runAt(home, [
+      "ack", "--agent", "worker", "--ids", targetedId,
+    ], { AGENT_BRIDGE_AGENT: undefined });
+    expect(acknowledgement.status).toBe(0);
+    expect(JSON.parse(acknowledgement.stdout)).toEqual({ acknowledged: 1, agent: "worker" });
     const read = runAt(home, [
       "inbox", "--as", "worker", "--receipt-state", "read",
     ], { AGENT_BRIDGE_AGENT: undefined });
@@ -163,6 +172,41 @@ describe("agent-bridge CLI", () => {
     const result = run(["post", "--source", "codex", "--no-such-option", "worker", "secret"]);
     expect(result.status).toBe(1);
     expect(result.stderr).toContain("unknown option: --no-such-option");
+  });
+  it("routes aliases through their canonical option contracts", () => {
+    const rejectedPost = run(["post", "--source", "codex", "--limit", "1", "message"]);
+    expect(rejectedPost.status).toBe(1);
+    expect(rejectedPost.stderr).toContain("--limit is not valid for post");
+
+    const invalidDeadLetters = run(["dead-letters", "--as", "worker", "--content", "surprise"], {
+      AGENT_BRIDGE_AGENT: undefined,
+    });
+    expect(invalidDeadLetters.status).toBe(1);
+    expect(invalidDeadLetters.stderr).toContain("--content is not valid for dead-letters");
+  });
+  it("applies invocation backend flags before opening a runtime", () => {
+    const result = run([
+      "post", "--source", "codex", "--provider", "local", "--db", ":memory:", "local override",
+    ], {
+      AGENT_BRIDGE_PROVIDER: "gateway",
+      AGENT_BRIDGE_URL: "http://127.0.0.1:1",
+      AGENT_BRIDGE_TOKEN: "test-token",
+      AGENT_BRIDGE_WORKSPACE: "acme",
+      AGENT_BRIDGE_AGENT: undefined,
+    });
+    expect(result.status).toBe(0);
+    expect(JSON.parse(result.stdout).message.content).toBe("local override");
+  });
+  it("accepts the deprecated sync limit alias", () => {
+    const result = run(["sync", "--limit", "1"], {
+      AGENT_BRIDGE_PROVIDER: "gateway",
+      AGENT_BRIDGE_URL: "http://127.0.0.1:1",
+      AGENT_BRIDGE_TOKEN: "test-token",
+      AGENT_BRIDGE_AGENT: "worker",
+      AGENT_BRIDGE_WORKSPACE: "acme",
+    });
+    expect(result.status).toBe(0);
+    expect(JSON.parse(result.stdout)).toMatchObject({ online: false, pushed: 0 });
   });
   it("rejects a missing target value instead of routing to a true literal", () => {
     const result = run(["post", "--source", "codex", "--target-agent", "--category", "request", "secret"]);
@@ -420,6 +464,8 @@ describe("agent-bridge CLI", () => {
     const home = mkdtempSync(join(tmpdir(), "agent-bridge-cli-")); homes.push(home);
     const server = createServer((request, response) => {
       response.setHeader("content-type", "application/json");
+      response.setHeader("x-agent-bridge-protocol-version", "2.1");
+      response.setHeader("x-agent-bridge-supported-protocol-versions", "2.0,2.1");
       if (request.url === "/readyz") {
         response.end(JSON.stringify({ status: "ok" }));
         return;
@@ -518,6 +564,8 @@ describe("agent-bridge CLI", () => {
     const home = mkdtempSync(join(tmpdir(), "agent-bridge-cli-")); homes.push(home);
     const server = createServer((request, response) => {
       response.setHeader("content-type", "application/json");
+      response.setHeader("x-agent-bridge-protocol-version", "2.1");
+      response.setHeader("x-agent-bridge-supported-protocol-versions", "2.0,2.1");
       if (request.url === "/readyz") {
         response.end(JSON.stringify({ status: "ok" }));
         return;

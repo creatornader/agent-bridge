@@ -83,7 +83,7 @@ describe("message envelope", () => {
     expect(envelope.kind).toBe("goal-update");
     expect(envelope.priority).toBe("info");
     expect(envelope.payload_mime).toBe("text/plain");
-    expect(typeof envelope.message_id).toBe("string");
+    expect(envelope.message_id).toMatch(/^[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/);
   });
 
   it("normalizes envelope routing and causal fields", () => {
