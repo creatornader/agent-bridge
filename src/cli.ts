@@ -240,7 +240,7 @@ export async function runCli(argv = process.argv.slice(2)): Promise<void> {
   }
   const config = configFor(options, command); const runtime = await createClientRuntime(config);
   try {
-    if (command === "doctor" || command === "status") { const diagnostics = await runtime.store.diagnostics?.(config.principal) ?? { schemaVersion: config.provider === "legacy-supabase" ? "legacy-v1" : "local-v2", deliverySupported: false, pending: null, claimed: null, retrying: null, dead: null }; output({ status: "ok", connected: true, provider: config.provider, workspace: config.principal.workspace, agent: config.principal.agent, instance: config.principal.instance ?? null, schemaVersion: diagnostics.schemaVersion, endpoint: config.url ?? null, database: config.provider === "local" ? config.databasePath : null, cursorPath: config.cursorPath, lastCursor: cursor(config.cursorPath) ?? null, queue: diagnostics }); return; }
+    if (command === "doctor" || command === "status") { const diagnostics = await runtime.store.diagnostics?.(config.principal) ?? { schemaVersion: config.provider === "legacy-supabase" ? "legacy-v1" : "local-v2", deliverySupported: false, pending: null, claimed: null, retrying: null, dead: null }; const remoteReachable = "remoteReachable" in diagnostics ? diagnostics.remoteReachable : null; output({ status: remoteReachable === false ? "degraded" : "ok", localHealthy: true, connected: remoteReachable ?? true, remoteReachable, provider: config.provider, workspace: config.principal.workspace, agent: config.principal.agent, instance: config.principal.instance ?? null, schemaVersion: diagnostics.schemaVersion, endpoint: config.url ?? null, database: config.provider === "local" ? config.databasePath : null, cursorPath: config.cursorPath, lastCursor: cursor(config.cursorPath) ?? null, queue: diagnostics }); return; }
     if (command === "pending") {
       const diagnostics = await runtime.store.diagnostics?.(config.principal);
       const page = await runtime.service.history(config.principal, {
@@ -256,16 +256,26 @@ export async function runCli(argv = process.argv.slice(2)): Promise<void> {
         (retryingDeliveries > 0 && oldest <= Date.now());
       const unread = page.messages.length > 0;
       const available = deliveryAvailable || unread;
+      const diagnosticsAuthoritative = !diagnostics || !("remoteReachable" in diagnostics) ||
+        diagnostics.remoteReachable !== false;
+      const pageAuthority = page as typeof page & {
+        source?: "remote" | "cache";
+        stale?: boolean;
+        acknowledgements?: "authoritative" | "unknown";
+      };
+      const historyAuthoritative = pageAuthority.acknowledgements !== "unknown" &&
+        pageAuthority.source !== "cache" && pageAuthority.stale !== true;
+      const authoritative = diagnosticsAuthoritative && historyAuthoritative;
       output({
         available,
         unread,
         deliveryAvailable,
         pending: pendingDeliveries,
         retrying: retryingDeliveries,
-        authoritative: !diagnostics || !("remoteReachable" in diagnostics) ||
-          diagnostics.remoteReachable !== false,
+        authoritative,
+        state: available ? "available" : authoritative ? "empty" : "unknown",
       });
-      if (!available) process.exitCode = 1;
+      if (!available) process.exitCode = authoritative ? 1 : 2;
       return;
     }
     if (command === "send") { output(await runtime.service.publish(config.principal, draft(options, positionals))); return; }

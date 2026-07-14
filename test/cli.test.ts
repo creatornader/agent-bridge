@@ -2,8 +2,10 @@ import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, wri
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
-import { spawnSync } from "node:child_process";
+import { spawn, spawnSync } from "node:child_process";
+import { createServer } from "node:http";
 import { afterEach, describe, expect, it } from "vitest";
+import { SQLiteEdgeStore } from "../src/sqlite-edge-store.js";
 
 const root = dirname(fileURLToPath(new URL("../package.json", import.meta.url)));
 const cli = join(root, "bin", "agent-bridge");
@@ -14,6 +16,20 @@ function run(args: string[], extra: NodeJS.ProcessEnv = {}) {
 }
 function runAt(home: string, args: string[], extra: NodeJS.ProcessEnv = {}) {
   return spawnSync(process.execPath, [cli, ...args], { encoding: "utf8", env: { ...process.env, HOME: home, AGENT_BRIDGE_PROVIDER: "local", AGENT_BRIDGE_DB: join(home, "bridge.sqlite3"), ...extra } });
+}
+function runAtAsync(home: string, args: string[], extra: NodeJS.ProcessEnv = {}) {
+  return new Promise<{ status: number | null; stdout: string; stderr: string }>((resolve, reject) => {
+    const child = spawn(process.execPath, [cli, ...args], {
+      env: { ...process.env, HOME: home, AGENT_BRIDGE_PROVIDER: "local", AGENT_BRIDGE_DB: join(home, "bridge.sqlite3"), ...extra },
+      stdio: ["ignore", "pipe", "pipe"],
+    });
+    let stdout = "";
+    let stderr = "";
+    child.stdout.setEncoding("utf8").on("data", (chunk) => { stdout += chunk; });
+    child.stderr.setEncoding("utf8").on("data", (chunk) => { stderr += chunk; });
+    child.once("error", reject);
+    child.once("close", (status) => resolve({ status, stdout, stderr }));
+  });
 }
 afterEach(() => { for (const home of homes.splice(0)) rmSync(home, { recursive: true, force: true }); });
 
@@ -185,5 +201,103 @@ describe("agent-bridge CLI", () => {
       deliveryAvailable: true,
       pending: 1,
     });
+  });
+  it("reports unknown when gateway pending has no authoritative data", () => {
+    const home = mkdtempSync(join(tmpdir(), "agent-bridge-cli-")); homes.push(home);
+    const result = runAt(home, ["pending"], {
+      AGENT_BRIDGE_PROVIDER: "gateway",
+      AGENT_BRIDGE_URL: "http://127.0.0.1:1",
+      AGENT_BRIDGE_TOKEN: "test-token",
+      AGENT_BRIDGE_AGENT: "worker",
+      AGENT_BRIDGE_WORKSPACE: "acme",
+    });
+    expect(result.status).toBe(2);
+    expect(JSON.parse(result.stdout)).toMatchObject({
+      available: false,
+      unread: false,
+      authoritative: false,
+      state: "unknown",
+    });
+  });
+  it("reports cached gateway candidates as available but not authoritative", async () => {
+    const home = mkdtempSync(join(tmpdir(), "agent-bridge-cli-")); homes.push(home);
+    const endpoint = "http://127.0.0.1:1";
+    const principal = { workspace: "acme", agent: "worker" };
+    const path = join(home, ".agent-bridge", "edge.sqlite3");
+    mkdirSync(dirname(path), { recursive: true });
+    const edge = new SQLiteEdgeStore(path, { endpoint, principal });
+    await edge.initialize();
+    await edge.cacheLatest([{
+      id: "018f4a70-0000-7000-8000-000000000199",
+      sequence: "1",
+      workspace: "acme",
+      source: "codex",
+      type: "request",
+      content: "cached work",
+      contentType: "text/plain",
+      targets: ["worker"],
+      priority: "high",
+      createdAt: new Date().toISOString(),
+    }]);
+    await edge.close();
+
+    const result = runAt(home, ["pending"], {
+      AGENT_BRIDGE_PROVIDER: "gateway",
+      AGENT_BRIDGE_URL: endpoint,
+      AGENT_BRIDGE_TOKEN: "test-token",
+      AGENT_BRIDGE_AGENT: "worker",
+      AGENT_BRIDGE_WORKSPACE: "acme",
+    });
+    expect(result.status).toBe(0);
+    expect(JSON.parse(result.stdout)).toMatchObject({
+      available: true,
+      unread: true,
+      authoritative: false,
+      state: "available",
+    });
+  });
+  it("keeps pending non-authoritative when gateway authority changes mid-command", async () => {
+    const home = mkdtempSync(join(tmpdir(), "agent-bridge-cli-")); homes.push(home);
+    const server = createServer((request, response) => {
+      response.setHeader("content-type", "application/json");
+      if (request.url === "/readyz") {
+        response.end(JSON.stringify({ status: "ok" }));
+        return;
+      }
+      if (request.url === "/v2/status") {
+        response.end(JSON.stringify({
+          schemaVersion: "postgres-v2",
+          deliverySupported: true,
+          pending: 0,
+          claimed: 0,
+          retrying: 0,
+          dead: 0,
+          principal: { workspace: "acme", agent: "worker" },
+        }));
+        return;
+      }
+      response.statusCode = 503;
+      response.end(JSON.stringify({ error: { code: "gateway_unavailable" } }));
+    });
+    await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+    const address = server.address();
+    if (!address || typeof address === "string") throw new Error("test gateway did not bind TCP");
+    try {
+      const result = await runAtAsync(home, ["pending"], {
+        AGENT_BRIDGE_PROVIDER: "gateway",
+        AGENT_BRIDGE_URL: `http://127.0.0.1:${address.port}`,
+        AGENT_BRIDGE_TOKEN: "test-token",
+        AGENT_BRIDGE_AGENT: "worker",
+        AGENT_BRIDGE_WORKSPACE: "acme",
+      });
+      expect(result.status).toBe(2);
+      expect(JSON.parse(result.stdout)).toMatchObject({
+        available: false,
+        authoritative: false,
+        state: "unknown",
+      });
+    } finally {
+      await new Promise<void>((resolve, reject) => server.close((error) => error ? reject(error) : resolve()));
+    }
   });
 });

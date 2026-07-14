@@ -27,6 +27,8 @@ export interface SyncInsertResult extends InsertMessageResult {
 export interface CachedMessagePage extends MessagePage {
   source: "remote" | "cache";
   stale: boolean;
+  degraded: boolean;
+  acknowledgements: "authoritative" | "unknown";
   lastSyncedAt?: string;
 }
 
@@ -59,13 +61,16 @@ export interface SyncingBridgeStoreOptions {
   baseDelayMs?: number;
   maxDelayMs?: number;
   leaseMs?: number;
+  autoSync?: boolean;
+  idleDelayMs?: number;
 }
 
 type FlushResult =
   | { state: "empty" }
   | { state: "committed"; result: InsertMessageResult; messageId: string }
   | { state: "retry"; error: Error; retryable: boolean }
-  | { state: "blocked"; error: Error };
+  | { state: "blocked"; error: Error; messageId: string }
+  | { state: "fatal"; error: Error };
 
 function statusOf(error: unknown): number | undefined {
   if (!error || typeof error !== "object" || !("status" in error)) return undefined;
@@ -84,9 +89,10 @@ function codeOf(error: unknown): string {
 export function isRetryableSyncError(error: unknown): boolean {
   const status = statusOf(error);
   const code = codeOf(error);
-  if (["invalid_input", "idempotency_conflict", "principal_mismatch"].includes(code)) return false;
-  return status === undefined || status === 0 || status === 408 || status === 425 ||
-    status === 429 || status >= 500;
+  if (["network_error", "request_timeout"].includes(code)) return true;
+  if (["invalid_input", "idempotency_conflict", "edge_idempotency_conflict", "principal_mismatch", "store_closed"].includes(code)) return false;
+  return status === 0 || status === 408 || status === 425 ||
+    status === 429 || (status !== undefined && status >= 500);
 }
 
 function provisional(draft: PendingMessage, createdAt: string): BridgeMessage {
@@ -99,7 +105,16 @@ export class SyncingBridgeStore implements BridgeStore {
   private readonly baseDelayMs: number;
   private readonly maxDelayMs: number;
   private readonly leaseMs: number;
+  private readonly autoSync: boolean;
+  private readonly idleDelayMs: number;
   private remoteReady: Promise<void> | undefined;
+  private stopped = false;
+  private wakeTimer: ReturnType<typeof setTimeout> | undefined;
+  private wake: (() => void) | undefined;
+  private background: Promise<void> | undefined;
+  private readonly closeController = new AbortController();
+  private backgroundError: unknown;
+  private wakeRequested = false;
 
   constructor(
     private readonly edge: SQLiteEdgeStore,
@@ -112,20 +127,86 @@ export class SyncingBridgeStore implements BridgeStore {
     this.baseDelayMs = options.baseDelayMs ?? 1_000;
     this.maxDelayMs = options.maxDelayMs ?? 5 * 60_000;
     this.leaseMs = options.leaseMs ?? 30_000;
+    this.autoSync = options.autoSync ?? true;
+    this.idleDelayMs = Math.max(this.baseDelayMs + 1, options.idleDelayMs ?? 30_000);
   }
 
   async initialize(): Promise<void> {
     // Remote readiness is intentionally deferred so clients can start offline.
     await this.edge.initialize();
+    if (this.autoSync) this.startTransportLoop();
+  }
+
+  private startTransportLoop(): void {
+    if (this.background) return;
+    this.background = this.transportLoop().catch((error) => {
+      this.backgroundError = error;
+    });
+  }
+
+  private async wait(delayMs: number): Promise<void> {
+    if (this.stopped) return;
+    if (this.wakeRequested) {
+      this.wakeRequested = false;
+      return;
+    }
+    await new Promise<void>((resolve) => {
+      this.wake = resolve;
+      this.wakeTimer = setTimeout(resolve, delayMs);
+      this.wakeTimer.unref?.();
+    });
+    this.wake = undefined;
+    this.wakeTimer = undefined;
+  }
+
+  private wakeTransport(): void {
+    if (this.wake) {
+      if (this.wakeTimer) clearTimeout(this.wakeTimer);
+      this.wake();
+    }
+    else this.wakeRequested = true;
+  }
+
+  private fatal(error: unknown): Error {
+    if (this.backgroundError instanceof Error) return this.backgroundError;
+    const cause = error instanceof Error ? error : new Error(String(error));
+    const fatal = Object.assign(new Error(`fatal local edge failure: ${cause.message}`), {
+      code: "local_edge_commit_failed",
+      cause,
+    });
+    this.backgroundError = fatal;
+    return fatal;
+  }
+
+  private assertHealthy(): void {
+    if (this.backgroundError) throw this.backgroundError;
+  }
+
+  private async transportLoop(): Promise<void> {
+    let failures = 0;
+    await this.wait(this.delay(0));
+    while (!this.stopped) {
+      const report = await this.sync({ maxPush: 100, maxPages: 1, signal: this.closeController.signal });
+      if (this.stopped) break;
+      if (report.failureRetryable === false) {
+        this.backgroundError = Object.assign(
+          new Error(`gateway synchronization failed permanently: ${report.lastError ?? "sync_error"}`),
+          { code: report.lastError ?? "sync_error" },
+        );
+        return;
+      }
+      failures = report.online ? 0 : Math.min(failures + 1, 20);
+      await this.wait(report.pending > 0 ? this.delay(Math.max(0, failures - 1)) : this.idleDelayMs);
+    }
   }
 
   async verifyRemote(): Promise<void> {
     await this.ensureRemote();
   }
 
-  private async ensureRemote(): Promise<void> {
+  private async ensureRemote(signal?: AbortSignal): Promise<void> {
     if (!this.remoteReady) {
-      this.remoteReady = this.remote.initialize().catch((error) => {
+      this.remoteReady = this.remote.initialize({ signal }).catch((error) => {
         this.remoteReady = undefined;
         throw error;
       });
@@ -151,9 +232,13 @@ export class SyncingBridgeStore implements BridgeStore {
     return Math.max(1, Math.round(exponential * jitter));
   }
 
-  private async flushOne(): Promise<FlushResult> {
+  private cancelled(signal?: AbortSignal): boolean {
+    return this.stopped || Boolean(signal?.aborted);
+  }
+
+  private async flushOne(signal?: AbortSignal): Promise<FlushResult> {
     try {
-      await this.ensureRemote();
+      await this.ensureRemote(signal);
     } catch (error) {
       await this.edge.noteError(codeOf(error));
       return {
@@ -165,19 +250,27 @@ export class SyncingBridgeStore implements BridgeStore {
     const record = await this.edge.claimNext(this.now(), this.leaseMs);
     if (!record) return { state: "empty" };
     try {
-      const result = await this.remote.insertMessage(record.draft);
+      const result = await this.remote.insertMessage(record.draft, { signal });
       if (edgeMessageFingerprint(result.message) !== record.payloadHash) {
         const error = new Error("idempotency key resolved to different message content");
         Object.assign(error, { status: 409, code: "idempotency_conflict" });
         await this.edge.block(record, codeOf(error));
-        return { state: "blocked", error };
+        return { state: "blocked", error, messageId: record.draft.id };
       }
       const cacheVisible = result.message.targets.length === 0 ||
         result.message.targets.includes(this.principal.agent);
-      await this.edge.commit(record, result.message, cacheVisible, this.now());
+      try {
+        await this.edge.commit(record, result.message, cacheVisible, this.now());
+      } catch (error) {
+        return { state: "fatal", error: this.fatal(error) };
+      }
       return { state: "committed", result, messageId: record.draft.id };
     } catch (error) {
       const caught = error instanceof Error ? error : new Error(String(error));
+      if (this.cancelled(signal)) {
+        await this.edge.retry(record, "request_cancelled", this.now());
+        return { state: "retry", error: caught, retryable: true };
+      }
       if (isRetryableSyncError(error)) {
         await this.edge.retry(
           record,
@@ -187,20 +280,23 @@ export class SyncingBridgeStore implements BridgeStore {
         return { state: "retry", error: caught, retryable: true };
       }
       await this.edge.block(record, codeOf(error));
-      return { state: "blocked", error: caught };
+      return { state: "blocked", error: caught, messageId: record.draft.id };
     }
   }
 
   async insertMessage(message: PendingMessage): Promise<SyncInsertResult> {
+    this.assertHealthy();
     this.assertPrincipal({ workspace: message.workspace, agent: message.source }, false);
     const queued = await this.edge.enqueue(message, this.now());
     const draft = queued.draft;
     const flushed = await this.flushOne();
-    if (flushed.state === "blocked") throw flushed.error;
+    if (flushed.state === "fatal") throw flushed.error;
+    if (flushed.state === "blocked" && flushed.messageId === draft.id) throw flushed.error;
     if (flushed.state === "retry" && !flushed.retryable) throw flushed.error;
     if (flushed.state === "committed" && flushed.messageId === draft.id) {
       return { ...flushed.result, disposition: "committed", authoritative: true };
     }
+    this.wakeTransport();
     return {
       message: provisional(draft, this.now().toISOString()),
       created: queued.created,
@@ -209,7 +305,7 @@ export class SyncingBridgeStore implements BridgeStore {
     };
   }
 
-  private async pull(maxPages: number): Promise<{
+  private async pull(maxPages: number, signal?: AbortSignal): Promise<{
     online: boolean;
     pulled: number;
     error?: Error;
@@ -217,17 +313,16 @@ export class SyncingBridgeStore implements BridgeStore {
   }> {
     let pulled = 0;
     for (let pageNumber = 0; pageNumber < maxPages; pageNumber += 1) {
+      if (this.cancelled(signal)) break;
       const before = await this.edge.pullCursor();
+      let page: MessagePage;
       try {
-        await this.ensureRemote();
-        const page = await this.remote.listMessages(this.principal, {
+        await this.ensureRemote(signal);
+        page = await this.remote.listMessages(this.principal, {
           cursor: before,
           limit: 200,
           includeExpired: true,
-        });
-        await this.edge.cachePage(page.messages, page.cursor, this.now());
-        pulled += page.messages.length;
-        if (page.messages.length < 200 || !page.cursor || page.cursor === before) break;
+        }, { signal });
       } catch (error) {
         await this.edge.noteError(codeOf(error));
         return {
@@ -237,11 +332,19 @@ export class SyncingBridgeStore implements BridgeStore {
           retryable: isRetryableSyncError(error),
         };
       }
+      try {
+        await this.edge.cachePage(page.messages, page.cursor, this.now());
+      } catch (error) {
+        throw this.fatal(error);
+      }
+      pulled += page.messages.length;
+      if (page.messages.length < 200 || !page.cursor || page.cursor === before) break;
     }
     return { online: true, pulled };
   }
 
-  async sync(options: { maxPush?: number; maxPages?: number } = {}): Promise<SyncReport> {
+  async sync(options: { maxPush?: number; maxPages?: number; signal?: AbortSignal } = {}): Promise<SyncReport> {
+    this.assertHealthy();
     await this.edge.initialize();
     const maxPush = Math.min(Math.max(Math.trunc(options.maxPush ?? 100), 0), 1_000);
     const maxPages = Math.min(Math.max(Math.trunc(options.maxPages ?? 20), 0), 100);
@@ -251,23 +354,35 @@ export class SyncingBridgeStore implements BridgeStore {
     let lastError: string | undefined;
     let failureRetryable: boolean | undefined;
 
+    if (options.signal?.aborted) {
+      const stats = await this.edge.stats();
+      return {
+        online: false, pushed: 0, deduplicated: 0, pulled: 0,
+        pending: stats.pending, blocked: stats.blocked, cached: stats.cached,
+        cursor: stats.pullCursor, lastSyncedAt: stats.lastSyncAt,
+        lastError: "request_cancelled", failureRetryable: true,
+      };
+    }
+
     for (let index = 0; index < maxPush; index += 1) {
-      const result = await this.flushOne();
+      if (this.cancelled(options.signal)) break;
+      const result = await this.flushOne(options.signal);
       if (result.state === "empty") break;
       if (result.state === "committed") {
         pushed += 1;
         if (!result.result.created) deduplicated += 1;
         continue;
       }
+      if (result.state === "fatal") throw result.error;
       lastError = codeOf(result.error);
-      failureRetryable = result.state === "retry" ? result.retryable : false;
+      failureRetryable = result.state === "retry" ? result.retryable : undefined;
       if (result.state === "retry") online = false;
-      break;
+      if (result.state === "retry") break;
     }
 
     let pulled = 0;
-    if (maxPages > 0) {
-      const pull = await this.pull(maxPages);
+    if (maxPages > 0 && !this.cancelled(options.signal)) {
+      const pull = await this.pull(maxPages, options.signal);
       online = online && pull.online;
       pulled = pull.pulled;
       if (pull.error) {
@@ -293,42 +408,35 @@ export class SyncingBridgeStore implements BridgeStore {
   }
 
   async listMessages(principal: BridgePrincipal, query: MessageQuery = {}): Promise<CachedMessagePage> {
+    this.assertHealthy();
     this.assertPrincipal(principal);
-    if (query.unacknowledgedBy) {
-      await this.ensureRemote();
-      const remotePage = await this.remote.listMessages(principal, query);
-      await this.edge.cacheLatest(remotePage.messages, this.now());
-      const stats = await this.edge.stats();
-      return { ...remotePage, source: "remote", stale: false, lastSyncedAt: stats.lastSyncAt };
-    }
-    if (query.latest) {
-      try {
-        await this.ensureRemote();
-        const remotePage = await this.remote.listMessages(principal, query);
-        await this.edge.cacheLatest(remotePage.messages, this.now());
-        const stats = await this.edge.stats();
-        return { ...remotePage, source: "remote", stale: false, lastSyncedAt: stats.lastSyncAt };
-      } catch (error) {
-        if (!isRetryableSyncError(error)) throw error;
-        await this.edge.noteError(codeOf(error));
-        const cached = await this.edge.list(query);
-        const stats = await this.edge.stats();
-        return { ...cached, source: "cache", stale: true, lastSyncedAt: stats.lastSyncAt };
-      }
-    }
     await this.sync({ maxPush: 20, maxPages: 0 });
+    let remotePage: MessagePage;
     try {
       await this.ensureRemote();
-      const remotePage = await this.remote.listMessages(principal, query);
-      await this.edge.cacheLatest(remotePage.messages, this.now());
-      const stats = await this.edge.stats();
-      return { ...remotePage, source: "remote", stale: false, lastSyncedAt: stats.lastSyncAt };
+      remotePage = await this.remote.listMessages(principal, query);
     } catch (error) {
       if (!isRetryableSyncError(error)) throw error;
       await this.edge.noteError(codeOf(error));
-      const cached = await this.edge.list(query);
+      let cached: MessagePage;
+      let stats: Awaited<ReturnType<SQLiteEdgeStore["stats"]>>;
+      try {
+        cached = await this.edge.list(query);
+        stats = await this.edge.stats();
+      } catch (cacheError) {
+        throw this.fatal(cacheError);
+      }
+      return { ...cached, source: "cache", stale: true, degraded: true,
+        acknowledgements: query.unacknowledgedBy ? "unknown" : "authoritative",
+        lastSyncedAt: stats.lastSyncAt };
+    }
+    try {
+      await this.edge.cacheLatest(remotePage.messages, this.now());
       const stats = await this.edge.stats();
-      return { ...cached, source: "cache", stale: true, lastSyncedAt: stats.lastSyncAt };
+      return { ...remotePage, source: "remote", stale: false, degraded: false,
+        acknowledgements: "authoritative", lastSyncedAt: stats.lastSyncAt };
+    } catch (error) {
+      throw this.fatal(error);
     }
   }
 
@@ -375,12 +483,14 @@ export class SyncingBridgeStore implements BridgeStore {
 
   async diagnostics(principal: BridgePrincipal): Promise<SyncDiagnostics> {
     this.assertPrincipal(principal);
+    this.assertHealthy();
     const edge = await this.edge.stats();
     let remote: BridgeDiagnostics | undefined;
     try {
       await this.ensureRemote();
       remote = await this.remote.diagnostics?.(principal);
-    } catch {
+    } catch (error) {
+      if (!isRetryableSyncError(error)) throw error;
       // Edge diagnostics remain available during an outage.
     }
     return {
@@ -416,7 +526,20 @@ export class SyncingBridgeStore implements BridgeStore {
   }
 
   async close(): Promise<void> {
-    await this.edge.close();
-    await this.remote.close?.();
+    this.stopped = true;
+    this.closeController.abort(new Error("synchronization stopped"));
+    if (this.wakeTimer) clearTimeout(this.wakeTimer);
+    this.wake?.();
+    const results = await Promise.allSettled([
+      this.remote.close?.() ?? Promise.resolve(),
+      this.background ?? Promise.resolve(),
+    ]);
+    const failures = results
+      .filter((result): result is PromiseRejectedResult => result.status === "rejected")
+      .map((result) => result.reason);
+    if (this.backgroundError) failures.push(this.backgroundError);
+    try { await this.edge.close(); } catch (error) { failures.push(error); }
+    if (failures.length === 1) throw failures[0];
+    if (failures.length > 1) throw Object.assign(new Error("failed to close synchronized bridge store"), { errors: failures });
   }
 }

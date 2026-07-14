@@ -1,7 +1,7 @@
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import type {
   BridgeDelivery,
   BridgeMessage,
@@ -31,6 +31,7 @@ function networkError(): Error {
 class SwitchableRemote implements BridgeStore {
   online = false;
   insertFailure?: Error;
+  failAfterCommit = false;
 
   constructor(readonly inner = new SQLiteBridgeStore()) {
     remoteStores.push(inner);
@@ -48,7 +49,15 @@ class SwitchableRemote implements BridgeStore {
   async insertMessage(message: Omit<BridgeMessage, "sequence" | "createdAt">): Promise<InsertMessageResult> {
     this.check();
     if (this.insertFailure) throw this.insertFailure;
-    return this.inner.insertMessage(message);
+    const result = await this.inner.insertMessage(message);
+    if (this.failAfterCommit) {
+      this.failAfterCommit = false;
+      throw Object.assign(new Error("response lost after commit"), {
+        status: 504,
+        code: "request_timeout",
+      });
+    }
+    return result;
   }
 
   async listMessages(principal: BridgePrincipal, query?: MessageQuery): Promise<MessagePage> {
@@ -183,6 +192,176 @@ describe("offline SQLite synchronization", () => {
     await isolated.close();
   });
 
+  it("retries an unknown publication outcome idempotently", async () => {
+    const root = directory();
+    const principal = { workspace: "acme", agent: "sender" };
+    const remote = new SwitchableRemote();
+    remote.online = true;
+    remote.failAfterCommit = true;
+    let clock = Date.now();
+    const syncing = new SyncingBridgeStore(
+      edge(join(root, "edge.sqlite3"), principal),
+      remote,
+      principal,
+      { autoSync: false, random: () => 0.5, now: () => new Date(clock), baseDelayMs: 10 },
+    );
+    await syncing.initialize();
+
+    await expect(syncing.insertMessage(draft(principal))).resolves.toMatchObject({
+      disposition: "queued",
+      authoritative: false,
+    });
+    clock += 11;
+    expect(await syncing.sync({ maxPages: 0 })).toMatchObject({
+      pushed: 1,
+      deduplicated: 1,
+      pending: 0,
+    });
+    expect((await remote.inner.listMessages(principal)).messages).toHaveLength(1);
+    await syncing.close();
+  });
+
+  it("returns cached unread candidates with explicitly unknown acknowledgement state", async () => {
+    const root = directory();
+    const principal = { workspace: "acme", agent: "worker" };
+    const remote = new SwitchableRemote();
+    remote.online = true;
+    const syncing = new SyncingBridgeStore(
+      edge(join(root, "edge.sqlite3"), principal), remote, principal, { autoSync: false },
+    );
+    await syncing.initialize();
+    await remote.inner.insertMessage(draft({ workspace: "acme", agent: "worker" }));
+    await syncing.listMessages(principal, { latest: true });
+    remote.online = false;
+
+    const cached = await syncing.listMessages(principal, {
+      latest: true,
+      unacknowledgedBy: "worker",
+    });
+    expect(cached).toMatchObject({
+      source: "cache",
+      stale: true,
+      degraded: true,
+      acknowledgements: "unknown",
+    });
+    expect(cached.messages).toHaveLength(1);
+    await syncing.close();
+  });
+
+  it("replays queued sends autonomously and stops its bounded transport loop on close", async () => {
+    const root = directory();
+    const principal = { workspace: "acme", agent: "sender" };
+    const remote = new SwitchableRemote();
+    const syncing = new SyncingBridgeStore(
+      edge(join(root, "edge.sqlite3"), principal),
+      remote,
+      principal,
+      { baseDelayMs: 5, maxDelayMs: 20, random: () => 0.5 },
+    );
+    await syncing.initialize();
+    await syncing.insertMessage(draft(principal));
+    remote.online = true;
+    await new Promise((resolve) => setTimeout(resolve, 35));
+    expect((await syncing.diagnostics(principal)).outboxPending).toBe(0);
+    expect((await remote.inner.listMessages(principal)).messages).toHaveLength(1);
+    await syncing.close();
+  });
+
+  it("schedules idle polling, queued wakeups, and committed sends without extra requests", async () => {
+    vi.useFakeTimers();
+    try {
+      const root = directory();
+      const principal = { workspace: "acme", agent: "sender" };
+      const remote = new SwitchableRemote();
+      remote.online = true;
+      const initialize = vi.spyOn(remote, "initialize");
+      const list = vi.spyOn(remote, "listMessages");
+      const insert = vi.spyOn(remote, "insertMessage");
+      const syncing = new SyncingBridgeStore(
+        edge(join(root, "edge.sqlite3"), principal), remote, principal,
+        { baseDelayMs: 100, idleDelayMs: 1_000, random: () => 0.5 },
+      );
+      await syncing.initialize();
+
+      await vi.advanceTimersByTimeAsync(99);
+      expect(initialize).not.toHaveBeenCalled();
+      await vi.advanceTimersByTimeAsync(1);
+      expect(initialize).toHaveBeenCalledTimes(1);
+      expect(list).toHaveBeenCalledTimes(1);
+      await vi.advanceTimersByTimeAsync(999);
+      expect(list).toHaveBeenCalledTimes(1);
+
+      await expect(syncing.insertMessage(draft(principal))).resolves.toMatchObject({
+        disposition: "committed", authoritative: true,
+      });
+      expect(insert).toHaveBeenCalledTimes(1);
+      expect(list).toHaveBeenCalledTimes(1);
+      await vi.advanceTimersByTimeAsync(1);
+      expect(list).toHaveBeenCalledTimes(2);
+      await vi.advanceTimersByTimeAsync(0);
+
+      remote.online = false;
+      await expect(syncing.insertMessage(draft(
+        principal, "018f4a70-0000-7000-8000-000000000188",
+      ))).resolves.toMatchObject({ disposition: "queued" });
+      const callsAfterForegroundFailure = insert.mock.calls.length;
+      remote.online = true;
+      await vi.advanceTimersByTimeAsync(100);
+      expect(insert.mock.calls.length).toBeGreaterThan(callsAfterForegroundFailure);
+      await syncing.close();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("records cache write failures as fatal local edge state", async () => {
+    const root = directory();
+    const principal = { workspace: "acme", agent: "sender" };
+    const remote = new SwitchableRemote();
+    remote.online = true;
+    const localEdge = edge(join(root, "edge.sqlite3"), principal);
+    vi.spyOn(localEdge, "cacheLatest").mockRejectedValueOnce(new Error("disk full"));
+    const syncing = new SyncingBridgeStore(localEdge, remote, principal, { autoSync: false });
+    await syncing.initialize();
+    await expect(syncing.listMessages(principal)).rejects.toMatchObject({
+      code: "local_edge_commit_failed",
+    });
+    const insert = vi.spyOn(remote, "insertMessage");
+    await expect(syncing.insertMessage(draft(principal))).rejects.toMatchObject({
+      code: "local_edge_commit_failed",
+    });
+    expect(insert).not.toHaveBeenCalled();
+    await expect(syncing.sync()).rejects.toMatchObject({ code: "local_edge_commit_failed" });
+    await expect(syncing.diagnostics(principal)).rejects.toMatchObject({ code: "local_edge_commit_failed" });
+    await expect(syncing.close()).rejects.toMatchObject({ code: "local_edge_commit_failed" });
+  });
+
+  it("records cursor page cache failures as fatal local edge state", async () => {
+    const root = directory();
+    const principal = { workspace: "acme", agent: "sender" };
+    const remote = new SwitchableRemote();
+    remote.online = true;
+    const localEdge = edge(join(root, "edge.sqlite3"), principal);
+    vi.spyOn(localEdge, "cachePage").mockRejectedValueOnce(new Error("disk full"));
+    const syncing = new SyncingBridgeStore(localEdge, remote, principal, { autoSync: false });
+    await syncing.initialize();
+
+    await expect(syncing.sync({ maxPush: 0, maxPages: 1 })).rejects.toMatchObject({
+      code: "local_edge_commit_failed",
+    });
+    const insert = vi.spyOn(remote, "insertMessage");
+    await expect(syncing.insertMessage(draft(principal))).rejects.toMatchObject({
+      code: "local_edge_commit_failed",
+    });
+    expect(insert).not.toHaveBeenCalled();
+    await expect(syncing.diagnostics(principal)).rejects.toMatchObject({
+      code: "local_edge_commit_failed",
+    });
+    await expect(syncing.close()).rejects.toMatchObject({
+      code: "local_edge_commit_failed",
+    });
+  });
+
   it("never queues lease operations while the gateway is offline", async () => {
     const root = directory();
     const principal = { workspace: "acme", agent: "worker", instance: "one" };
@@ -229,6 +408,117 @@ describe("offline SQLite synchronization", () => {
     await syncing.close();
   });
 
+  it("continues autonomous replay past a message-specific publication conflict", async () => {
+    const root = directory();
+    const principal = { workspace: "acme", agent: "sender" };
+    const remote = new SwitchableRemote();
+    remote.online = true;
+    const firstId = "018f4a70-0000-7000-8000-000000000111";
+    const secondId = "018f4a70-0000-7000-8000-000000000112";
+    const originalInsert = remote.insertMessage.bind(remote);
+    remote.insertMessage = async (message) => {
+      if (message.id === firstId) throw Object.assign(new Error("conflict"), {
+        status: 409, code: "idempotency_conflict",
+      });
+      return originalInsert(message);
+    };
+    const localEdge = edge(join(root, "edge.sqlite3"), principal);
+    await localEdge.enqueue(draft(principal, firstId));
+    await localEdge.enqueue(draft(principal, secondId));
+    const syncing = new SyncingBridgeStore(localEdge, remote, principal, {
+      baseDelayMs: 5, idleDelayMs: 10_000, random: () => 0.5,
+    });
+    await syncing.initialize();
+    await vi.waitFor(async () => {
+      expect((await remote.inner.listMessages(principal)).messages.map((message) => message.id))
+        .toContain(secondId);
+    });
+    expect(await syncing.diagnostics(principal)).toMatchObject({
+      outboxPending: 0, outboxBlocked: 1,
+    });
+    await syncing.close();
+  });
+
+  it("queues a new send behind an older rejected message and wakes replay", async () => {
+    const root = directory();
+    const principal = { workspace: "acme", agent: "sender" };
+    const remote = new SwitchableRemote();
+    remote.online = true;
+    const firstId = "018f4a70-0000-7000-8000-000000000113";
+    const secondId = "018f4a70-0000-7000-8000-000000000114";
+    const originalInsert = remote.insertMessage.bind(remote);
+    remote.insertMessage = async (message) => {
+      if (message.id === firstId) throw Object.assign(new Error("conflict"), {
+        status: 409, code: "idempotency_conflict",
+      });
+      return originalInsert(message);
+    };
+    const localEdge = edge(join(root, "edge.sqlite3"), principal);
+    await localEdge.enqueue(draft(principal, firstId));
+    const syncing = new SyncingBridgeStore(localEdge, remote, principal, {
+      baseDelayMs: 30_000, idleDelayMs: 60_000, random: () => 0.5,
+    });
+    await syncing.initialize();
+
+    await expect(syncing.insertMessage(draft(principal, secondId))).resolves.toMatchObject({
+      message: { id: secondId },
+      disposition: "queued",
+      authoritative: false,
+    });
+    await vi.waitFor(async () => {
+      expect((await remote.inner.listMessages(principal)).messages.map((message) => message.id))
+        .toContain(secondId);
+    }, { timeout: 500 });
+    expect(await syncing.diagnostics(principal)).toMatchObject({
+      outboxPending: 0, outboxBlocked: 1,
+    });
+    await syncing.close();
+  });
+
+  it("preserves recoverable outbox state and exposes a fatal local commit failure", async () => {
+    const root = directory();
+    const principal = { workspace: "acme", agent: "sender" };
+    const remote = new SwitchableRemote();
+    remote.online = true;
+    const localEdge = edge(join(root, "edge.sqlite3"), principal);
+    vi.spyOn(localEdge, "commit").mockRejectedValueOnce(new Error("disk full"));
+    const syncing = new SyncingBridgeStore(localEdge, remote, principal, { autoSync: false });
+    await syncing.initialize();
+    await expect(syncing.insertMessage(draft(principal))).rejects.toMatchObject({
+      code: "local_edge_commit_failed",
+    });
+    expect((await remote.inner.listMessages(principal)).messages).toHaveLength(1);
+    expect((await localEdge.stats()).pending).toBe(1);
+    const remoteInsert = vi.spyOn(remote, "insertMessage");
+    await expect(syncing.insertMessage(draft(principal, "018f4a70-0000-7000-8000-000000000199")))
+      .rejects.toMatchObject({ code: "local_edge_commit_failed" });
+    expect(remoteInsert).not.toHaveBeenCalled();
+    expect((await localEdge.stats()).pending).toBe(1);
+    await expect(syncing.sync()).rejects.toMatchObject({ code: "local_edge_commit_failed" });
+    await expect(syncing.diagnostics(principal)).rejects.toMatchObject({
+      code: "local_edge_commit_failed",
+    });
+    await expect(syncing.close()).rejects.toMatchObject({ code: "local_edge_commit_failed" });
+  });
+
+  it("reports a pre-cancelled synchronization without contacting the remote", async () => {
+    const root = directory();
+    const principal = { workspace: "acme", agent: "sender" };
+    const remote = new SwitchableRemote();
+    const initialize = vi.spyOn(remote, "initialize");
+    const syncing = new SyncingBridgeStore(
+      edge(join(root, "edge.sqlite3"), principal), remote, principal, { autoSync: false },
+    );
+    const controller = new AbortController();
+    controller.abort();
+    await expect(syncing.sync({ signal: controller.signal })).resolves.toMatchObject({
+      online: false, pushed: 0, pulled: 0,
+      lastError: "request_cancelled", failureRetryable: true,
+    });
+    expect(initialize).not.toHaveBeenCalled();
+    await syncing.close();
+  });
+
   it("does not use a remote until its bound principal is verified", async () => {
     const root = directory();
     const principal = { workspace: "acme", agent: "sender" };
@@ -258,11 +548,8 @@ describe("offline SQLite synchronization", () => {
       code: "principal_mismatch",
     });
     expect(insertCalls).toBe(0);
-    expect(await syncing.diagnostics(principal)).toMatchObject({
-      remoteReachable: false,
-      outboxPending: 1,
-      outboxBlocked: 0,
-      lastSyncError: "principal_mismatch",
+    await expect(syncing.diagnostics(principal)).rejects.toMatchObject({
+      code: "principal_mismatch",
     });
     await syncing.close();
   });
