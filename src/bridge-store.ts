@@ -25,9 +25,9 @@ export interface BridgeDiagnostics {
 }
 export interface ClaimOptions { leaseMs: number; maxAttempts?: number; now?: Date; }
 export interface BridgeStore {
-  initialize(): Promise<void>;
-  insertMessage(message: Omit<BridgeMessage, "sequence" | "createdAt">): Promise<InsertMessageResult>;
-  listMessages(principal: BridgePrincipal, query?: MessageQuery): Promise<MessagePage>;
+  initialize(options?: { signal?: AbortSignal }): Promise<void>;
+  insertMessage(message: Omit<BridgeMessage, "sequence" | "createdAt">, options?: { signal?: AbortSignal }): Promise<InsertMessageResult>;
+  listMessages(principal: BridgePrincipal, query?: MessageQuery, options?: { signal?: AbortSignal }): Promise<MessagePage>;
   recordReceipt(workspace: string, messageIds: string[], principal: string, readAt?: Date): Promise<number>;
   recordLegacyReceipt?(legacyIds: string[], principal: string): Promise<number>;
   claimDelivery(principal: BridgePrincipal, options: ClaimOptions): Promise<BridgeDelivery | null>;
@@ -37,7 +37,7 @@ export interface BridgeStore {
   heartbeat?(principal: BridgePrincipal, leaseMs: number, runtimeType?: string, capabilities?: string[]): Promise<AgentPresence>;
   listPresence?(principal: BridgePrincipal): Promise<AgentPresence[]>;
   listDeliveryEvents?(deliveryId: string): Promise<BridgeDeliveryEvent[]>;
-  sync?(options?: { maxPush?: number; maxPages?: number }): Promise<unknown>;
+  sync?(options?: { maxPush?: number; maxPages?: number; signal?: AbortSignal }): Promise<unknown>;
   verifyRemote?(): Promise<void>;
   close?(): Promise<void>;
 }

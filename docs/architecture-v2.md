@@ -27,6 +27,8 @@ SQLite WAL provides local-only operation, a durable outbox, an inbox cache, curs
 
 The gateway outbox queues immutable message publication. Receipt and lease mutations still require the remote authority because replaying them after ownership or identity changes can settle the wrong work.
 
+Long-lived gateway MCP clients own a cancellable transport loop that replays publications and refreshes the inbox cache with bounded exponential backoff. It is transport maintenance, not agent monitoring. Manual MCP and CLI sync use the same replay path. A publication timeout after the gateway may have committed remains queued under its stable idempotency key. A retry resolves to the original immutable message instead of publishing a duplicate.
+
 Local initialization must be idempotent. Every connection uses a bounded busy timeout. The minimum supported SQLite build must include the WAL-reset corruption fix. Node 22.23.1 on the current development machine embeds SQLite 3.51.3, which includes that fix.
 
 ### Messages are immutable
@@ -76,6 +78,8 @@ PostgreSQL claims use `FOR UPDATE SKIP LOCKED` so workers do not wait on rows th
 ### Cursor pull is authoritative
 
 Reads use an opaque cursor backed by the backend sequence number. UUIDv7 improves index locality and offline identity, but it does not replace the server cursor because client clocks can drift. Filters run in the storage layer. Clients never fetch an arbitrary recent sample and filter it in memory.
+
+During gateway outages, normal inbox and pending reads return the locally cached candidate set with explicit degraded and stale metadata. Because receipt state is remote authority and is not mirrored, an offline `unacknowledgedBy` result reports acknowledgement state as unknown; it must not be interpreted as proof that every returned message is unread.
 
 Realtime, hooks, webhooks, and desktop notifications may wake a client. The client still pulls from its last durable cursor. This closes notification gaps and makes reconnect behavior testable.
 
@@ -127,7 +131,7 @@ Limits apply to content bytes, payload bytes, metadata depth, target count, batc
 
 The CLI provides `init`, `doctor`, `status`, `demo`, `send`, `inbox`, `history`, `claim`, `ack`, `nack`, `watch`, `sync`, and migration commands. Existing `post` and `get` aliases remain available.
 
-`/readyz` reports storage and schema readiness. Authenticated status output reports the bound principal, provider schema, delivery counts, the oldest due delivery, and local edge state when the caller uses a gateway client.
+`/readyz` reports storage and schema readiness. Authenticated status output reports the bound principal, provider schema, delivery counts, the oldest due delivery, and local edge state when the caller uses a gateway client. Client `doctor` and `status` distinguish healthy local edge storage from remote gateway reachability rather than claiming connectivity from local startup alone.
 
 Gateway responses carry a request ID, including stable error envelopes. Authenticated Prometheus output counts requests, errors, timeouts, and authentication failures. Responses and metrics exclude bearer tokens, database URLs, payload bodies, and credential material.
 

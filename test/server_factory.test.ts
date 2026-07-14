@@ -71,6 +71,27 @@ describe("createAgentBridgeServer", () => {
     15_000,
   );
 
+  it("returns schema-conforming legacy context without a configured identity", async () => {
+    vi.spyOn(globalThis, "fetch").mockResolvedValue(Response.json([
+      { id: 7, source: "codex", category: "work", content: "ready" },
+    ]));
+    const server = createAgentBridgeServer({
+      supabaseUrl: "https://bridge.example.test/", supabaseKey: "anon-key",
+    });
+    const client = new Client({ name: "factory-test", version: "0.0.0" });
+    const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
+    await Promise.all([server.connect(serverTransport), client.connect(clientTransport)]);
+    try {
+      const result = await client.callTool({ name: "get_context", arguments: {} });
+      const entries = [{ id: 7, source: "codex", category: "work", content: "ready" }];
+      expect(result.structuredContent).toEqual({ entries });
+      expect(JSON.parse(String(result.content[0]?.text))).toEqual(entries);
+    } finally {
+      await client.close();
+      await server.close();
+    }
+  });
+
   it(
     "defaults the configured identity across MCP tools without advertising it as required",
     async () => {
@@ -150,6 +171,121 @@ describe("createAgentBridgeServer", () => {
     }
   });
 
+  it("exposes manual gateway sync through MCP while offline", async () => {
+    const root = mkdtempSync(join(tmpdir(), "agent-bridge-mcp-edge-"));
+    vi.spyOn(globalThis, "fetch").mockRejectedValue(new Error("offline"));
+    const server = createAgentBridgeServer({
+      provider: "gateway",
+      gatewayUrl: "https://bridge.example.test",
+      gatewayToken: "bound-token",
+      edgeDatabasePath: join(root, "edge.sqlite3"),
+      workspace: "workspace-a",
+      agent: "codex",
+      instance: "desktop",
+    });
+    const client = new Client({ name: "factory-test", version: "0.0.0" });
+    const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
+    await Promise.all([server.connect(serverTransport), client.connect(clientTransport)]);
+    try {
+      const tools = await client.listTools();
+      expect(tools.tools.map((tool) => tool.name)).toContain("sync");
+      const sync = tools.tools.find((tool) => tool.name === "sync");
+      expect(sync?.outputSchema?.required).toEqual([
+        "online", "pushed", "deduplicated", "pulled", "pending", "blocked", "cached",
+      ]);
+      const result = await client.callTool({
+        name: "sync",
+        arguments: { maxPush: 1, maxPages: 1 },
+      });
+      expect(result.structuredContent).toMatchObject({ online: false, pending: 0 });
+      expect(JSON.parse(String(result.content[0]?.text))).toEqual(result.structuredContent);
+    } finally {
+      await client.close();
+      await server.close();
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  it("connect starts replay, reconnect commits queued work, and close stays bounded", async () => {
+    const root = mkdtempSync(join(tmpdir(), "agent-bridge-mcp-replay-"));
+    let online = false;
+    const published: any[] = [];
+    vi.spyOn(globalThis, "fetch").mockImplementation(async (input, init) => {
+      if (!online) throw new Error("offline");
+      const url = String(input);
+      if (url.endsWith("/readyz")) return Response.json({ status: "ok" });
+      if (url.includes("/v2/status")) return Response.json({
+        schemaVersion: "postgres-v2", deliverySupported: true,
+        pending: 0, claimed: 0, retrying: 0, dead: 0,
+        principal: { workspace: "workspace-a", agent: "codex" },
+      });
+      if (url.includes("/v2/messages")) {
+        const body = JSON.parse(String(init?.body));
+        const message = {
+          ...body, workspace: "workspace-a", source: "codex", sequence: "1",
+          createdAt: new Date(0).toISOString(),
+        };
+        published.push(message);
+        return Response.json({ message, created: true });
+      }
+      if (url.includes("/v2/history")) return Response.json({ messages: [] });
+      throw new Error(`unexpected request: ${url}`);
+    });
+    const server = createAgentBridgeServer({
+      provider: "gateway", gatewayUrl: "https://bridge.example.test",
+      gatewayToken: "bound-token", edgeDatabasePath: join(root, "edge.sqlite3"),
+      workspace: "workspace-a", agent: "codex", instance: "desktop",
+    });
+    const client = new Client({ name: "factory-test", version: "0.0.0" });
+    const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
+    await Promise.all([server.connect(serverTransport), client.connect(clientTransport)]);
+    try {
+      const queued = await client.callTool({
+        name: "send", arguments: { type: "work", content: "replay me" },
+      });
+      expect(queued.structuredContent).toMatchObject({ disposition: "queued", authoritative: false });
+      online = true;
+      await vi.waitFor(() => expect(published).toHaveLength(1), { timeout: 2_000 });
+    } finally {
+      await client.close();
+      await expect(Promise.race([
+        server.close(),
+        new Promise((_, reject) => setTimeout(() => reject(new Error("close timeout")), 500)),
+      ])).resolves.toBeUndefined();
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  it("aborts an active gateway HTTP request and closes the MCP factory within a bound", async () => {
+    const root = mkdtempSync(join(tmpdir(), "agent-bridge-mcp-close-"));
+    let requestSignal: AbortSignal | null = null;
+    vi.spyOn(globalThis, "fetch").mockImplementation((_input, init) =>
+      new Promise<Response>((_resolve, reject) => {
+        requestSignal = init?.signal ?? null;
+        requestSignal?.addEventListener("abort", () => {
+          reject(Object.assign(new Error("aborted"), { name: "AbortError" }));
+        }, { once: true });
+      }));
+    const server = createAgentBridgeServer({
+      provider: "gateway", gatewayUrl: "https://bridge.example.test",
+      gatewayToken: "bound-token", edgeDatabasePath: join(root, "edge.sqlite3"),
+      workspace: "workspace-a", agent: "codex", instance: "desktop",
+    });
+    const client = new Client({ name: "factory-test", version: "0.0.0" });
+    const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
+    await Promise.all([server.connect(serverTransport), client.connect(clientTransport)]);
+    const activeCall = client.callTool({ name: "sync", arguments: { maxPages: 1 } });
+    await vi.waitFor(() => expect(requestSignal).not.toBeNull());
+    await expect(Promise.race([
+      server.close(),
+      new Promise((_, reject) => setTimeout(() => reject(new Error("close timeout")), 500)),
+    ])).resolves.toBeUndefined();
+    expect(requestSignal?.aborted).toBe(true);
+    await expect(activeCall).rejects.toBeDefined();
+    await client.close().catch(() => undefined);
+    rmSync(root, { recursive: true, force: true });
+  });
+
   it("advertises delivery tools and complete history filters for local v2", async () => {
     const server = createAgentBridgeServer({
       provider: "local",
@@ -165,9 +301,21 @@ describe("createAgentBridgeServer", () => {
       const tools = await client.listTools();
       expect(tools.tools.map((tool) => tool.name)).toContain("claim");
       const history = tools.tools.find((tool) => tool.name === "history");
+      const getContext = tools.tools.find((tool) => tool.name === "get_context");
+      expect(getContext?.outputSchema?.required).toEqual(["entries"]);
+      expect(getContext?.outputSchema?.properties).toMatchObject({
+        entries: { type: "array" },
+        acknowledgements: { enum: ["authoritative", "unknown"] },
+      });
       expect(history?.inputSchema.properties).toHaveProperty("threadId");
       expect(history?.inputSchema.properties).toHaveProperty("latest");
       expect(history?.outputSchema).toBeDefined();
+      expect(history?.outputSchema?.properties).toMatchObject({
+        stale: { type: "boolean" },
+        degraded: { type: "boolean" },
+        acknowledgements: { enum: ["authoritative", "unknown"] },
+        lastSyncedAt: { type: "string" },
+      });
       await expect(client.callTool({ name: "get_context", arguments: { limit: -1 } }))
         .rejects.toThrow();
       await expect(client.callTool({
@@ -196,6 +344,7 @@ describe("createAgentBridgeServer", () => {
         arguments: { types: ["work"], source: "codex" },
       });
       expect((listed.structuredContent as any).messages[0].id).toBe(sentId);
+      expect(JSON.parse(String(listed.content[0]?.text))).toEqual(listed.structuredContent);
       const claimed = await client.callTool({
         name: "claim",
         arguments: { leaseMs: 30_000 },

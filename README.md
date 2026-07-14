@@ -200,10 +200,10 @@ When a send cannot reach the gateway:
 
 1. The validated message is written to the SQLite outbox with a stable idempotency key.
 2. The CLI or MCP result reports `disposition: "queued"` and `authoritative: false`.
-3. `agent-bridge sync` retries due messages in queue order and pulls remote history into the inbox cache. A permanently blocked message remains visible in diagnostics but does not stop later messages.
+3. Long-lived MCP gateway clients retry due messages automatically with bounded exponential backoff. `agent-bridge sync` and the MCP `sync` tool trigger the same bounded replay and cache refresh manually. A permanently blocked message remains visible in diagnostics but does not stop later messages.
 4. An ambiguous retry is safe because the gateway enforces idempotency and rejects changed content under the same key.
 
-Cached reads report `source: "cache"` and `stale: true`. Claims, lease changes, delivery settlement, presence, and read receipts require the gateway because replaying those operations after a lease or identity change is unsafe.
+Normal inbox and pending reads fall back to the local cache when the gateway is unreachable. Cached reads report `source: "cache"`, `stale: true`, and `degraded: true`. When a read requested an unacknowledged filter, cached rows are candidates rather than proof of unread state and report `acknowledgements: "unknown"`. Claims, lease changes, delivery settlement, presence, and read-receipt writes still require the gateway because replaying those operations after a lease or identity change is unsafe.
 
 ## CLI
 
@@ -228,7 +228,7 @@ agent-bridge sync
 agent-bridge watch
 ```
 
-`agent-bridge pending` is a cheap shell gate for agent startup. It exits 0 when unread messages or due delivery work exists and 1 when neither exists. Its JSON result separates unread context from executable delivery work. Gateway checks fail instead of returning a false negative when the remote authority cannot confirm unread state.
+`agent-bridge pending` is a cheap shell gate for agent startup. It exits 0 when unread candidates or due delivery work are visible, 1 only for an authoritative empty result, and 2 when an empty remote state cannot be confirmed. Its JSON result separates unread context from executable delivery work and labels the state as `available`, `empty`, or `unknown`.
 
 `watch` runs until interrupted unless `--polls` sets an explicit bound. Empty polls use capped backoff and jitter. Gateway and legacy network failures retry when the error is transient. Authentication and validation errors stop the watcher.
 
@@ -295,6 +295,8 @@ The original v1 schema remains in [`sql/setup.sql`](sql/setup.sql). Ordered gate
 - Cursor and queue state.
 - Pending, claimed, retrying, and dead delivery counts.
 - Gateway reachability, outbox depth, blocked outbox rows, cache size, and last sync error.
+
+Local edge health and remote reachability are separate: a healthy offline gateway client reports `localHealthy: true`, `remoteReachable: false`, `connected: false`, and `status: "degraded"` while retaining usable cached reads and queued sends.
 
 The gateway exposes unauthenticated `/readyz`. `/v2/status` and `/metrics` require a valid credential.
 

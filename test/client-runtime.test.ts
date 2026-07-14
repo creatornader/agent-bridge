@@ -1,12 +1,13 @@
 import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { resolveClientConfig } from "../src/client-config.js";
 import { createStore } from "../src/client-runtime.js";
 import { SQLiteBridgeStore } from "../src/sqlite-bridge-store.js";
 import { SyncingBridgeStore } from "../src/syncing-bridge-store.js";
 import { LegacySupabaseRestStore } from "../src/legacy-supabase-store.js";
+import { HttpBridgeStore } from "../src/http-bridge-store.js";
 
 describe("client runtime", () => {
   it("selects all provider-neutral stores", () => {
@@ -14,6 +15,35 @@ describe("client runtime", () => {
     expect(createStore({ ...base, provider: "local" })).toBeInstanceOf(SQLiteBridgeStore);
     expect(createStore({ ...base, provider: "gateway", url: "https://bridge.test", credential: "token" })).toBeInstanceOf(SyncingBridgeStore);
     expect(createStore({ ...base, provider: "legacy-supabase", url: "https://supabase.test", credential: "key" })).toBeInstanceOf(LegacySupabaseRestStore);
+  });
+
+  it("cancels an active gateway request when the store closes", async () => {
+    const fetchImpl = vi.fn((_input: string | URL | Request, init?: RequestInit) => new Promise<Response>((_resolve, reject) => {
+      init?.signal?.addEventListener("abort", () => reject(Object.assign(new Error("aborted"), { name: "AbortError" })), { once: true });
+    }));
+    const store = new HttpBridgeStore({
+      baseUrl: "https://bridge.test",
+      token: "token",
+      principal: { workspace: "w", agent: "a" },
+      fetch: fetchImpl as typeof fetch,
+    });
+    const initializing = store.initialize();
+    await vi.waitFor(() => expect(fetchImpl).toHaveBeenCalledOnce());
+    await store.close();
+    await expect(initializing).rejects.toMatchObject({ code: "store_closed" });
+  });
+  it("rejects a pre-cancelled gateway request without invoking fetch", async () => {
+    const fetchImpl = vi.fn();
+    const store = new HttpBridgeStore({
+      baseUrl: "https://bridge.test", token: "token",
+      principal: { workspace: "w", agent: "a" }, fetch: fetchImpl as typeof fetch,
+    });
+    const controller = new AbortController();
+    controller.abort();
+    await expect(store.initialize({ signal: controller.signal }))
+      .rejects.toMatchObject({ code: "request_cancelled" });
+    expect(fetchImpl).not.toHaveBeenCalled();
+    await store.close();
   });
   it("keeps environment values ahead of the config file", () => {
     expect(resolveClientConfig({ HOME: "/unused", AGENT_BRIDGE_PROVIDER: "local", AGENT_BRIDGE_AGENT: "env-agent", AGENT_BRIDGE_WORKSPACE: "env-workspace" })).toMatchObject({ provider: "local", principal: { agent: "env-agent", workspace: "env-workspace" } });

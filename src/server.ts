@@ -329,6 +329,18 @@ export function createAgentBridgeServer(
             },
           },
         },
+        outputSchema: {
+          type: "object" as const,
+          properties: {
+            entries: { type: "array", items: { type: "object", additionalProperties: true } },
+            source: { type: "string", enum: ["remote", "cache"] },
+            stale: { type: "boolean" }, degraded: { type: "boolean" },
+            acknowledgements: { type: "string", enum: ["authoritative", "unknown"] },
+            lastSyncedAt: { type: ["string", "null"] },
+          },
+          required: ["entries"],
+          additionalProperties: false,
+        },
       },
       {
         name: "ack_context",
@@ -378,7 +390,27 @@ export function createAgentBridgeServer(
           includeExpired: { type: "boolean" }, source: { type: "string" }, since: { type: "string" }, unacknowledgedBy: { type: "string" },
           threadId: { type: "string" }, latest: { type: "boolean" },
         }, additionalProperties: false },
-        outputSchema: { type: "object" as const, properties: { messages: { type: "array", items: { type: "object", additionalProperties: true } }, cursor: { type: "string" } }, required: ["messages"] },
+        outputSchema: { type: "object" as const, properties: {
+          messages: { type: "array", items: { type: "object", additionalProperties: true } },
+          cursor: { type: "string" }, source: { type: "string", enum: ["remote", "cache"] },
+          stale: { type: "boolean" }, degraded: { type: "boolean" },
+          acknowledgements: { type: "string", enum: ["authoritative", "unknown"] },
+          lastSyncedAt: { type: "string" },
+        }, required: ["messages"], additionalProperties: false },
+      }] : []),
+      ...(store?.sync ? [{
+        name: "sync",
+        description: "Manually replay the gateway outbox and refresh the local inbox cache.",
+        inputSchema: { type: "object" as const, properties: {
+          maxPush: { type: "number", minimum: 0, maximum: 1000 },
+          maxPages: { type: "number", minimum: 0, maximum: 100 },
+        }, additionalProperties: false },
+        outputSchema: { type: "object" as const, properties: {
+          online: { type: "boolean" }, pushed: { type: "number" }, deduplicated: { type: "number" },
+          pulled: { type: "number" }, pending: { type: "number" }, blocked: { type: "number" },
+          cached: { type: "number" }, cursor: { type: "string" }, lastSyncedAt: { type: "string" },
+          lastError: { type: "string" }, failureRetryable: { type: "boolean" },
+        }, required: ["online", "pushed", "deduplicated", "pulled", "pending", "blocked", "cached"], additionalProperties: false },
       }] : []),
       ...(deliveryToolsAvailable ? [{
         name: "claim",
@@ -419,7 +451,7 @@ export function createAgentBridgeServer(
     ],
   }));
 
-  server.setRequestHandler(CallToolRequestSchema, async (request) => {
+  server.setRequestHandler(CallToolRequestSchema, async (request, extra) => {
     const { name, arguments: args } = request.params;
 
     try {
@@ -532,17 +564,27 @@ export function createAgentBridgeServer(
           const cachedResult = result as typeof result & {
             source?: "remote" | "cache";
             stale?: boolean;
+            degraded?: boolean;
+            acknowledgements?: "authoritative" | "unknown";
             lastSyncedAt?: string;
           };
           const cacheMetadata = cachedResult.source
             ? {
                 source: cachedResult.source,
                 stale: Boolean(cachedResult.stale),
+                degraded: Boolean(cachedResult.degraded),
+                acknowledgements: cachedResult.acknowledgements ?? "authoritative",
                 lastSyncedAt: cachedResult.lastSyncedAt ?? null,
               }
             : {};
           return {
-            content: [{ type: "text", text: JSON.stringify(entries, null, 2) }],
+            content: [
+              { type: "text", text: JSON.stringify(entries, null, 2) },
+              ...(cachedResult.stale || cachedResult.degraded ? [{
+                type: "text" as const,
+                text: `WARNING: cached Agent Bridge context is ${cachedResult.stale ? "stale" : "degraded"}; acknowledgement authority is ${cachedResult.acknowledgements ?? "unknown"}.`,
+              }] : []),
+            ],
             structuredContent: { entries, ...cacheMetadata },
           };
         }
@@ -581,6 +623,7 @@ export function createAgentBridgeServer(
         const filtered = filterContextRows(data, args, requestedLimit);
         return {
           content: [{ type: "text", text: JSON.stringify(filtered, null, 2) }],
+          structuredContent: { entries: filtered },
         };
       }
 
@@ -639,6 +682,15 @@ export function createAgentBridgeServer(
         const result = await service.history(principal, args ?? {});
         return { content: [{ type: "text", text: JSON.stringify(result) }], structuredContent: result as unknown as Record<string, unknown> };
       }
+      case "sync": {
+        if (!store?.sync) throw new McpError(ErrorCode.InvalidParams, "sync is available only with the gateway provider");
+        const result = await store.sync({
+          maxPush: args?.maxPush as number | undefined,
+          maxPages: args?.maxPages as number | undefined,
+          signal: extra.signal,
+        });
+        return { content: [{ type: "text", text: JSON.stringify(result) }], structuredContent: result as Record<string, unknown> };
+      }
       case "claim": {
         if (!service || !principal) throw new McpError(ErrorCode.InvalidParams, "AGENT_BRIDGE_AGENT is required");
         const result = await service.claim(principal, { leaseMs: args?.leaseMs as number | undefined, maxAttempts: args?.maxAttempts as number | undefined });
@@ -686,8 +738,31 @@ export function createAgentBridgeServer(
     }
   });
 
+  let initialization: Promise<void> | undefined;
+  const initializeStore = () => initialization ??= clientConfig?.provider === "gateway"
+    ? store?.initialize() ?? Promise.resolve()
+    : Promise.resolve();
+  let closure: Promise<void> | undefined;
+  const closeStore = () => closure ??= store?.close?.() ?? Promise.resolve();
+  const connect = server.connect.bind(server);
+  server.connect = async (transport) => {
+    await initializeStore();
+    await connect(transport);
+  };
+  const close = server.close.bind(server);
+  server.close = async () => {
+    let transportError: unknown;
+    try { await close(); } catch (error) { transportError = error; }
+    try { await closeStore(); } catch (error) {
+      if (transportError) throw Object.assign(new Error("failed to close Agent Bridge server"), {
+        errors: [transportError, error],
+      });
+      throw error;
+    }
+    if (transportError) throw transportError;
+  };
   server.onclose = () => {
-    void store?.close?.();
+    void closeStore().catch((error) => server.onerror?.(error instanceof Error ? error : new Error(String(error))));
   };
 
   return server;

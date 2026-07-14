@@ -384,9 +384,9 @@ export class SQLiteEdgeStore {
 
   async list(query: MessageQuery = {}): Promise<MessagePage> {
     await this.ready();
-    if (query.unacknowledgedBy) {
-      throw new Error("offline cache cannot evaluate unacknowledgedBy");
-    }
+    // Receipts are remote authority and are deliberately not mirrored. During
+    // an outage callers may still inspect the cached candidate set, but the
+    // wrapping store must label acknowledgement state as unknown.
     const clauses = ["scope_key=?"];
     const args: SQLInputValue[] = [this.key];
     if (!query.latest) {

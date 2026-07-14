@@ -6,6 +6,11 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and 
 
 ## [Unreleased]
 
+### Added
+
+- Offline inbox and pending fallback now label degraded cache data and unknown acknowledgement state; long-lived MCP clients replay with cancellable bounded backoff and expose manual `sync`.
+- CLI health separates local edge health from remote gateway reachability, and unknown publication outcomes retry idempotently.
+
 ## [0.2.0] - 2026-07-14
 
 ### Added

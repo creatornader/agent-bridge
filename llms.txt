@@ -25,7 +25,9 @@ Agent Bridge carries durable context and executable work between AI agents in di
 ## MCP tools
 
 Compatibility: post_context, get_context, ack_context.
-Reliable messaging: send, history, claim, extend, acknowledge, negative_acknowledge, heartbeat, presence.
+Reliable messaging: send, history, claim, extend, acknowledge, negative_acknowledge, heartbeat, presence, sync.
+
+Gateway MCP clients sync automatically and expose manual sync for bounded outbox replay and inbox cache refresh. Offline unacknowledged results are degraded candidates with unknown acknowledgement state, not proof that messages are unread or that no remote work exists.
 
 ## Identity rule
 
