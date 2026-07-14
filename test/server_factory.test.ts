@@ -62,6 +62,61 @@ describe("createAgentBridgeServer", () => {
     },
     15_000,
   );
+
+  it(
+    "defaults the configured identity across MCP tools without advertising it as required",
+    async () => {
+      const calls: Array<{ url: string; init?: RequestInit }> = [];
+      vi.spyOn(globalThis, "fetch").mockImplementation(async (url, init) => {
+        calls.push({ url: String(url), init });
+        return new Response(JSON.stringify(url.toString().includes("/rpc/") ? 1 : []), {
+          status: 200,
+        });
+      });
+
+      const server = createAgentBridgeServer({
+        supabaseUrl: "https://bridge.example.test/",
+        supabaseKey: "anon-key",
+        agent: "codex",
+      });
+      const client = new Client({ name: "factory-test", version: "0.0.0" });
+      const [clientTransport, serverTransport] =
+        InMemoryTransport.createLinkedPair();
+      await Promise.all([
+        server.connect(serverTransport),
+        client.connect(clientTransport),
+      ]);
+
+      try {
+        const tools = await client.listTools();
+        const postContext = tools.tools.find((tool) => tool.name === "post_context");
+        const ackContext = tools.tools.find((tool) => tool.name === "ack_context");
+
+        expect(postContext?.inputSchema.required).toEqual(["category", "content"]);
+        expect(ackContext?.inputSchema.required).toEqual(["ids"]);
+
+        await client.callTool({
+          name: "post_context",
+          arguments: { category: "goal-update", content: "defaults source" },
+        });
+        await client.callTool({ name: "get_context", arguments: {} });
+        await client.callTool({ name: "ack_context", arguments: { ids: [7] } });
+
+        expect(JSON.parse(String(calls[0]?.init?.body))).toMatchObject({
+          source: "codex",
+        });
+        expect(calls[1]?.url).toContain("acked_by=not.cs.%7Bcodex%7D");
+        expect(JSON.parse(String(calls[2]?.init?.body))).toEqual({
+          entry_ids: [7],
+          agent_name: "codex",
+        });
+      } finally {
+        await client.close();
+        await server.close();
+      }
+    },
+    15_000,
+  );
 });
 
 describe("configFromEnv", () => {

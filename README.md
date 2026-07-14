@@ -117,7 +117,7 @@ for the incident that established this policy.
 
 | Parameter | Type | Required | Description |
 |-----------|------|----------|-------------|
-| `source` | string | yes | Agent name. When `AGENT_BRIDGE_AGENT` is set, this must match it. |
+| `source` | string | no | Defaults to `AGENT_BRIDGE_AGENT` when configured. An explicit value must match it. |
 | `category` | string | yes | Entry type (see [Categories](#categories)) |
 | `content` | string | yes | The context message |
 | `priority` | string | no | `info` (default), `high`, `urgent` |
@@ -144,7 +144,7 @@ for the incident that established this policy.
 | `source` | string | no | Filter by posting agent |
 | `category` | string | no | Filter by category |
 | `project` | string | no | Filter by project scope |
-| `unacked_by` | string | no | Only entries not yet acknowledged by this agent |
+| `unacked_by` | string | no | Only entries not yet acknowledged by this agent. Defaults to `AGENT_BRIDGE_AGENT` when configured. |
 | `limit` | number | no | Max entries (default 20) |
 | `target_agent` | string | no | Include broadcast entries plus entries targeted to this agent |
 | `thread_id` | string | no | Filter by envelope thread id |
@@ -155,7 +155,7 @@ for the incident that established this policy.
 | Parameter | Type | Required | Description |
 |-----------|------|----------|-------------|
 | `ids` | number[] | yes | Entry IDs to acknowledge |
-| `agent` | string | yes | Agent name acknowledging |
+| `agent` | string | no | Defaults to `AGENT_BRIDGE_AGENT` when configured. An explicit value must match it. |
 
 ## CLI Setup
 
@@ -174,7 +174,7 @@ cp bin/agent-bridge ~/.openclaw/scripts/agent-bridge
 
 The CLI reads credentials from `~/.agent-bridge/config` (created in step 3).
 
-When `AGENT_BRIDGE_AGENT` is set for the MCP server or CLI, posts with a different `source` are rejected. This prevents a wrapped runtime from writing rows labelled as another agent after atrib has already signed the original tool arguments.
+When `AGENT_BRIDGE_AGENT` is set, MCP calls default their posting and acknowledgment identity to that value. Explicit identities that differ are rejected. This prevents a wrapped runtime from writing rows labelled as another agent after atrib has already signed the original tool arguments.
 
 ### CLI Reference
 
@@ -260,9 +260,9 @@ For agents that want to use Agent Bridge automatically:
 
 ### On session start
 ```
-1. Check for unacked entries: get_context(unacked_by: "your-agent-name")
+1. Check for unacked entries: get_context()
 2. Process any entries (summarize, act on flags, note config changes)
-3. Acknowledge them: ack_context(ids: [...], agent: "your-agent-name")
+3. Acknowledge them: ack_context(ids: [...])
 ```
 
 ### During work
@@ -277,7 +277,7 @@ Post significant changes:
 ### Scope with projects
 ```
 Use the `project` parameter when context is project-specific:
-  post_context(source: "claude-code", category: "config-change",
+  post_context(category: "config-change",
                content: "Refactored auth module", project: "whop-app")
 ```
 

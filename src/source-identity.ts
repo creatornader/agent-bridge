@@ -4,18 +4,26 @@ function normalizeSource(value: unknown): string | undefined {
   return trimmed ? trimmed : undefined;
 }
 
-export function resolvePostSource(
-  requestedSource: unknown,
-  configuredAgent: unknown
+export function resolveAgentIdentity(
+  requestedAgent: unknown,
+  configuredAgent: unknown,
+  field = "agent",
 ): string | undefined {
-  const source = normalizeSource(requestedSource);
+  const requested = normalizeSource(requestedAgent);
   const configured = normalizeSource(configuredAgent);
 
-  if (source && configured && source !== configured) {
+  if (requested && configured && requested !== configured) {
     throw new Error(
-      `source must match AGENT_BRIDGE_AGENT (${configured}); got ${source}`
+      `${field} must match AGENT_BRIDGE_AGENT (${configured}); got ${requested}`,
     );
   }
 
-  return source ?? configured;
+  return requested ?? configured;
+}
+
+export function resolvePostSource(
+  requestedSource: unknown,
+  configuredAgent: unknown,
+): string | undefined {
+  return resolveAgentIdentity(requestedSource, configuredAgent, "source");
 }

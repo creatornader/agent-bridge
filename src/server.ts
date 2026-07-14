@@ -16,7 +16,7 @@ import {
   filterContextRows,
   mergeEnvelopeMetadata,
 } from "./message-envelope.js";
-import { resolvePostSource } from "./source-identity.js";
+import { resolveAgentIdentity, resolvePostSource } from "./source-identity.js";
 
 export interface AgentBridgeServerConfig {
   supabaseUrl: string;
@@ -162,7 +162,7 @@ export function createAgentBridgeServer(
             source: {
               type: "string",
               description:
-                "Agent posting this entry. Must match AGENT_BRIDGE_AGENT when configured.",
+                "Optional posting agent. Defaults to AGENT_BRIDGE_AGENT when configured; an explicit value must match it.",
             },
             category: {
               type: "string",
@@ -252,7 +252,7 @@ export function createAgentBridgeServer(
                 "Optional. Signed atrib record receipt_id for the wrapper that signed this post_context call. Set automatically by an atrib-signing wrapper; consumers reading the row use this as the informed_by anchor for cross-process causal edges.",
             },
           },
-          required: ["source", "category", "content"],
+          required: ["category", "content"],
         },
       },
       {
@@ -281,7 +281,7 @@ export function createAgentBridgeServer(
             unacked_by: {
               type: "string",
               description:
-                "Only entries NOT yet acknowledged by this agent name",
+                "Only entries NOT yet acknowledged by this agent name. Defaults to AGENT_BRIDGE_AGENT when configured.",
             },
             limit: {
               type: "number",
@@ -317,10 +317,11 @@ export function createAgentBridgeServer(
             },
             agent: {
               type: "string",
-              description: "Agent name acknowledging (e.g. claude-code)",
+              description:
+                "Optional acknowledging agent. Defaults to AGENT_BRIDGE_AGENT when configured; an explicit value must match it.",
             },
           },
-          required: ["ids", "agent"],
+          required: ["ids"],
         },
       },
     ],
@@ -334,6 +335,11 @@ export function createAgentBridgeServer(
         let source: string | undefined;
         try {
           source = resolvePostSource(args?.source, config.agent);
+          if (!source) {
+            throw new Error(
+              "source is required when AGENT_BRIDGE_AGENT is not configured",
+            );
+          }
         } catch (e) {
           throw new McpError(
             ErrorCode.InvalidParams,
@@ -393,9 +399,10 @@ export function createAgentBridgeServer(
           );
         if (args?.project)
           params.push(`project=eq.${encodeURIComponent(String(args.project))}`);
-        if (args?.unacked_by)
+        const unackedBy = args?.unacked_by ?? config.agent;
+        if (unackedBy)
           params.push(
-            `acked_by=not.cs.%7B${encodeURIComponent(String(args.unacked_by))}%7D`,
+            `acked_by=not.cs.%7B${encodeURIComponent(String(unackedBy))}%7D`,
           );
 
         const data = await supabaseRequest(
@@ -409,11 +416,19 @@ export function createAgentBridgeServer(
 
       case "ack_context": {
         const ids = args?.ids as number[];
-        const agent = args?.agent as string;
+        let agent: string | undefined;
+        try {
+          agent = resolveAgentIdentity(args?.agent, config.agent);
+        } catch (e) {
+          throw new McpError(
+            ErrorCode.InvalidParams,
+            e instanceof Error ? e.message : "agent identity mismatch",
+          );
+        }
         if (!ids?.length || !agent) {
           throw new McpError(
             ErrorCode.InvalidParams,
-            "ids (number[]) and agent (string) are required",
+            "ids (number[]) are required; agent is required when AGENT_BRIDGE_AGENT is not configured",
           );
         }
         const data = await supabaseRequest("/rpc/ack_context", {
