@@ -37,12 +37,16 @@ jobs:
       - run: npm run check
 
   postgres:
-    name: postgres integration
+    name: postgres ${{ matrix.postgres }} integration
     runs-on: ubuntu-latest
     timeout-minutes: 10
+    strategy:
+      fail-fast: false
+      matrix:
+        postgres: ["15", "17"]
     services:
       postgres:
-        image: postgres:17
+        image: postgres:${{ matrix.postgres }}
         env:
           POSTGRES_HOST_AUTH_METHOD: trust
           POSTGRES_DB: agent_bridge_test

@@ -35,4 +35,4 @@ Keep side effects idempotent. Agent Bridge provides at-least-once delivery and i
 
 Use `project` only as an optional message label. Workspace remains the tenant and credential boundary. Omit a project filter to read labeled and unlabeled messages, or provide one for an exact match. Reusing a workspace/source idempotency key with a different project is a conflict.
 
-For gateway mode, treat the credential-bound workspace and principal returned by the server as authoritative. Instance identifies one runtime of that same principal; it cannot select a workspace, agent, or scopes. Gateway capabilities expose transaction-bound request authority separately from row isolation.
+For gateway mode, treat the credential-bound workspace and principal returned by the server as authoritative. Instance identifies one runtime of that same principal; it cannot select a workspace, agent, or scopes. A production gateway reports row isolation only when transaction-bound request authority and every database readiness check pass. RLS isolates workspace and principal rows. The service still enforces lease transitions and target-to-delivery membership.

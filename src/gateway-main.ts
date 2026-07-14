@@ -66,12 +66,52 @@ async function main(): Promise<void> {
   const pool = new pg.Pool({
     connectionString: databaseUrl,
     max: poolSize,
+    connectionTimeoutMillis: databaseTimeout,
     query_timeout: databaseTimeout,
     statement_timeout: databaseTimeout,
     application_name: "agent-bridge-gateway",
   });
+  const readinessPool = new pg.Pool({
+    connectionString: databaseUrl,
+    max: 1,
+    connectionTimeoutMillis: databaseTimeout,
+    query_timeout: databaseTimeout,
+    statement_timeout: databaseTimeout,
+    application_name: "agent-bridge-gateway-readiness",
+  });
 
   const store = new PostgresBridgeStore(pool);
+  let readinessCheckedAt = 0;
+  let readinessValue = false;
+  let readinessInFlight: Promise<boolean> | undefined;
+  const probeSchema = async () =>
+    await migrationsReady(readinessPool, migrationPlan) && await runtimeSchemaReady(readinessPool);
+  const schemaReady = (force = false): Promise<boolean> => {
+    if (!force && Date.now() - readinessCheckedAt < 1_000) {
+      return Promise.resolve(readinessValue);
+    }
+    if (readinessInFlight) return readinessInFlight;
+    let current: Promise<boolean>;
+    current = probeSchema()
+      .then((ready) => {
+        readinessValue = ready;
+        readinessCheckedAt = Date.now();
+        return ready;
+      })
+      .finally(() => {
+        if (readinessInFlight === current) readinessInFlight = undefined;
+      });
+    readinessInFlight = current;
+    return current;
+  };
+  try {
+    if (!await schemaReady(true)) {
+      throw new Error("runtime database is not ready for enforced row isolation");
+    }
+  } catch (error) {
+    await Promise.allSettled([pool.end(), readinessPool.end()]);
+    throw error;
+  }
   const gateway = createGateway({
     store,
     credentials: new PostgresCredentialResolver(pool),
@@ -80,8 +120,8 @@ async function main(): Promise<void> {
     allowedOrigins,
     bodyLimitBytes,
     requestDeadlineMs: deadline,
-    ready: async () =>
-      await migrationsReady(pool, migrationPlan) && await runtimeSchemaReady(pool),
+    ready: schemaReady,
+    rowIsolationReady: schemaReady,
   });
 
   gateway.listen(port, host, () => {
@@ -95,7 +135,7 @@ async function main(): Promise<void> {
     await new Promise<void>((resolve, reject) => {
       gateway.close((error) => error ? reject(error) : resolve());
     });
-    await pool.end();
+    await Promise.all([pool.end(), readinessPool.end()]);
   }
 
   process.once("SIGINT", () => void shutdown());

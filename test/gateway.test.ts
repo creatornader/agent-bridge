@@ -230,6 +230,76 @@ describe("authenticated v2 gateway", () => {
     expect(await incompatible.json()).toMatchObject({ error: { code: "unsupported_protocol_version", supportedProtocolVersions: ["2.0", "2.1"] } });
   });
 
+  it("reports row isolation only with request authority and verified schema", async () => {
+    const withoutAuthority = await gateway(undefined, { rowIsolationReady: async () => true });
+    const unavailable = await fetch(`${withoutAuthority}/v2/capabilities`, { headers: auth() });
+    expect(await unavailable.json()).toMatchObject({ requestAuthority: false, rowIsolation: false });
+
+    const allowed = {
+      recordScopeDenial: async () => {},
+      consume: async () => ({
+        allowed: true, policyId: null, limit: 100, remaining: 99, retryAfterSeconds: 0,
+      }),
+    };
+    const withAuthority = await gateway(undefined, {
+      rowIsolationReady: async () => true,
+      requestAuthority: {
+        run: async (credentialId: string, _credentialHash: string, _requestId: string, _signal: AbortSignal, work: any) => work({
+          credential: {
+            id: credentialId,
+            principal: { workspace: "workspace-a", agent: "agent-a" },
+            scopes: AUTHORIZATION_SCOPES,
+          },
+          store: undefined,
+          security: allowed,
+          beginDomainWork: async () => {},
+        }),
+      },
+    });
+    const available = await fetch(`${withAuthority}/v2/capabilities`, { headers: auth() });
+    expect(await available.json()).toMatchObject({ requestAuthority: true, rowIsolation: true });
+
+    const drifted = await gateway(undefined, {
+      rowIsolationReady: async () => false,
+      requestAuthority: {
+        run: async (credentialId: string, _credentialHash: string, _requestId: string, _signal: AbortSignal, work: any) => work({
+          credential: {
+            id: credentialId,
+            principal: { workspace: "workspace-a", agent: "agent-a" },
+            scopes: AUTHORIZATION_SCOPES,
+          },
+          store: undefined,
+          security: allowed,
+          beginDomainWork: async () => {},
+        }),
+      },
+    });
+    const unavailableAfterDrift = await fetch(`${drifted}/v2/capabilities`, { headers: auth() });
+    expect(unavailableAfterDrift.status).toBe(200);
+    expect(await unavailableAfterDrift.json()).toMatchObject({ requestAuthority: true, rowIsolation: false });
+
+    const failedProbe = await gateway(undefined, {
+      rowIsolationReady: async () => { throw new Error("private database failure"); },
+      requestAuthority: {
+        run: async (credentialId: string, _credentialHash: string, _requestId: string, _signal: AbortSignal, work: any) => work({
+          credential: {
+            id: credentialId,
+            principal: { workspace: "workspace-a", agent: "agent-a" },
+            scopes: AUTHORIZATION_SCOPES,
+          },
+          store: undefined,
+          security: allowed,
+          beginDomainWork: async () => {},
+        }),
+      },
+    });
+    const unavailableAfterFailure = await fetch(`${failedProbe}/v2/capabilities`, { headers: auth() });
+    expect(unavailableAfterFailure.status).toBe(200);
+    const failedBody = await unavailableAfterFailure.text();
+    expect(failedBody).not.toContain("private database failure");
+    expect(JSON.parse(failedBody)).toMatchObject({ requestAuthority: true, rowIsolation: false });
+  });
+
   it("returns 404 for 2.1-only routes selected as 2.0", async () => {
     const base = await gateway();
     const routes = [

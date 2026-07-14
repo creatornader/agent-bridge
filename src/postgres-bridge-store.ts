@@ -228,10 +228,10 @@ export class PostgresBridgeStore implements BridgeStore {
          LIMIT 1
        ), delivery_rows AS (
          INSERT INTO agent_bridge.deliveries (
-           id, message_id, workspace, recipient, state, available_at,
+           id, message_id, workspace, publisher, recipient, state, available_at,
            created_at, priority_rank, last_actor, last_action
          )
-         SELECT gen_random_uuid(), inserted.id, inserted.workspace, target, 'pending',
+         SELECT gen_random_uuid(), inserted.id, inserted.workspace, inserted.source, target, 'pending',
                 greatest(now(), coalesce(inserted.delivery_not_before, now())),
                 inserted.created_at,
                 case inserted.priority when 'urgent' then 0 when 'high' then 1 else 2 end,
@@ -417,7 +417,7 @@ export class PostgresBridgeStore implements BridgeStore {
              last_error=NULL, last_actor=$4, last_action='claim'
          WHERE id=$5
          RETURNING *`,
-        [token, owner, options.leaseMs, `${principal.agent}/${owner}`, candidate.rows[0].id],
+        [token, owner, options.leaseMs, principal.agent, candidate.rows[0].id],
       );
       return asDelivery(claimed.rows[0]!);
     });
@@ -465,7 +465,7 @@ export class PostgresBridgeStore implements BridgeStore {
              ELSE available_at
            END,
            last_error=$2, lease_token=NULL, lease_owner=NULL, lease_expires_at=NULL,
-           last_actor=$5,
+           last_actor=$4,
            last_action=CASE
              WHEN $1='acked' THEN 'ack'
              WHEN $1='dead' THEN 'nack_dead'

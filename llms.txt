@@ -28,7 +28,7 @@ History uses mailbox `inbox` (default), `sent`, or `all`. Receipt state is `any`
 ## MCP tools
 
 - `capabilities`: return operations, required scopes, provider-specific enforcement, and supported protocol versions. Gateway access needs an active credential but no named scope for this operation.
-- Production gateway capabilities report `requestAuthority: true` and `rowIsolation: false`. Node hashes the bearer credential before PostgreSQL matches it and derives workspace, principal, and scopes within one request transaction; this is not RLS.
+- Production gateway capabilities report `requestAuthority: true` and `rowIsolation: true` only after the migration and live catalog, role, policy, privilege, and function checks pass. PostgreSQL forces RLS on messages, receipts, deliveries, delivery events, and presence. Lease transitions and target-to-delivery membership remain service-enforced.
 
 Compatibility: post_context, get_context, ack_context.
 Reliable messaging: send, history, claim, extend, acknowledge, negative_acknowledge, heartbeat, presence, sync.
