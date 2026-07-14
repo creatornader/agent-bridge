@@ -8,6 +8,9 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and 
 
 ### Added
 
+- Optional immutable project labels across local, gateway, legacy, CLI, and MCP message paths, with exact project reads and unfiltered cross-project reads.
+- Additive PostgreSQL migration 008, safe local and edge SQLite upgrades, and an owner-only dry-run-first legacy project reconciliation command.
+
 - Offline inbox and pending fallback now label degraded cache data and unknown acknowledgement state; long-lived MCP clients replay with cancellable bounded backoff and expose manual `sync`.
 - CLI health separates local edge health from remote gateway reachability, and unknown publication outcomes retry idempotently.
 

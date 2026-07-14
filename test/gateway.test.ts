@@ -56,6 +56,46 @@ describe("authenticated v2 gateway", () => {
     expect((await history.json()).messages).toHaveLength(1);
   });
 
+  it("binds identity while preserving and filtering optional project labels", async () => {
+    const base = await gateway();
+    for (const body of [
+      { type: "note", content: "alpha", project: "project-alpha" },
+      { type: "note", content: "beta", project: "project-beta" },
+      { type: "note", content: "unlabeled" },
+    ]) {
+      const response = await fetch(`${base}/v2/messages`, {
+        method: "POST",
+        headers: auth(),
+        body: JSON.stringify({ ...body, workspace: "spoofed", source: "spoofed" }),
+      });
+      expect(response.status).toBe(201);
+      expect((await response.json()).message).toMatchObject({
+        workspace: "workspace-a",
+        source: "agent-a",
+        ...(body.project ? { project: body.project } : {}),
+      });
+    }
+
+    const filtered = await fetch(`${base}/v2/history?project=project-alpha`, { headers: auth() });
+    expect((await filtered.json()).messages.map((message: { content: string }) => message.content))
+      .toEqual(["alpha"]);
+
+    const unfiltered = await fetch(`${base}/v2/history`, { headers: auth() });
+    expect((await unfiltered.json()).messages.map((message: { content: string }) => message.content))
+      .toEqual(["alpha", "beta", "unlabeled"]);
+  });
+
+  it("accepts the legacy-compatible asterisk project label", async () => {
+    const base = await gateway();
+    const created = await fetch(`${base}/v2/messages`, {
+      method: "POST",
+      headers: auth(),
+      body: JSON.stringify({ type: "note", content: "legacy scope", project: "*" }),
+    });
+    expect(created.status).toBe(201);
+    expect((await created.json()).message.project).toBe("*");
+  });
+
   it("rejects missing and revoked credentials identically", async () => {
     const base = await gateway({ resolve: async () => null });
     for (const headers of [{}, auth("revoked")]) {

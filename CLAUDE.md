@@ -58,6 +58,9 @@ Sync triggers:
 - Gateway credentials bind workspace and principal. Client source and workspace fields are not trusted.
 - Migrations use the schema-owner `AGENT_BRIDGE_DATABASE_URL`. The gateway requires a restricted `AGENT_BRIDGE_RUNTIME_DATABASE_URL` and never runs migrations at startup.
 - Message content and routing are immutable. Receipts, deliveries, delivery events, and presence use separate records.
+- Project is an optional immutable message label. Workspace remains the tenant and credential boundary; omitted project reads all labels.
+- The legacy Supabase schema is global and has no tenant workspace. Legacy clients report workspace `*` and use project only as a message label.
+- Migration 008 adds project storage. Migration 006 remains unchanged and its imported rows are corrected only by the schema-owner reconciliation command.
 - Cursor pulls are authoritative. Notifications may wake a client but never replace replay.
 - Delivery is at least once through claim, lease, ack, nack, retry, and dead-letter state.
 - Exact idempotent replay deduplicates. Changed content under an existing idempotency key fails.

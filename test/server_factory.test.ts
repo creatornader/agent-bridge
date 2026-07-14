@@ -71,6 +71,55 @@ describe("createAgentBridgeServer", () => {
     15_000,
   );
 
+  it("normalizes legacy post_context project labels and rejects blank content before fetch", async () => {
+    const fetchSpy = vi.spyOn(globalThis, "fetch").mockImplementation(async (_url, init) => {
+      const body = JSON.parse(String(init?.body));
+      return Response.json([{
+        id: 1,
+        ...body,
+        acked_by: [],
+        created_at: "2026-07-14T00:00:00.000Z",
+      }]);
+    });
+    const server = createAgentBridgeServer({
+      supabaseUrl: "https://bridge.example.test",
+      supabaseKey: "anon-key",
+      agent: "codex",
+    });
+    const client = new Client({ name: "factory-test", version: "0.0.0" });
+    const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
+    await Promise.all([server.connect(serverTransport), client.connect(clientTransport)]);
+    try {
+      await expect(client.callTool({
+        name: "post_context",
+        arguments: {
+          category: "goal-update",
+          content: "   ",
+          project: "project-alpha",
+        },
+      })).rejects.toMatchObject({ code: ErrorCode.InvalidParams });
+      expect(fetchSpy).not.toHaveBeenCalled();
+
+      await client.callTool({
+        name: "post_context",
+        arguments: {
+          category: "goal-update",
+          content: "valid context",
+          project: " alpha ",
+        },
+      });
+      expect(fetchSpy).toHaveBeenCalledTimes(1);
+      expect(JSON.parse(String(fetchSpy.mock.calls[0]?.[1]?.body))).toMatchObject({
+        content: "valid context",
+        project: "alpha",
+        metadata: { message_envelope: { project: "alpha" } },
+      });
+    } finally {
+      await client.close();
+      await server.close();
+    }
+  });
+
   it("returns schema-conforming legacy context without a configured identity", async () => {
     vi.spyOn(globalThis, "fetch").mockResolvedValue(Response.json([
       { id: 7, source: "codex", category: "work", content: "ready" },
@@ -300,8 +349,10 @@ describe("createAgentBridgeServer", () => {
     try {
       const tools = await client.listTools();
       expect(tools.tools.map((tool) => tool.name)).toContain("claim");
+      const send = tools.tools.find((tool) => tool.name === "send");
       const history = tools.tools.find((tool) => tool.name === "history");
       const getContext = tools.tools.find((tool) => tool.name === "get_context");
+      const postContext = tools.tools.find((tool) => tool.name === "post_context");
       expect(getContext?.outputSchema?.required).toEqual(["entries"]);
       expect(getContext?.outputSchema?.properties).toMatchObject({
         entries: { type: "array" },
@@ -309,6 +360,10 @@ describe("createAgentBridgeServer", () => {
       });
       expect(history?.inputSchema.properties).toHaveProperty("threadId");
       expect(history?.inputSchema.properties).toHaveProperty("latest");
+      expect(send?.inputSchema.properties).toHaveProperty("project");
+      expect(history?.inputSchema.properties).toHaveProperty("project");
+      expect(getContext?.inputSchema.properties).toHaveProperty("project");
+      expect(postContext?.inputSchema.properties).toHaveProperty("project");
       expect(history?.outputSchema).toBeDefined();
       expect(history?.outputSchema?.properties).toMatchObject({
         stale: { type: "boolean" },
@@ -409,6 +464,48 @@ describe("createAgentBridgeServer", () => {
         arguments: { ids: [3] },
       });
       expect(legacyAck.structuredContent).toMatchObject({ acknowledged: 1 });
+
+      const projectPost = await client.callTool({
+        name: "post_context",
+        arguments: {
+          category: "operational",
+          content: "project alpha context",
+          project: "project-alpha",
+        },
+      });
+      expect(projectPost.structuredContent).toMatchObject({
+        message: { project: "project-alpha" },
+      });
+      await client.callTool({
+        name: "post_context",
+        arguments: { category: "operational", content: "unlabeled context" },
+      });
+      const projectContext = await client.callTool({
+        name: "get_context",
+        arguments: { project: "project-alpha" },
+      });
+      expect((projectContext.structuredContent as any).entries).toMatchObject([{
+        project: "project-alpha",
+        content: "project alpha context",
+      }]);
+      const allContext = await client.callTool({ name: "get_context", arguments: {} });
+      expect((allContext.structuredContent as any).entries.map(
+        (entry: { content: string }) => entry.content,
+      )).toEqual(expect.arrayContaining(["project alpha context", "unlabeled context"]));
+
+      const projectSend = await client.callTool({
+        name: "send",
+        arguments: { type: "note", content: "star project", project: "*" },
+      });
+      expect(projectSend.structuredContent).toMatchObject({ message: { project: "*" } });
+      const projectHistory = await client.callTool({
+        name: "history",
+        arguments: { project: "*" },
+      });
+      expect((projectHistory.structuredContent as any).messages).toMatchObject([{
+        project: "*",
+        content: "star project",
+      }]);
     } finally {
       await client.close();
       await server.close();

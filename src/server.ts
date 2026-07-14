@@ -20,6 +20,8 @@ import { resolveAgentIdentity, resolvePostSource } from "./source-identity.js";
 import { BridgeService } from "./bridge-service.js";
 import {
   BridgeValidationError,
+  validateProject,
+  validateMessageDraft,
   type BridgePrincipal,
   type MessageDraft,
   type RetryPolicy,
@@ -159,9 +161,14 @@ export function createAgentBridgeServer(
   config: AgentBridgeServerConfig,
 ): Server {
   const supabaseRequest = config.supabaseUrl && config.supabaseKey ? buildSupabaseRequest(config as AgentBridgeServerConfig & { supabaseUrl: string; supabaseKey: string }) : undefined;
-  const principal: BridgePrincipal | undefined = config.agent ? { workspace: config.workspace ?? "default", agent: config.agent, instance: config.instance } : undefined;
+  const provider = config.provider ?? (config.gatewayToken ? "gateway" : config.supabaseUrl ? "legacy-supabase" : "local");
+  const principal: BridgePrincipal | undefined = config.agent ? {
+    workspace: provider === "legacy-supabase" ? "*" : config.workspace ?? "default",
+    agent: config.agent,
+    instance: config.instance,
+  } : undefined;
   const clientConfig: ClientConfig | undefined = principal ? {
-    provider: config.provider ?? (config.gatewayToken ? "gateway" : config.supabaseUrl ? "legacy-supabase" : "local"), principal,
+    provider, principal,
     url: config.gatewayUrl ?? config.supabaseUrl, credential: config.gatewayToken ?? config.supabaseKey,
     databasePath: config.databasePath ?? ":memory:", edgeDatabasePath: config.edgeDatabasePath ?? config.databasePath ?? ":memory:", cursorPath: config.cursorPath ?? "", configPath: "",
   } : undefined;
@@ -205,7 +212,7 @@ export function createAgentBridgeServer(
             project: {
               type: "string",
               description:
-                "Scope to a project (e.g. project-a, project-b). Omit for cross-project.",
+                "Optional immutable message label. Omit for an unlabeled message.",
             },
             metadata: {
               type: "object",
@@ -301,7 +308,7 @@ export function createAgentBridgeServer(
             },
             project: {
               type: "string",
-              description: "Filter by project scope",
+              description: "Filter by an exact project label",
             },
             unacked_by: {
               type: "string",
@@ -370,6 +377,7 @@ export function createAgentBridgeServer(
           type: "object" as const,
           properties: {
             source: { type: "string", description: "Optional identity assertion; must match AGENT_BRIDGE_AGENT." },
+            project: { type: "string", description: "Optional immutable message label." },
             type: { type: "string" }, content: { type: "string" }, contentType: { type: "string" },
             data: {}, targets: { type: "array", items: { type: "string" } },
             threadId: { type: "string" }, replyToId: { type: "string" }, correlationId: { type: "string" }, causationId: { type: "string" },
@@ -387,7 +395,7 @@ export function createAgentBridgeServer(
         description: "Read visible Agent Bridge v2 messages after an opaque cursor.",
         inputSchema: { type: "object" as const, properties: {
           cursor: { type: "string" }, limit: { type: "number", minimum: 1, maximum: 200 }, types: { type: "array", items: { type: "string" } },
-          includeExpired: { type: "boolean" }, source: { type: "string" }, since: { type: "string" }, unacknowledgedBy: { type: "string" },
+          includeExpired: { type: "boolean" }, source: { type: "string" }, project: { type: "string" }, since: { type: "string" }, unacknowledgedBy: { type: "string" },
           threadId: { type: "string" }, latest: { type: "boolean" },
         }, additionalProperties: false },
         outputSchema: { type: "object" as const, properties: {
@@ -471,16 +479,33 @@ export function createAgentBridgeServer(
             e instanceof Error ? e.message : "source identity mismatch",
           );
         }
-        const postArgs = { ...(args ?? {}), source };
+        const project = validateProject(args?.project);
+        const postArgs = { ...(args ?? {}), source, project };
         const receiptId = normalizeReceiptId(args?.atrib_receipt_id);
         const envelope = buildMessageEnvelope(postArgs, receiptId);
+        const draft = validateMessageDraft({
+          id: String(envelope.message_id),
+          project,
+          type: String(args?.kind ?? args?.category),
+          content: String(args?.content ?? ""),
+          contentType: String(args?.payload_mime ?? "text/plain"),
+          data: args?.payload as MessageDraft["data"],
+          targets: Array.isArray(args?.target_agents) ? args.target_agents.map(String) : [],
+          threadId: args?.thread_id as string | undefined,
+          replyToId: args?.reply_to_id as string | undefined,
+          priority: (args?.priority ?? "info") as MessageDraft["priority"],
+          expiresAt: args?.expires_at as string | undefined,
+          atribReceiptId: receiptId,
+          informedBy: Array.isArray(args?.informed_by) ? args.informed_by.map(String) : [],
+          metadata: mergeEnvelopeMetadata(args?.metadata, envelope) as MessageDraft["metadata"],
+        });
         const body: Record<string, unknown> = {
           source,
-          category: args?.category,
-          content: args?.content,
-          priority: args?.priority || "info",
-          project: args?.project || null,
-          metadata: mergeEnvelopeMetadata(args?.metadata, envelope),
+          category: draft.type,
+          content: draft.content,
+          priority: draft.priority,
+          project: draft.project ?? null,
+          metadata: draft.metadata,
         };
         // Optional cross-tool causal anchor; written when an atrib-signing
         // wrapper signs this call before forwarding. Format-validated so
@@ -490,24 +515,7 @@ export function createAgentBridgeServer(
         }
         if (!supabaseRequest) {
           if (!service || !principal) throw new McpError(ErrorCode.InternalError, "bridge provider is not configured");
-          if (args?.project && String(args.project) !== principal.workspace) {
-            throw new McpError(ErrorCode.InvalidParams, "project must match AGENT_BRIDGE_WORKSPACE");
-          }
-          const result = await service.publish(principal, {
-            id: String(envelope.message_id),
-            type: String(args?.kind ?? args?.category),
-            content: String(args?.content ?? ""),
-            contentType: String(args?.payload_mime ?? "text/plain"),
-            data: args?.payload as MessageDraft["data"],
-            targets: Array.isArray(args?.target_agents) ? args.target_agents.map(String) : [],
-            threadId: args?.thread_id as string | undefined,
-            replyToId: args?.reply_to_id as string | undefined,
-            priority: (args?.priority ?? "info") as MessageDraft["priority"],
-            expiresAt: args?.expires_at as string | undefined,
-            atribReceiptId: receiptId,
-            informedBy: Array.isArray(args?.informed_by) ? args.informed_by.map(String) : [],
-            metadata: body.metadata as MessageDraft["metadata"],
-          });
+          const result = await service.publish(principal, draft);
           return { content: [{ type: "text", text: JSON.stringify(result) }], structuredContent: result as unknown as Record<string, unknown> };
         }
         if (!supabaseRequest) throw new McpError(ErrorCode.InternalError, "bridge provider is not configured");
@@ -521,6 +529,8 @@ export function createAgentBridgeServer(
       }
 
       case "get_context": {
+        const project = validateProject(args?.project);
+        const contextArgs = { ...(args ?? {}), project };
         const rawLimit = args?.limit;
         if (
           rawLimit !== undefined &&
@@ -531,9 +541,6 @@ export function createAgentBridgeServer(
         const requestedLimit = rawLimit ?? 20;
         if (service && principal) {
           if (!service || !principal) throw new McpError(ErrorCode.InternalError, "bridge provider is not configured");
-          if (args?.project && String(args.project) !== principal.workspace) {
-            return { content: [{ type: "text", text: "[]" }], structuredContent: { entries: [] } };
-          }
           if (args?.target_agent && String(args.target_agent) !== principal.agent) {
             return { content: [{ type: "text", text: "[]" }], structuredContent: { entries: [] } };
           }
@@ -541,6 +548,7 @@ export function createAgentBridgeServer(
             limit: requestedLimit,
             types: args?.kind ? [String(args.kind)] : args?.category ? [String(args.category)] : undefined,
             source: args?.source ? String(args.source) : undefined,
+            project,
             since: args?.since ? String(args.since) : undefined,
             unacknowledgedBy: args?.unacked_by ? String(args.unacked_by) : config.agent,
             threadId: args?.thread_id ? String(args.thread_id) : undefined,
@@ -556,7 +564,7 @@ export function createAgentBridgeServer(
               category: message.type,
               content: message.content,
               priority: message.priority,
-              project: message.workspace,
+              project: message.project ?? null,
               metadata: legacyContextMetadata(message),
               atrib_receipt_id: message.atribReceiptId ?? null,
               created_at: message.createdAt,
@@ -608,8 +616,8 @@ export function createAgentBridgeServer(
           params.push(
             `category=eq.${encodeURIComponent(String(args.category))}`,
           );
-        if (args?.project)
-          params.push(`project=eq.${encodeURIComponent(String(args.project))}`);
+        if (project)
+          params.push(`project=eq.${encodeURIComponent(project)}`);
         const unackedBy = args?.unacked_by ?? config.agent;
         if (unackedBy)
           params.push(
@@ -620,7 +628,7 @@ export function createAgentBridgeServer(
         const data = await supabaseRequest(
           `/shared_context?${params.join("&")}`,
         );
-        const filtered = filterContextRows(data, args, requestedLimit);
+        const filtered = filterContextRows(data, contextArgs, requestedLimit);
         return {
           content: [{ type: "text", text: JSON.stringify(filtered, null, 2) }],
           structuredContent: { entries: filtered },

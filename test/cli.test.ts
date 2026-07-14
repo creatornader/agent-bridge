@@ -202,6 +202,190 @@ describe("agent-bridge CLI", () => {
       pending: 1,
     });
   });
+  it("propagates project labels through send, history, and inbox", () => {
+    const home = mkdtempSync(join(tmpdir(), "agent-bridge-cli-")); homes.push(home);
+    expect(runAt(home, [
+      "send", "--source", "codex", "--project", "alpha", "alpha message",
+    ]).status).toBe(0);
+    expect(runAt(home, [
+      "send", "--source", "codex", "--project", "beta", "beta message",
+    ]).status).toBe(0);
+
+    const history = runAt(home, ["history", "--as", "worker", "--project", "alpha"], {
+      AGENT_BRIDGE_AGENT: undefined,
+    });
+    expect(history.status).toBe(0);
+    expect(JSON.parse(history.stdout).messages).toEqual([
+      expect.objectContaining({ project: "alpha", content: "alpha message" }),
+    ]);
+
+    const inbox = runAt(home, ["inbox", "--as", "worker", "--project", "beta"], {
+      AGENT_BRIDGE_AGENT: undefined,
+    });
+    expect(inbox.status).toBe(0);
+    expect(JSON.parse(inbox.stdout).messages).toEqual([
+      expect.objectContaining({ project: "beta", content: "beta message" }),
+    ]);
+  });
+  it("accepts a star as a project label", () => {
+    const home = mkdtempSync(join(tmpdir(), "agent-bridge-cli-")); homes.push(home);
+    const sent = runAt(home, ["send", "--source", "codex", "--project", "*", "star project"]);
+    expect(sent.status).toBe(0);
+    expect(JSON.parse(sent.stdout).message.project).toBe("*");
+    const history = runAt(home, ["history", "--as", "worker", "--project", "*"], {
+      AGENT_BRIDGE_AGENT: undefined,
+    });
+    expect(history.status).toBe(0);
+    expect(JSON.parse(history.stdout).messages).toEqual([
+      expect.objectContaining({ project: "*", content: "star project" }),
+    ]);
+  });
+  it("filters pending checks by project", () => {
+    const home = mkdtempSync(join(tmpdir(), "agent-bridge-cli-")); homes.push(home);
+    expect(runAt(home, [
+      "send", "--source", "codex", "--project", "alpha", "alpha update",
+    ]).status).toBe(0);
+
+    const unrelated = runAt(home, ["pending", "--project", "beta"], {
+      AGENT_BRIDGE_AGENT: "worker",
+    });
+    expect(unrelated.status).toBe(1);
+    expect(JSON.parse(unrelated.stdout)).toMatchObject({
+      available: false,
+      unread: false,
+    });
+
+    const matching = runAt(home, ["pending", "--project", "alpha"], {
+      AGENT_BRIDGE_AGENT: "worker",
+    });
+    expect(matching.status).toBe(0);
+    expect(JSON.parse(matching.stdout)).toMatchObject({
+      available: true,
+      unread: true,
+    });
+  });
+  it("keeps watch cursors independent between projects", () => {
+    const home = mkdtempSync(join(tmpdir(), "agent-bridge-cli-")); homes.push(home);
+    expect(runAt(home, [
+      "send", "--source", "codex", "--project", "beta", "beta one",
+    ]).status).toBe(0);
+    expect(runAt(home, [
+      "send", "--source", "codex", "--project", "alpha", "alpha one",
+    ]).status).toBe(0);
+    const first = runAt(home, [
+      "watch", "--as", "worker", "--project", "alpha", "--polls", "1",
+    ], { AGENT_BRIDGE_AGENT: undefined });
+    expect(first.status).toBe(0);
+    expect(JSON.parse(first.stdout)).toMatchObject({ project: "alpha", content: "alpha one" });
+
+    const beta = runAt(home, [
+      "watch", "--as", "worker", "--project", "beta", "--polls", "1",
+    ], { AGENT_BRIDGE_AGENT: undefined });
+    expect(beta.status).toBe(0);
+    expect(JSON.parse(beta.stdout)).toMatchObject({ project: "beta", content: "beta one" });
+
+    expect(runAt(home, [
+      "send", "--source", "codex", "--project", "alpha", "alpha two",
+    ]).status).toBe(0);
+    const second = runAt(home, [
+      "watch", "--as", "worker", "--project", "alpha", "--polls", "1",
+    ], { AGENT_BRIDGE_AGENT: undefined });
+    expect(second.status).toBe(0);
+    expect(JSON.parse(second.stdout)).toMatchObject({ project: "alpha", content: "alpha two" });
+    expect(second.stdout).not.toContain("beta one");
+  });
+  it("uses a local workspace override for only that invocation", () => {
+    const home = mkdtempSync(join(tmpdir(), "agent-bridge-cli-")); homes.push(home);
+    const environment = {
+      AGENT_BRIDGE_AGENT: undefined,
+      AGENT_BRIDGE_WORKSPACE: "default-workspace",
+    };
+    expect(runAt(home, [
+      "send", "--source", "codex", "--workspace", "project-workspace", "isolated",
+    ], environment).status).toBe(0);
+
+    const defaultHistory = runAt(home, ["history", "--as", "worker"], environment);
+    expect(defaultHistory.status).toBe(0);
+    expect(JSON.parse(defaultHistory.stdout).messages).toEqual([]);
+
+    const projectHistory = runAt(home, [
+      "history", "--as", "worker", "--workspace", "project-workspace",
+    ], environment);
+    expect(projectHistory.status).toBe(0);
+    expect(JSON.parse(projectHistory.stdout).messages).toEqual([
+      expect.objectContaining({ workspace: "project-workspace", content: "isolated" }),
+    ]);
+  });
+  it("rejects a legacy workspace override because v1 has no tenant boundary", () => {
+    const result = run(["doctor", "--as", "worker", "--workspace", "project-workspace"], {
+      AGENT_BRIDGE_PROVIDER: "legacy-supabase",
+      AGENT_BRIDGE_URL: "http://127.0.0.1:1",
+      AGENT_BRIDGE_KEY: "publishable-key",
+      AGENT_BRIDGE_AGENT: undefined,
+      AGENT_BRIDGE_WORKSPACE: "*",
+    });
+    expect(result.status).toBe(1);
+    expect(result.stderr).toContain(
+      "--workspace is not supported by the global legacy Supabase schema",
+    );
+    expect(result.stderr).not.toContain("network_error");
+  });
+  it("rejects a mismatched gateway workspace before network access", () => {
+    const result = run(["doctor", "--as", "worker", "--workspace", "other"], {
+      AGENT_BRIDGE_PROVIDER: "gateway",
+      AGENT_BRIDGE_URL: "http://127.0.0.1:1",
+      AGENT_BRIDGE_TOKEN: "test-token",
+      AGENT_BRIDGE_AGENT: undefined,
+      AGENT_BRIDGE_WORKSPACE: "acme",
+    });
+    expect(result.status).toBe(1);
+    expect(result.stderr).toContain("--workspace must match the workspace bound to the gateway credential");
+    expect(result.stderr).not.toContain("fetch failed");
+  });
+  it("accepts a gateway workspace assertion that matches the credential", async () => {
+    const home = mkdtempSync(join(tmpdir(), "agent-bridge-cli-")); homes.push(home);
+    const server = createServer((request, response) => {
+      response.setHeader("content-type", "application/json");
+      if (request.url === "/readyz") {
+        response.end(JSON.stringify({ status: "ok" }));
+        return;
+      }
+      if (request.url === "/v2/status") {
+        response.end(JSON.stringify({
+          schemaVersion: "postgres-v2",
+          deliverySupported: true,
+          pending: 0,
+          claimed: 0,
+          retrying: 0,
+          dead: 0,
+          principal: { workspace: "acme", agent: "worker" },
+        }));
+        return;
+      }
+      response.statusCode = 404;
+      response.end(JSON.stringify({ error: { code: "not_found" } }));
+    });
+    await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+    const address = server.address();
+    if (!address || typeof address === "string") throw new Error("test gateway did not bind TCP");
+    try {
+      const result = await runAtAsync(home, ["doctor", "--as", "worker", "--workspace", "acme"], {
+        AGENT_BRIDGE_PROVIDER: "gateway",
+        AGENT_BRIDGE_URL: `http://127.0.0.1:${address.port}`,
+        AGENT_BRIDGE_TOKEN: "test-token",
+        AGENT_BRIDGE_AGENT: undefined,
+        AGENT_BRIDGE_WORKSPACE: "acme",
+      });
+      expect(result.status).toBe(0);
+      expect(JSON.parse(result.stdout)).toMatchObject({
+        provider: "gateway",
+        workspace: "acme",
+        connected: true,
+      });
+    } finally {
+      await new Promise<void>((resolve, reject) => server.close((error) => error ? reject(error) : resolve()));
+    }
+  });
   it("reports unknown when gateway pending has no authoritative data", () => {
     const home = mkdtempSync(join(tmpdir(), "agent-bridge-cli-")); homes.push(home);
     const result = runAt(home, ["pending"], {

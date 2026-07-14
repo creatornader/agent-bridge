@@ -12,6 +12,7 @@ import { BridgeService } from "../src/bridge-service.js";
 import { uuidv7 } from "../src/bridge-domain.js";
 import { hashCredential, PostgresCredentialResolver } from "../src/gateway-auth.js";
 import { legacyNumericMessageId } from "../src/legacy-compat.js";
+import { reconcileLegacyProjects } from "../src/legacy-project-reconciliation.js";
 import {
   loadMigrationPlan,
   migrationsReady,
@@ -171,6 +172,41 @@ integration("PostgreSQL BridgeStore integration", () => {
       content: "changed intent",
       idempotencyKey: "stable-key",
     })).rejects.toMatchObject({ code: "idempotency_conflict", status: 409 });
+  });
+
+  it("preserves, filters, and immutably fingerprints optional project labels", async () => {
+    const service = new BridgeService(new PostgresBridgeStore(pool!));
+    const principal = { workspace: await workspace(), agent: "codex" };
+    const alpha = await service.publish(principal, {
+      type: "agent-bridge.context",
+      content: "alpha",
+      project: "project-alpha",
+      idempotencyKey: "project-key",
+    });
+    const unlabeled = await service.publish(principal, {
+      type: "agent-bridge.context",
+      content: "unlabeled",
+    });
+    const star = await service.publish(principal, {
+      type: "agent-bridge.context",
+      content: "legacy-compatible",
+      project: "*",
+    });
+
+    expect((await service.history(principal, { project: "project-alpha" })).messages)
+      .toEqual([alpha.message]);
+    expect((await service.history(principal)).messages.map((message) => message.id))
+      .toEqual([alpha.message.id, unlabeled.message.id, star.message.id]);
+    await expect(service.publish(principal, {
+      type: "agent-bridge.context",
+      content: "alpha",
+      project: "project-beta",
+      idempotencyKey: "project-key",
+    })).rejects.toMatchObject({ code: "idempotency_conflict", status: 409 });
+    await expect(pool!.query(
+      "UPDATE agent_bridge.messages SET project='changed' WHERE id=$1",
+      [alpha.message.id],
+    )).rejects.toThrow(/immutable/i);
   });
 
   it("advances its cursor across messages invisible to the reader", async () => {
@@ -661,6 +697,73 @@ integration("PostgreSQL BridgeStore integration", () => {
             AND column_name='atrib_receipt_id'
         ) AS present`);
         expect(legacyColumn.rows[0]?.present).toBe(true);
+    });
+  });
+
+  it("reconciles legacy project workspaces into canonical project labels", async () => {
+    await withTemporaryDatabase(async (upgrade) => {
+      const directory = fileURLToPath(new URL("../sql/migrations", import.meta.url));
+      const plan = await loadMigrationPlan(directory);
+      const migrationChecksum = plan.find((migration) => migration.version === 8)?.checksum;
+      expect(migrationChecksum).toMatch(/^[0-9a-f]{64}$/);
+      await upgrade.query(`CREATE TABLE public.shared_context (
+        id bigint PRIMARY KEY,
+        source text NOT NULL,
+        category text NOT NULL,
+        content text NOT NULL,
+        priority text NOT NULL DEFAULT 'info',
+        project text,
+        metadata jsonb NOT NULL DEFAULT '{}'::jsonb,
+        created_at timestamptz NOT NULL DEFAULT now(),
+        acked_by text[] NOT NULL DEFAULT '{}'
+      )`);
+      await upgrade.query(`INSERT INTO public.shared_context
+        (id, source, category, content, project, metadata, acked_by)
+        VALUES
+          (1, 'codex', 'operational', 'star project', '*', '{}'::jsonb, array['worker']),
+          (2, 'codex', 'operational', 'unlabeled', null, '{}'::jsonb, array[]::text[])`);
+      await runMigrations(
+        upgrade,
+        directory,
+      );
+      await upgrade.query(
+        "INSERT INTO agent_bridge.workspaces (id, name) VALUES ('agent-bridge', 'agent-bridge')",
+      );
+
+      expect(await reconcileLegacyProjects(upgrade, { migrationChecksum: migrationChecksum! }))
+        .toEqual({
+          mode: "dry-run",
+          workspace: "agent-bridge",
+          messages: 2,
+          receipts: 1,
+          deliveries: 0,
+          changed: 2,
+        });
+      expect(await reconcileLegacyProjects(upgrade, {
+        migrationChecksum: migrationChecksum!,
+        apply: true,
+      })).toMatchObject({
+        mode: "apply",
+        messages: 2,
+        receipts: 1,
+        changed: 2,
+      });
+
+      const rows = await upgrade.query<{
+        workspace: string;
+        project: string | null;
+        content: string;
+      }>("SELECT workspace, project, content FROM agent_bridge.messages ORDER BY sequence");
+      expect(rows.rows).toEqual([
+        { workspace: "agent-bridge", project: "*", content: "star project" },
+        { workspace: "agent-bridge", project: null, content: "unlabeled" },
+      ]);
+      const receipts = await upgrade.query<{ workspace: string; principal: string }>(
+        "SELECT workspace, principal FROM agent_bridge.receipts",
+      );
+      expect(receipts.rows).toEqual([{ workspace: "agent-bridge", principal: "worker" }]);
+      expect(await reconcileLegacyProjects(upgrade, { migrationChecksum: migrationChecksum! }))
+        .toMatchObject({ changed: 0 });
     });
   });
 

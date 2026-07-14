@@ -57,6 +57,7 @@ CREATE TABLE IF NOT EXISTS edge_inbox (
   remote_sequence TEXT NOT NULL,
   sequence_key TEXT NOT NULL,
   workspace TEXT NOT NULL,
+  project TEXT,
   source TEXT NOT NULL,
   type TEXT NOT NULL,
   thread_id TEXT,
@@ -122,6 +123,7 @@ function canonical(value: JsonValue | undefined): string {
 function intent(message: PendingMessage | BridgeMessage): JsonValue {
   return {
     workspace: message.workspace,
+    project: message.project ?? null,
     source: message.source,
     type: message.type,
     content: message.content,
@@ -179,6 +181,7 @@ export class SQLiteEdgeStore {
   constructor(private readonly path: string, private readonly scope: EdgeScope, private readonly busyTimeoutMs = 2_000) {
     if (path !== ":memory:") mkdirSync(dirname(path), { recursive: true, mode: 0o700 });
     this.db = openDatabase(path);
+    this.db.exec(`PRAGMA busy_timeout = ${Math.max(1, Math.trunc(this.busyTimeoutMs))}`);
     this.restrictFiles();
     this.key = edgeScopeKey(scope);
   }
@@ -197,6 +200,18 @@ export class SQLiteEdgeStore {
   async initialize(): Promise<void> {
     if (this.initialized) return;
     this.db.exec(`PRAGMA busy_timeout = ${Math.max(1, Math.trunc(this.busyTimeoutMs))}; ${schema}`);
+    this.db.exec("BEGIN IMMEDIATE");
+    try {
+      const columns = this.db.prepare("PRAGMA table_info(edge_inbox)").all() as Row[];
+      if (!columns.some((column) => column.name === "project")) {
+        this.db.exec("ALTER TABLE edge_inbox ADD COLUMN project TEXT");
+      }
+      this.db.exec("CREATE INDEX IF NOT EXISTS edge_inbox_project ON edge_inbox(scope_key, project, sequence_key)");
+      this.db.exec("COMMIT");
+    } catch (error) {
+      this.db.exec("ROLLBACK");
+      throw error;
+    }
     this.restrictFiles();
     const endpointHash = createHash("sha256").update(this.scope.endpoint.replace(/\/$/, "")).digest("hex");
     this.db.prepare(`INSERT INTO edge_scopes (scope_key, endpoint_hash, workspace, agent)
@@ -339,10 +354,10 @@ export class SQLiteEdgeStore {
       return;
     }
     this.db.prepare(`INSERT INTO edge_inbox
-      (scope_key, message_id, remote_sequence, sequence_key, workspace, source, type,
+      (scope_key, message_id, remote_sequence, sequence_key, workspace, project, source, type,
        thread_id, created_at, expires_at, message_json)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`)
-      .run(this.key, message.id, message.sequence, key, message.workspace, message.source,
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`)
+      .run(this.key, message.id, message.sequence, key, message.workspace, message.project ?? null, message.source,
         message.type, message.threadId ?? null, message.createdAt, message.expiresAt ?? null, serialized);
   }
 
@@ -404,6 +419,10 @@ export class SQLiteEdgeStore {
     if (query.source) {
       clauses.push("source=?");
       args.push(query.source);
+    }
+    if (query.project) {
+      clauses.push("project=?");
+      args.push(query.project);
     }
     if (query.since) {
       clauses.push("created_at>=?");

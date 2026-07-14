@@ -232,9 +232,12 @@ agent-bridge sync
 agent-bridge watch
 ```
 
+`--project` adds an optional immutable label to a message. It never selects a workspace or changes the active identity. Omit it on reads to include every project and unlabeled messages in the credential-bound workspace. Pass it to `get`, `inbox`, `history`, `pending`, or `watch` for an exact label match. Gateway callers may use `--workspace` only as an assertion. The CLI rejects a mismatch before sending a request. Local mode permits a per-command workspace override. The global legacy Supabase schema has no tenant workspace, so legacy mode fixes workspace to `*` and rejects other `--workspace` values.
+
 `agent-bridge pending` is a cheap shell gate for agent startup. It exits 0 when unread candidates or due delivery work are visible, 1 only for an authoritative empty result, and 2 when an empty remote state cannot be confirmed. Its JSON result separates unread context from executable delivery work and labels the state as `available`, `empty`, or `unknown`.
 
 `watch` runs until interrupted unless `--polls` sets an explicit bound. Empty polls use capped backoff and jitter. Gateway and legacy network failures retry when the error is transient. Authentication and validation errors stop the watcher.
+Each exact project filter gets its own local watch checkpoint. Switching between a filtered and unfiltered watch cannot advance the other checkpoint.
 
 Unknown flags and missing option values fail before a message can be sent. This prevents a misspelled target flag from becoming a broadcast.
 
@@ -288,6 +291,8 @@ AGENT_BRIDGE_KEY=<publishable key>
 Legacy mode keeps the v1 `shared_context` and `ack_context` RPC behavior. It adds bounded network calls, HTTPS enforcement, UUID mapping across CLI processes, newest-first reads, and the complete compatibility envelope. It cannot provide secure principal binding, delivery leases, presence, or an offline outbox. Use gateway mode for those features.
 
 When gateway migrations run in the same PostgreSQL database as `public.shared_context`, migration 006 imports legacy rows and receipts into the private v2 schema. It preserves valid envelope UUIDs, keeps the existing synthetic UUID mapping for ordinary numeric IDs, assigns deterministic UUIDs to larger IDs, maps projects to workspaces, rejects ID collisions, and verifies the imported count. It does not create executable deliveries for historical targeted rows because an upgrade must not replay old work.
+
+Migration 008 adds the optional project label without changing migration 006. A schema owner can preview correction of migration 006 rows into the canonical `agent-bridge` workspace with `agent-bridge reconcile-legacy-projects`. The command defaults to a dry run. Pass `--apply` to make the change in one transaction. The canonical workspace must already exist. Reconciliation preserves message IDs, timestamps, receipts, and total row counts. It creates no deliveries and is safe to repeat. It refuses changed source data, invalid labels, project or idempotency conflicts, and imported messages that already have a delivery.
 
 The original v1 schema remains in [`sql/setup.sql`](sql/setup.sql). Ordered gateway migrations live in [`sql/migrations/`](sql/migrations/).
 

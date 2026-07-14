@@ -109,6 +109,7 @@ export class HttpBridgeStore implements BridgeStore {
     if (query.limit) params.set("limit", String(query.limit));
     if (query.includeExpired) params.set("includeExpired", "true");
     if (query.source) params.set("source", query.source);
+    if (query.project) params.set("project", query.project);
     if (query.since) params.set("since", query.since);
     if (query.unacknowledgedBy) params.set("unacknowledgedBy", query.unacknowledgedBy);
     if (query.threadId) params.set("threadId", query.threadId);
