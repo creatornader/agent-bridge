@@ -8,7 +8,9 @@
     "skipLibCheck": true,
     "outDir": "dist",
     "rootDir": "src",
-    "declaration": true
+    "declaration": true,
+    "ignoreDeprecations": "6.0",
+    "types": ["node"]
   },
   "include": ["src"]
 }

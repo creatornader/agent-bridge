@@ -1,0 +1,20 @@
+{
+  "schema": "agent-bridge.runtime-manifest.v1",
+  "runtime": "claude-code",
+  "transport": "stdio",
+  "command": "agent-bridge-mcp",
+  "identity": { "source": "env", "variable": "AGENT_BRIDGE_AGENT", "required": true },
+  "instance": { "source": "env", "variable": "AGENT_BRIDGE_INSTANCE", "required": true },
+  "backendConfig": { "source": "env", "variable": "AGENT_BRIDGE_CONFIG", "perClient": true },
+  "configLocations": ["~/.claude.json", "~/.agent-bridge/config"],
+  "install": {
+    "method": "native-cli",
+    "command": ["claude", "mcp", "add", "--scope", "user", "agent-bridge", "-e", "AGENT_BRIDGE_AGENT={{identity}}", "-e", "AGENT_BRIDGE_INSTANCE={{instance}}", "-e", "AGENT_BRIDGE_CONFIG={{backendConfig}}", "--", "agent-bridge-mcp"],
+    "identityValue": "operator-selected",
+    "instanceValue": "installer-generated",
+    "backendConfigValue": "installer-generated",
+    "restartRequired": true
+  },
+  "wakeModes": ["poll"],
+  "healthCommand": ["agent-bridge", "doctor", "--json"]
+}

@@ -6,8 +6,8 @@ import {
   ListToolsRequestSchema,
   McpError,
 } from "@modelcontextprotocol/sdk/types.js";
-import { existsSync, readFileSync } from "node:fs";
 import { homedir } from "node:os";
+import { createRequire } from "node:module";
 import { join } from "node:path";
 
 import { normalizeReceiptId } from "./atrib-receipt.js";
@@ -17,12 +17,38 @@ import {
   mergeEnvelopeMetadata,
 } from "./message-envelope.js";
 import { resolveAgentIdentity, resolvePostSource } from "./source-identity.js";
+import { BridgeService } from "./bridge-service.js";
+import {
+  BridgeValidationError,
+  type BridgePrincipal,
+  type MessageDraft,
+  type RetryPolicy,
+} from "./bridge-domain.js";
+import { createStore } from "./client-runtime.js";
+import { legacyContextMetadata, legacyNumericMessageId } from "./legacy-compat.js";
+import {
+  readClientConfigFile,
+  resolveClientConfig,
+  type ClientConfig,
+  type ClientEnvironment,
+  type ClientProvider,
+} from "./client-config.js";
 
 export interface AgentBridgeServerConfig {
-  supabaseUrl: string;
-  supabaseKey: string;
+  supabaseUrl?: string;
+  supabaseKey?: string;
   agent?: string;
+  provider?: ClientProvider;
+  workspace?: string;
+  instance?: string;
+  databasePath?: string;
+  edgeDatabasePath?: string;
+  cursorPath?: string;
+  gatewayUrl?: string;
+  gatewayToken?: string;
 }
+
+const packageVersion = (createRequire(import.meta.url)("../package.json") as { version: string }).version;
 
 export interface AgentBridgeServerEnv {
   AGENT_BRIDGE_URL?: string;
@@ -30,6 +56,11 @@ export interface AgentBridgeServerEnv {
   AGENT_BRIDGE_AGENT?: string;
   AGENT_BRIDGE_CONFIG?: string;
   HOME?: string;
+  AGENT_BRIDGE_PROVIDER?: string;
+  AGENT_BRIDGE_TOKEN?: string;
+  AGENT_BRIDGE_WORKSPACE?: string;
+  AGENT_BRIDGE_INSTANCE?: string;
+  AGENT_BRIDGE_DB?: string;
 }
 
 function normalizedConfigValue(value: string | undefined): string | undefined {
@@ -44,64 +75,39 @@ function defaultConfigPath(env: AgentBridgeServerEnv): string {
   );
 }
 
-function unquoteShellValue(value: string): string {
-  const trimmed = value.trim();
-  if (trimmed.length < 2) {
-    return trimmed;
-  }
-
-  const first = trimmed[0];
-  const last = trimmed[trimmed.length - 1];
-  if ((first === '"' && last === '"') || (first === "'" && last === "'")) {
-    return trimmed.slice(1, -1);
-  }
-
-  return trimmed;
-}
-
-function readConfigFile(
-  configPath: string,
-): Pick<Partial<AgentBridgeServerEnv>, "AGENT_BRIDGE_URL" | "AGENT_BRIDGE_KEY"> {
-  if (!existsSync(configPath)) {
-    return {};
-  }
-
-  const parsed: Pick<
-    Partial<AgentBridgeServerEnv>,
-    "AGENT_BRIDGE_URL" | "AGENT_BRIDGE_KEY"
-  > = {};
-
-  for (const line of readFileSync(configPath, "utf8").split(/\r?\n/)) {
-    const trimmed = line.trim();
-    if (!trimmed || trimmed.startsWith("#")) {
-      continue;
-    }
-
-    const separator = trimmed.indexOf("=");
-    if (separator === -1) {
-      continue;
-    }
-
-    const key = trimmed.slice(0, separator).trim();
-    const value = unquoteShellValue(trimmed.slice(separator + 1));
-    if (key === "AGENT_BRIDGE_URL" || key === "AGENT_BRIDGE_KEY") {
-      parsed[key] = value;
-    }
-  }
-
-  return parsed;
-}
-
 export function configFromEnv(
   env: AgentBridgeServerEnv = process.env,
 ): AgentBridgeServerConfig {
-  const fileConfig = readConfigFile(defaultConfigPath(env));
+  const sharedFile = readClientConfigFile(defaultConfigPath(env));
+  const value = (key: keyof AgentBridgeServerEnv) =>
+    normalizedConfigValue(env[key]) ?? normalizedConfigValue(sharedFile[key]);
+  const runtimeAgent = normalizedConfigValue(env.AGENT_BRIDGE_AGENT);
+  const rawProvider = normalizedConfigValue(env.AGENT_BRIDGE_PROVIDER) ??
+    normalizedConfigValue(sharedFile.AGENT_BRIDGE_PROVIDER);
+  const provider = rawProvider === "legacy" || rawProvider === "supabase"
+    ? "legacy-supabase"
+    : rawProvider ?? (value("AGENT_BRIDGE_TOKEN") ? "gateway" : "legacy-supabase");
+  if (!(["local", "gateway", "legacy-supabase"] as string[]).includes(provider)) {
+    throw new Error(`Unsupported AGENT_BRIDGE_PROVIDER: ${rawProvider}`);
+  }
+  if (provider === "local" || provider === "gateway") {
+    const client = resolveClientConfig(env as ClientEnvironment);
+    return {
+      provider: client.provider,
+      agent: client.principal.agent,
+      workspace: client.principal.workspace,
+      instance: client.principal.instance,
+      databasePath: client.databasePath,
+      edgeDatabasePath: client.edgeDatabasePath,
+      cursorPath: client.cursorPath,
+      gatewayUrl: client.provider === "gateway" ? client.url : undefined,
+      gatewayToken: client.provider === "gateway" ? client.credential : undefined,
+    };
+  }
   const supabaseUrl =
-    normalizedConfigValue(env.AGENT_BRIDGE_URL) ??
-    normalizedConfigValue(fileConfig.AGENT_BRIDGE_URL);
+    value("AGENT_BRIDGE_URL");
   const supabaseKey =
-    normalizedConfigValue(env.AGENT_BRIDGE_KEY) ??
-    normalizedConfigValue(fileConfig.AGENT_BRIDGE_KEY);
+    value("AGENT_BRIDGE_KEY");
   if (!supabaseUrl || !supabaseKey) {
     throw new Error(
       "Missing AGENT_BRIDGE_URL or AGENT_BRIDGE_KEY environment variables or ~/.agent-bridge/config",
@@ -110,11 +116,19 @@ export function configFromEnv(
   return {
     supabaseUrl,
     supabaseKey,
-    agent: normalizedConfigValue(env.AGENT_BRIDGE_AGENT),
+    agent: runtimeAgent,
+    provider: provider as ClientProvider,
+    workspace: value("AGENT_BRIDGE_WORKSPACE") ?? "*",
+    instance: normalizedConfigValue(env.AGENT_BRIDGE_INSTANCE),
   };
 }
 
-function buildSupabaseRequest(config: AgentBridgeServerConfig) {
+function buildSupabaseRequest(config: AgentBridgeServerConfig & { supabaseUrl: string; supabaseKey: string }) {
+  const parsed = new URL(config.supabaseUrl);
+  const loopback = parsed.hostname === "localhost" || parsed.hostname === "127.0.0.1" || parsed.hostname === "[::1]";
+  if (parsed.protocol !== "https:" && !(parsed.protocol === "http:" && loopback)) {
+    throw new Error("Agent Bridge requires HTTPS for non-loopback legacy providers");
+  }
   const restUrl = `${config.supabaseUrl.replace(/\/$/, "")}/rest/v1`;
   const headers = {
     apikey: config.supabaseKey,
@@ -130,11 +144,11 @@ function buildSupabaseRequest(config: AgentBridgeServerConfig) {
     const url = `${restUrl}${path}`;
     const res = await fetch(url, {
       ...options,
+      signal: options.signal ?? AbortSignal.timeout(10_000),
       headers: { ...headers, ...(options.headers as Record<string, string>) },
     });
     if (!res.ok) {
-      const body = await res.text();
-      throw new Error(`Supabase request failed (${res.status}): ${body}`);
+      throw new Error(`Supabase request failed (${res.status})`);
     }
     const text = await res.text();
     return text ? JSON.parse(text) : null;
@@ -144,9 +158,20 @@ function buildSupabaseRequest(config: AgentBridgeServerConfig) {
 export function createAgentBridgeServer(
   config: AgentBridgeServerConfig,
 ): Server {
-  const supabaseRequest = buildSupabaseRequest(config);
+  const supabaseRequest = config.supabaseUrl && config.supabaseKey ? buildSupabaseRequest(config as AgentBridgeServerConfig & { supabaseUrl: string; supabaseKey: string }) : undefined;
+  const principal: BridgePrincipal | undefined = config.agent ? { workspace: config.workspace ?? "default", agent: config.agent, instance: config.instance } : undefined;
+  const clientConfig: ClientConfig | undefined = principal ? {
+    provider: config.provider ?? (config.gatewayToken ? "gateway" : config.supabaseUrl ? "legacy-supabase" : "local"), principal,
+    url: config.gatewayUrl ?? config.supabaseUrl, credential: config.gatewayToken ?? config.supabaseKey,
+    databasePath: config.databasePath ?? ":memory:", edgeDatabasePath: config.edgeDatabasePath ?? config.databasePath ?? ":memory:", cursorPath: config.cursorPath ?? "", configPath: "",
+  } : undefined;
+  const store = clientConfig ? createStore(clientConfig) : undefined;
+  const service = store ? new BridgeService(store) : undefined;
+  const deliveryToolsAvailable = Boolean(
+    service && clientConfig?.provider !== "legacy-supabase",
+  );
   const server = new Server(
-    { name: "agent-bridge", version: "1.0.0" },
+    { name: "agent-bridge", version: packageVersion },
     { capabilities: { tools: {} } },
   );
 
@@ -286,6 +311,8 @@ export function createAgentBridgeServer(
             limit: {
               type: "number",
               description: "Max entries to return (default 20)",
+              minimum: 1,
+              maximum: 200,
             },
             target_agent: {
               type: "string",
@@ -312,8 +339,8 @@ export function createAgentBridgeServer(
           properties: {
             ids: {
               type: "array",
-              items: { type: "number" },
-              description: "Entry IDs to acknowledge",
+              items: { anyOf: [{ type: "number" }, { type: "string" }] },
+              description: "Legacy numeric entry IDs or v2 UUID message IDs to acknowledge",
             },
             agent: {
               type: "string",
@@ -324,13 +351,79 @@ export function createAgentBridgeServer(
           required: ["ids"],
         },
       },
+      ...(service ? [{
+        name: "send",
+        description: "Create an immutable Agent Bridge v2 message.",
+        inputSchema: {
+          type: "object" as const,
+          properties: {
+            source: { type: "string", description: "Optional identity assertion; must match AGENT_BRIDGE_AGENT." },
+            type: { type: "string" }, content: { type: "string" }, contentType: { type: "string" },
+            data: {}, targets: { type: "array", items: { type: "string" } },
+            threadId: { type: "string" }, replyToId: { type: "string" }, correlationId: { type: "string" }, causationId: { type: "string" },
+            priority: { type: "string", enum: ["info", "high", "urgent"] }, expiresAt: { type: "string" },
+            idempotencyKey: { type: "string" }, atribReceiptId: { type: "string" },
+            informedBy: { type: "array", items: { type: "string" } }, metadata: {},
+          },
+          required: ["type", "content"],
+          additionalProperties: false,
+        },
+        outputSchema: { type: "object" as const, properties: { created: { type: "boolean" }, message: { type: "object", additionalProperties: true } }, required: ["created", "message"] },
+      },
+      {
+        name: "history",
+        description: "Read visible Agent Bridge v2 messages after an opaque cursor.",
+        inputSchema: { type: "object" as const, properties: {
+          cursor: { type: "string" }, limit: { type: "number", minimum: 1, maximum: 200 }, types: { type: "array", items: { type: "string" } },
+          includeExpired: { type: "boolean" }, source: { type: "string" }, since: { type: "string" }, unacknowledgedBy: { type: "string" },
+          threadId: { type: "string" }, latest: { type: "boolean" },
+        }, additionalProperties: false },
+        outputSchema: { type: "object" as const, properties: { messages: { type: "array", items: { type: "object", additionalProperties: true } }, cursor: { type: "string" } }, required: ["messages"] },
+      }] : []),
+      ...(deliveryToolsAvailable ? [{
+        name: "claim",
+        description: "Atomically claim the next targeted delivery.",
+        inputSchema: { type: "object" as const, properties: { leaseMs: { type: "number" }, maxAttempts: { type: "number" } }, additionalProperties: false },
+        outputSchema: { type: "object" as const, additionalProperties: true },
+      },
+      ...["extend", "acknowledge", "negative_acknowledge"].map((name) => ({
+        name,
+        description: `Agent Bridge v2 ${name.replace(/_/g, " ")} delivery operation.`,
+        inputSchema: {
+          type: "object" as const,
+          properties: {
+            deliveryId: { type: "string" }, leaseToken: { type: "string" },
+            ...(name === "extend" ? { leaseMs: { type: "number" } } : {}),
+            ...(name === "negative_acknowledge" ? { error: { type: "string" }, dead: { type: "boolean" }, retryPolicy: { type: "object", additionalProperties: true } } : {}),
+          },
+          required: ["deliveryId", "leaseToken"],
+          additionalProperties: false,
+        },
+        outputSchema: { type: "object" as const, additionalProperties: true },
+      })),
+      {
+        name: "heartbeat",
+        description: "Publish a leased runtime presence record and capabilities.",
+        inputSchema: { type: "object" as const, properties: {
+          leaseMs: { type: "number", minimum: 1000, maximum: 900000 }, runtimeType: { type: "string" },
+          capabilities: { type: "array", items: { type: "string" } },
+        }, additionalProperties: false },
+        outputSchema: { type: "object" as const, additionalProperties: true },
+      },
+      {
+        name: "presence",
+        description: "List active agent runtime instances in this workspace.",
+        inputSchema: { type: "object" as const, properties: {}, additionalProperties: false },
+        outputSchema: { type: "object" as const, properties: { agents: { type: "array", items: { type: "object", additionalProperties: true } } }, required: ["agents"] },
+      }] : []),
     ],
   }));
 
   server.setRequestHandler(CallToolRequestSchema, async (request) => {
     const { name, arguments: args } = request.params;
 
-    switch (name) {
+    try {
+      switch (name) {
       case "post_context": {
         let source: string | undefined;
         try {
@@ -363,6 +456,29 @@ export function createAgentBridgeServer(
         if (receiptId) {
           body.atrib_receipt_id = receiptId;
         }
+        if (!supabaseRequest) {
+          if (!service || !principal) throw new McpError(ErrorCode.InternalError, "bridge provider is not configured");
+          if (args?.project && String(args.project) !== principal.workspace) {
+            throw new McpError(ErrorCode.InvalidParams, "project must match AGENT_BRIDGE_WORKSPACE");
+          }
+          const result = await service.publish(principal, {
+            id: String(envelope.message_id),
+            type: String(args?.kind ?? args?.category),
+            content: String(args?.content ?? ""),
+            contentType: String(args?.payload_mime ?? "text/plain"),
+            data: args?.payload as MessageDraft["data"],
+            targets: Array.isArray(args?.target_agents) ? args.target_agents.map(String) : [],
+            threadId: args?.thread_id as string | undefined,
+            replyToId: args?.reply_to_id as string | undefined,
+            priority: (args?.priority ?? "info") as MessageDraft["priority"],
+            expiresAt: args?.expires_at as string | undefined,
+            atribReceiptId: receiptId,
+            informedBy: Array.isArray(args?.informed_by) ? args.informed_by.map(String) : [],
+            metadata: body.metadata as MessageDraft["metadata"],
+          });
+          return { content: [{ type: "text", text: JSON.stringify(result) }], structuredContent: result as unknown as Record<string, unknown> };
+        }
+        if (!supabaseRequest) throw new McpError(ErrorCode.InternalError, "bridge provider is not configured");
         const data = await supabaseRequest("/shared_context", {
           method: "POST",
           body: JSON.stringify(body),
@@ -373,10 +489,63 @@ export function createAgentBridgeServer(
       }
 
       case "get_context": {
-        const requestedLimit =
-          typeof args?.limit === "number" && args.limit > 0
-            ? Math.trunc(args.limit)
-            : 20;
+        const rawLimit = args?.limit;
+        if (
+          rawLimit !== undefined &&
+          (typeof rawLimit !== "number" || !Number.isSafeInteger(rawLimit) || rawLimit < 1 || rawLimit > 200)
+        ) {
+          throw new McpError(ErrorCode.InvalidParams, "limit must be between 1 and 200");
+        }
+        const requestedLimit = rawLimit ?? 20;
+        if (service && principal) {
+          if (!service || !principal) throw new McpError(ErrorCode.InternalError, "bridge provider is not configured");
+          if (args?.project && String(args.project) !== principal.workspace) {
+            return { content: [{ type: "text", text: "[]" }], structuredContent: { entries: [] } };
+          }
+          if (args?.target_agent && String(args.target_agent) !== principal.agent) {
+            return { content: [{ type: "text", text: "[]" }], structuredContent: { entries: [] } };
+          }
+          const result = await service.history(principal, {
+            limit: requestedLimit,
+            types: args?.kind ? [String(args.kind)] : args?.category ? [String(args.category)] : undefined,
+            source: args?.source ? String(args.source) : undefined,
+            since: args?.since ? String(args.since) : undefined,
+            unacknowledgedBy: args?.unacked_by ? String(args.unacked_by) : config.agent,
+            threadId: args?.thread_id ? String(args.thread_id) : undefined,
+            latest: true,
+          });
+          const entries = result.messages
+            .slice(0, requestedLimit)
+            .map((message) => ({
+              id: clientConfig?.provider === "legacy-supabase" && /^\d+$/.test(message.sequence)
+                ? Number.isSafeInteger(Number(message.sequence)) ? Number(message.sequence) : message.sequence
+                : message.id,
+              source: message.source,
+              category: message.type,
+              content: message.content,
+              priority: message.priority,
+              project: message.workspace,
+              metadata: legacyContextMetadata(message),
+              atrib_receipt_id: message.atribReceiptId ?? null,
+              created_at: message.createdAt,
+            }));
+          const cachedResult = result as typeof result & {
+            source?: "remote" | "cache";
+            stale?: boolean;
+            lastSyncedAt?: string;
+          };
+          const cacheMetadata = cachedResult.source
+            ? {
+                source: cachedResult.source,
+                stale: Boolean(cachedResult.stale),
+                lastSyncedAt: cachedResult.lastSyncedAt ?? null,
+              }
+            : {};
+          return {
+            content: [{ type: "text", text: JSON.stringify(entries, null, 2) }],
+            structuredContent: { entries, ...cacheMetadata },
+          };
+        }
         const hasEnvelopeFilter = Boolean(
           args?.target_agent || args?.thread_id || args?.kind,
         );
@@ -405,6 +574,7 @@ export function createAgentBridgeServer(
             `acked_by=not.cs.%7B${encodeURIComponent(String(unackedBy))}%7D`,
           );
 
+        if (!supabaseRequest) throw new McpError(ErrorCode.InternalError, "bridge provider is not configured");
         const data = await supabaseRequest(
           `/shared_context?${params.join("&")}`,
         );
@@ -415,7 +585,7 @@ export function createAgentBridgeServer(
       }
 
       case "ack_context": {
-        const ids = args?.ids as number[];
+        const ids = args?.ids as unknown[];
         let agent: string | undefined;
         try {
           agent = resolveAgentIdentity(args?.agent, config.agent);
@@ -428,12 +598,25 @@ export function createAgentBridgeServer(
         if (!ids?.length || !agent) {
           throw new McpError(
             ErrorCode.InvalidParams,
-            "ids (number[]) are required; agent is required when AGENT_BRIDGE_AGENT is not configured",
+            "ids are required; agent is required when AGENT_BRIDGE_AGENT is not configured",
           );
         }
+        if (service && principal) {
+          if (!service || !principal) throw new McpError(ErrorCode.InternalError, "bridge provider is not configured");
+          const rawIds = ids.map(String);
+          const acknowledged = clientConfig?.provider === "legacy-supabase" &&
+              store?.recordLegacyReceipt && rawIds.every((id) => /^\d+$/.test(id))
+            ? await store.recordLegacyReceipt(rawIds, principal.agent)
+            : await service.acknowledge(
+                principal,
+                ids.map((id) => legacyNumericMessageId(id as string | number)),
+              );
+          return { content: [{ type: "text", text: JSON.stringify({ acknowledged, agent }) }], structuredContent: { acknowledged, agent } };
+        }
+        if (!supabaseRequest) throw new McpError(ErrorCode.InternalError, "bridge provider is not configured");
         const data = await supabaseRequest("/rpc/ack_context", {
           method: "POST",
-          body: JSON.stringify({ entry_ids: ids, agent_name: agent }),
+          body: JSON.stringify({ entry_ids: ids.map(String), agent_name: agent }),
         });
         return {
           content: [
@@ -445,10 +628,67 @@ export function createAgentBridgeServer(
         };
       }
 
+      case "send": {
+        if (!service || !principal) throw new McpError(ErrorCode.InvalidParams, "AGENT_BRIDGE_AGENT is required");
+        try { resolvePostSource(args?.source, principal.agent); } catch (error) { throw new McpError(ErrorCode.InvalidParams, error instanceof Error ? error.message : "source identity mismatch"); }
+        const result = await service.publish(principal, args as unknown as MessageDraft);
+        return { content: [{ type: "text", text: JSON.stringify(result) }], structuredContent: result as unknown as Record<string, unknown> };
+      }
+      case "history": {
+        if (!service || !principal) throw new McpError(ErrorCode.InvalidParams, "AGENT_BRIDGE_AGENT is required");
+        const result = await service.history(principal, args ?? {});
+        return { content: [{ type: "text", text: JSON.stringify(result) }], structuredContent: result as unknown as Record<string, unknown> };
+      }
+      case "claim": {
+        if (!service || !principal) throw new McpError(ErrorCode.InvalidParams, "AGENT_BRIDGE_AGENT is required");
+        const result = await service.claim(principal, { leaseMs: args?.leaseMs as number | undefined, maxAttempts: args?.maxAttempts as number | undefined });
+        return { content: [{ type: "text", text: JSON.stringify(result) }], structuredContent: (result ?? { delivery: null }) as unknown as Record<string, unknown> };
+      }
+      case "extend": case "acknowledge": case "negative_acknowledge": {
+        if (!service || !principal) throw new McpError(ErrorCode.InvalidParams, "AGENT_BRIDGE_AGENT is required");
+        const id = String(args?.deliveryId ?? ""), token = String(args?.leaseToken ?? "");
+        const result = name === "extend" ? await service.extend(principal, id, token, args?.leaseMs as number | undefined)
+          : name === "acknowledge" ? await service.ack(principal, id, token)
+          : await service.nack(
+            principal,
+            id,
+            token,
+            (args?.error ?? "negative acknowledgment") as string,
+            (args?.dead ?? false) as boolean,
+            args?.retryPolicy as Partial<RetryPolicy> | undefined,
+          );
+        return { content: [{ type: "text", text: JSON.stringify(result) }], structuredContent: (result ?? { delivery: null }) as unknown as Record<string, unknown> };
+      }
+      case "heartbeat": {
+        if (!service || !principal) throw new McpError(ErrorCode.InvalidParams, "AGENT_BRIDGE_AGENT is required");
+        const result = await service.heartbeat(principal, {
+          leaseMs: args?.leaseMs as number | undefined,
+          runtimeType: args?.runtimeType as string | undefined,
+          capabilities: args?.capabilities as string[] | undefined,
+        });
+        return { content: [{ type: "text", text: JSON.stringify(result) }], structuredContent: result as unknown as Record<string, unknown> };
+      }
+      case "presence": {
+        if (!service || !principal) throw new McpError(ErrorCode.InvalidParams, "AGENT_BRIDGE_AGENT is required");
+        const result = { agents: await service.presence(principal) };
+        return { content: [{ type: "text", text: JSON.stringify(result) }], structuredContent: result };
+      }
+
       default:
         throw new McpError(ErrorCode.MethodNotFound, `Unknown tool: ${name}`);
+      }
+    } catch (error) {
+      if (error instanceof McpError) throw error;
+      if (error instanceof BridgeValidationError) {
+        throw new McpError(ErrorCode.InvalidParams, error.message);
+      }
+      throw error;
     }
   });
+
+  server.onclose = () => {
+    void store?.close?.();
+  };
 
   return server;
 }

@@ -1,0 +1,62 @@
+name: release
+
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  package:
+    name: verify release package
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v7
+        with:
+          node-version: "24"
+          cache: npm
+          registry-url: https://registry.npmjs.org
+      - run: npm ci
+      - run: npm run check
+      - name: Check tag and package versions
+        if: github.ref_type == 'tag'
+        shell: bash
+        run: |
+          package_version=$(node -p "require('./package.json').version")
+          test "${GITHUB_REF_NAME}" = "v${package_version}"
+      - name: Build and pack
+        run: npm pack --pack-destination "$RUNNER_TEMP"
+      - uses: actions/upload-artifact@v7
+        with:
+          name: npm-package
+          path: ${{ runner.temp }}/*.tgz
+          if-no-files-found: error
+
+  publish:
+    name: publish npm package
+    needs: package
+    if: github.ref_type == 'tag' && vars.NPM_PUBLISH_ENABLED == 'true'
+    runs-on: ubuntu-latest
+    environment: npm
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - uses: actions/download-artifact@v8
+        with:
+          name: npm-package
+          path: package
+      - uses: actions/setup-node@v7
+        with:
+          node-version: "24"
+          registry-url: https://registry.npmjs.org
+          package-manager-cache: false
+      - name: Install OIDC-capable npm
+        run: npm install --global npm@latest
+      - name: Publish with provenance
+        run: npm publish package/*.tgz --access public

@@ -1,392 +1,338 @@
 # Agent Bridge
 
-Shared context layer for heterogeneous AI agents. Connects always-on assistants, coding agents, and any other AI agents through a simple post/get/ack protocol backed by Supabase.
+Agent Bridge is a shared messaging and work-delivery layer for AI agents that run in different clients, processes, sessions, and machines.
 
-## The Problem
+It supports three operating modes:
 
-You have multiple AI agents working on the same machine or project: an always-on assistant (like [OpenClaw](https://openclaw.com)), a coding agent (like Claude Code), maybe more. Each operates in its own silo. When one makes progress, the other has no idea. You end up manually relaying context between them.
+| Mode | Store | Use case |
+| --- | --- | --- |
+| Local | SQLite WAL | One machine, no service or account |
+| Gateway | PostgreSQL plus a local SQLite edge store | Cross-machine messaging, offline sends, claims, retries, and presence |
+| Legacy Supabase | Existing `shared_context` table through PostgREST | Compatibility while a v1 deployment migrates |
 
-Agent Bridge solves this with a shared context bus: agents post updates, read what others posted, and acknowledge what they've seen.
+PostgreSQL remains the authority in gateway mode. SQLite holds local-only messages or gateway edge state. Supabase is one way to host PostgreSQL, not a protocol dependency.
+
+## What v2 provides
+
+- Immutable messages with UUIDv7 IDs and opaque server cursors.
+- Indexed source, thread, timestamp, workspace, and delivery queries.
+- Read receipts separated from executable delivery state.
+- Atomic claim, lease renewal, acknowledgment, negative acknowledgment, retry, and dead-letter operations.
+- Append-only delivery transition history.
+- Idempotency conflict detection. Exact replay deduplicates; changed content under the same key fails.
+- Scoped credentials that bind a remote workspace and agent principal.
+- SQLite outbox and inbox cache for gateway clients.
+- Leased runtime presence with instance IDs and capabilities.
+- MCP, CLI, Codex, Claude Code, and Claude Desktop integration paths.
+- Existing `post_context`, `get_context`, `ack_context`, `post`, and `get` behavior during migration.
+
+The accepted protocol and storage decisions live in [docs/architecture-v2.md](docs/architecture-v2.md).
 
 ## Architecture
 
+```text
+ Codex       Claude Code       Claude Desktop       scripts
+   |              |                  |                 |
+   +--------------+------------------+-----------------+
+                          MCP or CLI
+                              |
+                  process-scoped agent identity
+                              |
+             +----------------+----------------+
+             |                                 |
+       local SQLite                  SQLite edge store
+                                               |
+                                     authenticated HTTPS
+                                               |
+                                      Agent Bridge gateway
+                                               |
+                                          PostgreSQL
 ```
-┌──────────────────────────────────────┐
-│     Supabase  (shared_context)       │
-└──────────┬──────────────┬────────────┘
-           │              │
-       HTTPS REST     HTTPS REST
-           │              │
-   ┌───────┴───────┐ ┌───┴──────────────┐
-   │  MCP Server   │ │  CLI (bash+curl)  │
-   │  (TypeScript) │ │  agent-bridge     │
-   └───────┬───────┘ └───┬──────────────┘
-           │              │
-   ┌───────┴───────┐ ┌───┴──────────────┐
-   │  Claude Code  │ │  Any agent with   │
-   │  Cursor, etc. │ │  shell access     │
-   └───────────────┘ └──────────────────┘
-```
 
-Both interfaces hit the Supabase REST API directly. No shared filesystem, no local database, no sockets. Works from any machine with internet access: laptop, Raspberry Pi, VPS, CI runner.
+Realtime notifications or hooks may wake a client, but cursored reads remain authoritative. A missed notification does not lose a message.
 
-## Quick Start
+## Requirements
 
-### 1. Create a Supabase project
+- Node.js 22.23.1 or newer.
+- SQLite 3.51.3 or newer for local and edge storage. The supported Node version includes it.
+- PostgreSQL 15 or newer for gateway mode.
 
-Go to [supabase.com](https://supabase.com) and create a free project. You'll need:
-- **Project URL**: `https://your-project.supabase.co`
-- **Anon key**: Found in Settings > API
+## Install from source
 
-### 2. Run the database migration
-
-In the Supabase SQL Editor (or via CLI), run everything in [`sql/setup.sql`](sql/setup.sql). This creates:
-- The `shared_context` table with indexes
-- The optional `atrib_receipt_id` column for signed bridge-write receipts
-- Row-level security policies
-- The `ack_context` RPC function for atomic acknowledgments
-
-### 3. Create the config file
+The unscoped npm name belongs to another project. This repository uses `@creatornader/agent-bridge`. The release workflow always builds a tagged package. Publishing remains disabled until the `npm` environment has an approval rule, npm trusts `release.yml` as this package's publisher, and `NPM_PUBLISH_ENABLED` is set to `true`.
 
 ```bash
-mkdir -p ~/.agent-bridge
-cat > ~/.agent-bridge/config <<'EOF'
-AGENT_BRIDGE_URL=https://your-project.supabase.co
-AGENT_BRIDGE_KEY=your-anon-key-here
-EOF
-```
-
-### 4. Install and build
-
-```bash
-git clone https://github.com/your-username/agent-bridge.git
+git clone https://github.com/creatornader/agent-bridge.git
 cd agent-bridge
-npm install
+npm ci
 npm run build
+npm link
 ```
 
-### 5. Connect your agents
+The package exposes three executables:
 
-**MCP-compatible agents** (Claude Code, Cursor, etc.): see [MCP Server Setup](#mcp-server-setup).
+- `agent-bridge`: CLI.
+- `agent-bridge-mcp`: stdio MCP server.
+- `agent-bridge-gateway`: HTTP gateway.
 
-**Shell-based agents** (OpenClaw, scripts, cron jobs): see [CLI Setup](#cli-setup).
+`npm pack` builds the package before creating a tarball. CI installs that tarball into an empty project, imports the provider-neutral library API, and runs the packaged CLI. Importing the package root does not start the MCP server.
 
-## MCP Server Setup
+## Local quick start
 
-The MCP server reads credentials from `~/.agent-bridge/config`, the same file
-used by the CLI. Keep the Supabase URL and anon key there unless a deployment
-needs per-process overrides. Explicit `AGENT_BRIDGE_URL` and `AGENT_BRIDGE_KEY`
-environment variables still take precedence.
-
-Add to your Claude Code config (`~/.claude.json` or project `.mcp.json`):
-
-```json
-{
-  "mcpServers": {
-    "agent-bridge": {
-      "command": "node",
-      "args": ["/absolute/path/to/agent-bridge/dist/index.js"],
-      "env": {
-        "AGENT_BRIDGE_AGENT": "codex"
-      }
-    }
-  }
-}
-```
-
-Use an absolute Node path if your agent runtime changes `PATH`. For example,
-`/opt/homebrew/bin/node` avoids local toolchain shims on macOS Homebrew setups.
-
-Restart your MCP client. Three tools become available: `post_context`, `get_context`, `ack_context`.
-
-### Signed HTTP Wrapper
-
-This repo is the canonical MCP server and CLI. A signed HTTP wrapper, such as
-`agent-bridge-atrib`, may sit in front of it to add atrib receipts or local
-substrate metadata. Treat that wrapper as an attribution layer. Basic MCP
-availability should still have a direct source-repo path, and any wrapper
-deployment should prove `/mcp/health`, not only process existence.
-
-See
-[`docs/postmortems/2026-07-08-wrapper-source-drift.md`](docs/postmortems/2026-07-08-wrapper-source-drift.md)
-for the incident that established this policy.
-
-### MCP Tool Reference
-
-**`post_context`**: Write a context entry
-
-| Parameter | Type | Required | Description |
-|-----------|------|----------|-------------|
-| `source` | string | no | Defaults to `AGENT_BRIDGE_AGENT` when configured. An explicit value must match it. |
-| `category` | string | yes | Entry type (see [Categories](#categories)) |
-| `content` | string | yes | The context message |
-| `priority` | string | no | `info` (default), `high`, `urgent` |
-| `project` | string | no | Scope to a project name. Omit for cross-project. |
-| `metadata` | object | no | Arbitrary structured data |
-| `message_id` | string | no | Stable message id. Generated when omitted. |
-| `target_agents` | string[] | no | Target agent names. Omit for broadcast. |
-| `thread_id` | string | no | Conversation or workstream id. |
-| `reply_to_id` | string | no | Parent message id for replies. |
-| `kind` | string | no | Message kind. Defaults to `category`. |
-| `payload_mime` | string | no | Payload type. Defaults to `text/plain`. |
-| `payload` | any JSON | no | Optional structured payload stored in the envelope. |
-| `payload_ref` | string | no | Optional pointer to a large or encrypted payload. |
-| `payload_ciphertext` | string | no | Optional inline encrypted payload. |
-| `informed_by` | string[] | no | atrib record hashes this message depends on. |
-| `expires_at` | string | no | Optional ISO timestamp retention boundary. |
-| `atrib_receipt_id` | string | no | Signed atrib receipt. Usually set by a wrapper. |
-
-**`get_context`**: Read context entries (newest first)
-
-| Parameter | Type | Required | Description |
-|-----------|------|----------|-------------|
-| `since` | string | no | ISO timestamp: only entries after this time |
-| `source` | string | no | Filter by posting agent |
-| `category` | string | no | Filter by category |
-| `project` | string | no | Filter by project scope |
-| `unacked_by` | string | no | Only entries not yet acknowledged by this agent. Defaults to `AGENT_BRIDGE_AGENT` when configured. |
-| `limit` | number | no | Max entries (default 20) |
-| `target_agent` | string | no | Include broadcast entries plus entries targeted to this agent |
-| `thread_id` | string | no | Filter by envelope thread id |
-| `kind` | string | no | Filter by envelope kind |
-
-**`ack_context`**: Mark entries as read
-
-| Parameter | Type | Required | Description |
-|-----------|------|----------|-------------|
-| `ids` | number[] | yes | Entry IDs to acknowledge |
-| `agent` | string | no | Defaults to `AGENT_BRIDGE_AGENT` when configured. An explicit value must match it. |
-
-## CLI Setup
-
-Copy the CLI script somewhere in your PATH:
+Initialize backend settings. `init` does not write an agent identity into the shared config.
 
 ```bash
-cp bin/agent-bridge /usr/local/bin/agent-bridge
-chmod +x /usr/local/bin/agent-bridge
+agent-bridge init --provider local
 ```
 
-Or for OpenClaw, copy to the scripts directory and add to `safeBins` in `openclaw.json`:
-
-```bash
-cp bin/agent-bridge ~/.openclaw/scripts/agent-bridge
-```
-
-The CLI reads credentials from `~/.agent-bridge/config` (created in step 3).
-
-When `AGENT_BRIDGE_AGENT` is set, MCP calls default their posting and acknowledgment identity to that value. Explicit identities that differ are rejected. This prevents a wrapped runtime from writing rows labelled as another agent after atrib has already signed the original tool arguments.
-
-The CLI follows the same rule. Each client integration should set `AGENT_BRIDGE_AGENT` in its own process, so it can omit `--source` without sharing an identity with another client:
+Each client supplies its own identity:
 
 ```bash
 AGENT_BRIDGE_AGENT=codex agent-bridge post --category operational "Bridge is ready"
+AGENT_BRIDGE_AGENT=claude-code agent-bridge get --unacked-by claude-code
 ```
 
-If the variable is unset, the CLI requires `--source`. A standalone shell cannot safely infer whether its caller is Codex, Claude Code, or another client.
+You can also pass `--source` to a standalone send. If the process already has `AGENT_BRIDGE_AGENT`, an explicit identity must match it.
 
-### CLI Reference
+Run a two-principal local proof:
 
 ```bash
-# Post a context entry
-agent-bridge post --source sido --category operational "Morning briefing delivered"
-agent-bridge post --source sido --category config-change --project whop-app "Updated API routes"
-agent-bridge post --source sido --category bridge-meta "Suggest: add multi-category filter to get"
-agent-bridge post --source codex --category goal-update --target-agent sido --thread-id loop-5 "Ready for handoff"
-
-# Read context entries
-agent-bridge get                              # latest 20 entries
-agent-bridge get --since 24h                  # last 24 hours (also: 1h, 7d)
-agent-bridge get --unacked-by sido            # entries sido hasn't seen
-agent-bridge get --source claude-code         # only from Claude Code
-agent-bridge get --category flag --limit 5    # urgent flags
-
-# Acknowledge entries
-agent-bridge ack --ids 1,2,3 --agent sido
-
-# Health check
-agent-bridge status
+agent-bridge demo
 ```
 
-## Categories
+## Install client integrations
 
-| Category | Use For |
-|----------|---------|
-| `operational` | Runtime status, health checks, delivery confirmations |
-| `config-change` | Settings modified, wrappers updated, environment changes |
-| `goal-update` | Goal progress, new goals, goal completion |
-| `flag` | Urgent alerts, blockers, warnings |
-| `bridge-meta` | Suggested improvements to Agent Bridge itself |
+Agent identity and gateway credentials belong to each client process, not the shared `~/.agent-bridge/config` file.
 
-## Agent Message Envelope
-
-Every MCP `post_context` call now writes a stable envelope into `metadata.message_envelope`. The CLI does the same for `post`. Existing columns remain the quick path: `source`, `category`, `content`, `priority`, `project`, `created_at`, `acked_by`, and optional `atrib_receipt_id`.
-
-Envelope fields are transport-neutral:
-
-| Field | Meaning |
-|-------|---------|
-| `schema` | Envelope schema id, currently `agent-bridge.message-envelope.v1` |
-| `message_id` | Stable id for replies and external references |
-| `source_agent` | Posting agent name |
-| `target_agents` | Optional recipient list. Missing means broadcast. |
-| `thread_id` | Workstream or conversation id |
-| `reply_to_id` | Parent message id |
-| `kind` | Operational kind. Defaults to `category`. |
-| `priority` | `info`, `high`, or `urgent` |
-| `payload_mime` | Type of the content or payload |
-| `payload` | Optional structured payload |
-| `payload_ref` | Optional blob pointer |
-| `payload_ciphertext` | Optional encrypted payload |
-| `atrib_receipt_id` | Signed bridge-write receipt |
-| `informed_by` | atrib record hashes this message depends on |
-| `expires_at` | Optional retention boundary |
-
-The envelope lives in JSON metadata so new fields do not require a database migration. `atrib_receipt_id` is also kept as a nullable column because downstream consumers often need it without parsing metadata.
-
-## Priorities
-
-| Priority | Meaning |
-|----------|---------|
-| `info` | Normal context sharing (default) |
-| `high` | Should be read soon |
-| `urgent` | Needs immediate attention |
-
-## How Acknowledgments Work
-
-Each entry has an `acked_by` array tracking which agents have seen it. When Agent A posts something:
-
-1. Agent B calls `get_context(unacked_by: "agent-b")`: the entry appears
-2. Agent B processes it and calls `ack_context(ids: [1], agent: "agent-b")`
-3. Future `get_context(unacked_by: "agent-b")` calls won't return it
-4. Agent C can still see it via `get_context(unacked_by: "agent-c")`
-
-Acks are atomic (single Postgres RPC call) and idempotent (acking twice is safe).
-
-## Recommended Agent Behavior
-
-For agents that want to use Agent Bridge automatically:
-
-### On session start
-```
-1. Check for unacked entries: get_context()
-2. Process any entries (summarize, act on flags, note config changes)
-3. Acknowledge them: ack_context(ids: [...])
+```bash
+agent-bridge clients install codex --identity codex
+agent-bridge clients install claude-code --identity claude-code
+agent-bridge clients install claude-desktop --identity claude-desktop
 ```
 
-### During work
-```
-Post significant changes:
-- Config modifications → category: "config-change"
-- Completed milestones → category: "goal-update"
-- Issues discovered → category: "flag"
-- Bridge improvement ideas → category: "bridge-meta"
+For gateway mode, issue a distinct principal-bound token for each client and pass it only during that client's installation:
+
+```bash
+AGENT_BRIDGE_CLIENT_TOKEN=<codex token> \
+  agent-bridge clients install codex --identity codex
+AGENT_BRIDGE_CLIENT_TOKEN=<claude-code token> \
+  agent-bridge clients install claude-code --identity claude-code
+AGENT_BRIDGE_CLIENT_TOKEN=<claude-desktop token> \
+  agent-bridge clients install claude-desktop --identity claude-desktop
 ```
 
-### Scope with projects
-```
-Use the `project` parameter when context is project-specific:
-  post_context(category: "config-change",
-               content: "Refactored auth module", project: "whop-app")
+`--token` accepts the same value, but the environment form avoids putting a credential in shell history. Each install writes an owner-only backend file under `~/.agent-bridge/clients/`. The host MCP registration receives that file path, the client identity, and a generated instance ID. Tokens are not copied into the shared config, and one client cannot reuse a token bound to another principal.
+
+Codex and Claude Code installation uses their native MCP commands. Claude Desktop installation merges the `agent-bridge` server into its JSON config with an atomic write. Restart the client after installation.
+
+The runtime contracts are under [`clients/`](clients/). OpenClaw and generic MCP manifests declare the required environment variable and command but leave config mutation to the operator because their host config shapes vary.
+
+[`SKILL.md`](SKILL.md) provides concise runtime-neutral operating instructions for agents. [`llms.txt`](llms.txt) gives tools and model crawlers a compact map of the package, modes, commands, and identity rules.
+
+## Gateway setup
+
+Apply migrations to a PostgreSQL database:
+
+```bash
+PGUSER=schema_owner PGPASSWORD='<password>' \
+AGENT_BRIDGE_DATABASE_URL=postgresql://host/database \
+  agent-bridge migrate
 ```
 
-## Database Schema
-
-The full schema is in [`sql/setup.sql`](sql/setup.sql). Key details:
+The migration sequence creates or refreshes a database-specific restricted role. Get its name, then create a login that inherits it. Keep the schema-owner URL out of the gateway process:
 
 ```sql
-create table shared_context (
-  id          bigserial primary key,
-  source      text not null,                    -- posting agent name
-  category    text not null,                    -- entry type
-  content     text not null,                    -- the context message
-  priority    text not null default 'info',     -- info | high | urgent
-  project     text,                             -- null = cross-project
-  metadata    jsonb not null default '{}',      -- arbitrary structured data
-  atrib_receipt_id text,                        -- optional signed atrib receipt
-  created_at  timestamptz not null default now(),
-  acked_by    text[] not null default '{}'      -- agents that have seen this
-);
+create role agent_bridge_gateway login password '<generated password>';
+do $grant$
+declare
+  runtime_role text := 'agent_bridge_runtime_' || substr(md5(current_database()), 1, 16);
+begin
+  execute format('grant %I to agent_bridge_gateway', runtime_role);
+end
+$grant$;
 ```
 
-### RLS Policies
+The database-derived suffix prevents a gateway login for one database from inheriting access to another Agent Bridge database on the same PostgreSQL cluster. Do not grant the login another database's runtime role.
 
-The table uses permissive RLS: any authenticated caller (via anon key) can read, insert, and update. The anon key itself is the access control: don't expose it publicly.
+Create a workspace, agent, and credential with the migration or provisioning connection. Store only a SHA-256 token hash:
 
-### RPC Function
+```sql
+insert into agent_bridge.workspaces (id, name)
+values ('team', 'Team');
 
-`ack_context(entry_ids bigint[], agent_name text)` atomically appends to the `acked_by` array. Uses `SECURITY DEFINER` with `set search_path = public` to ensure consistent execution. Idempotent: calling twice with the same agent name is safe.
+insert into agent_bridge.agents (workspace_id, principal, runtime_type)
+values ('team', 'codex', 'codex')
+returning id;
 
-## Architecture Decisions
+insert into agent_bridge.credentials (workspace_id, agent_id, token_hash, label)
+values ('team', '<agent uuid>', '<sha256 token hash>', 'codex laptop');
+```
 
-| Decision | Rationale |
-|----------|-----------|
-| Supabase over local DB | Survives machine migration (laptop → Pi → VPS). No filesystem coupling. |
-| Direct REST API (no SDK) | Same lightweight approach for both MCP server (fetch) and CLI (curl). Zero runtime dependencies beyond Node.js and bash. |
-| URL-encoded braces in PostgREST | `not.cs.%7Bvalue%7D` instead of `not.cs.{value}`: curl strips unencoded braces, breaking the array contains filter. |
-| Atomic RPC for acks | Single Postgres function call instead of fetch-then-update. Eliminates race conditions, reduces network calls from 2 to 1. |
-| Permissive RLS | Anon key is the access control, not row-level policies. Simplifies the setup for a single-operator system. |
-| `bridge-meta` category | Agents can suggest improvements to the bridge itself, creating a self-improving feedback loop. |
-| Message envelope in metadata | Adds targeting, threading, payload, expiry, and causal fields without a schema migration per field. |
-| Receipt column plus envelope copy | Keeps signed atrib receipts easy to query while preserving a transport-neutral envelope. |
+Repeat the agent and credential inserts for Claude Code, Claude Desktop, or any other principal. Each plaintext token should be random, unique, and shown only to the matching client installer.
+
+Start the gateway:
+
+```bash
+PGUSER=agent_bridge_gateway PGPASSWORD='<password>' \
+AGENT_BRIDGE_RUNTIME_DATABASE_URL=postgresql://host/database \
+AGENT_BRIDGE_HOST=127.0.0.1 \
+AGENT_BRIDGE_PORT=8787 \
+agent-bridge-gateway
+```
+
+Put the gateway behind TLS for any non-loopback deployment.
+
+Configure a client backend without storing its identity:
+
+```text
+AGENT_BRIDGE_PROVIDER=gateway
+AGENT_BRIDGE_URL=https://bridge.example.com
+AGENT_BRIDGE_WORKSPACE=team
+```
+
+These shared settings are enough before `clients install`. The installer takes `AGENT_BRIDGE_CLIENT_TOKEN`, creates a private client backend file containing the matching token, and registers `AGENT_BRIDGE_AGENT`, `AGENT_BRIDGE_INSTANCE`, and that file's path with the host. Gateway initialization checks readiness, token validity, and that the token-bound principal matches that process identity.
+
+## Offline gateway behavior
+
+Gateway clients use `~/.agent-bridge/edge.sqlite3` by default.
+
+When a send cannot reach the gateway:
+
+1. The validated message is written to the SQLite outbox with a stable idempotency key.
+2. The CLI or MCP result reports `disposition: "queued"` and `authoritative: false`.
+3. `agent-bridge sync` retries due messages in queue order and pulls remote history into the inbox cache. A permanently blocked message remains visible in diagnostics but does not stop later messages.
+4. An ambiguous retry is safe because the gateway enforces idempotency and rejects changed content under the same key.
+
+Cached reads report `source: "cache"` and `stale: true`. Claims, lease changes, delivery settlement, presence, and read receipts require the gateway because replaying those operations after a lease or identity change is unsafe.
+
+## CLI
+
+```bash
+agent-bridge init --provider local
+agent-bridge doctor
+agent-bridge status
+agent-bridge pending
+agent-bridge send --type request --target worker "Run the task"
+agent-bridge post --category goal-update --project agent-bridge "Gateway is ready"
+agent-bridge inbox --limit 20
+agent-bridge get --since 24h --unacked-by codex
+agent-bridge history --thread-id release-1
+agent-bridge acknowledge --ids <message-uuid>
+agent-bridge claim --lease-ms 30000
+agent-bridge extend --delivery-id <uuid> --lease-token <uuid>
+agent-bridge ack --delivery-id <uuid> --lease-token <uuid>
+agent-bridge nack --delivery-id <uuid> --lease-token <uuid> --error "retry later"
+agent-bridge join --instance desktop-1 --runtime codex --capability mcp
+agent-bridge presence
+agent-bridge sync
+agent-bridge watch
+```
+
+`agent-bridge pending` is a cheap shell gate for agent startup. It exits 0 when unread messages or due delivery work exists and 1 when neither exists. Its JSON result separates unread context from executable delivery work. Gateway checks fail instead of returning a false negative when the remote authority cannot confirm unread state.
+
+`watch` runs until interrupted unless `--polls` sets an explicit bound. Empty polls use capped backoff and jitter. Gateway and legacy network failures retry when the error is transient. Authentication and validation errors stop the watcher.
+
+Unknown flags and missing option values fail before a message can be sent. This prevents a misspelled target flag from becoming a broadcast.
+
+## MCP tools
+
+All providers expose the v1 compatibility tools:
+
+- `post_context`
+- `get_context`
+- `ack_context`
+
+Local and gateway providers also expose:
+
+- `send`
+- `history`
+- `claim`
+- `extend`
+- `acknowledge`
+- `negative_acknowledge`
+- `heartbeat`
+- `presence`
+
+Legacy Supabase does not advertise delivery or presence tools because its schema cannot enforce those operations.
+
+## Identity and security
+
+- `~/.agent-bridge/config` contains backend settings only. A stored `AGENT_BRIDGE_AGENT` value is ignored.
+- Local clients bind identity through their process environment or an explicit CLI send argument.
+- Gateway tokens bind workspace and principal. The API ignores caller-supplied source and workspace fields.
+- Gateway clients use separate owner-only backend files and principal-bound tokens.
+- The gateway uses `AGENT_BRIDGE_RUNTIME_DATABASE_URL`. Migration and provisioning commands use the separate schema-owner `AGENT_BRIDGE_DATABASE_URL`.
+- Remote HTTP must use TLS. Plain HTTP is accepted only on loopback.
+- Local config, database, WAL, and shared-memory files use owner-only permissions where the platform supports POSIX modes.
+- The private `agent_bridge` schema is denied to Supabase `anon` and `authenticated` Data API roles.
+- Expired presence rows are pruned during heartbeat and listing. Each agent is capped at 128 active instances, and each workspace is capped at 4,096.
+- Errors expose stable codes without database URLs, tokens, or provider response bodies.
+- Delivery work is at least once, not exactly once. Consumers must make external side effects idempotent.
+
+## Legacy Supabase compatibility
+
+Existing deployments can continue using:
+
+```text
+AGENT_BRIDGE_PROVIDER=legacy-supabase
+AGENT_BRIDGE_URL=https://your-project.supabase.co
+AGENT_BRIDGE_KEY=<publishable key>
+```
+
+Legacy mode keeps the v1 `shared_context` and `ack_context` RPC behavior. It adds bounded network calls, HTTPS enforcement, UUID mapping across CLI processes, newest-first reads, and the complete compatibility envelope. It cannot provide secure principal binding, delivery leases, presence, or an offline outbox. Use gateway mode for those features.
+
+When gateway migrations run in the same PostgreSQL database as `public.shared_context`, migration 006 imports legacy rows and receipts into the private v2 schema. It preserves valid envelope UUIDs, keeps the existing synthetic UUID mapping for ordinary numeric IDs, assigns deterministic UUIDs to larger IDs, maps projects to workspaces, rejects ID collisions, and verifies the imported count. It does not create executable deliveries for historical targeted rows because an upgrade must not replay old work.
+
+The original v1 schema remains in [`sql/setup.sql`](sql/setup.sql). Ordered gateway migrations live in [`sql/migrations/`](sql/migrations/).
+
+## Health and operations
+
+`doctor` and `status` return JSON with:
+
+- Provider and actual schema version.
+- Bound workspace, agent, and instance.
+- Endpoint or database path.
+- Cursor and queue state.
+- Pending, claimed, retrying, and dead delivery counts.
+- Gateway reachability, outbox depth, blocked outbox rows, cache size, and last sync error.
+
+The gateway exposes unauthenticated `/readyz`. `/v2/status` and `/metrics` require a valid credential.
+
+Before dropping an Agent Bridge database, remove its gateway login and database-specific runtime role. Run this while connected to that database so `current_database()` still identifies the right role:
+
+```sql
+drop role if exists agent_bridge_gateway;
+do $cleanup$
+declare
+  runtime_role text := 'agent_bridge_runtime_' || substr(md5(current_database()), 1, 16);
+begin
+  execute format('drop role if exists %I', runtime_role);
+end
+$cleanup$;
+```
+
+The runtime role owns no schema objects. PostgreSQL keeps roles after a database is dropped, so skipping this step leaves an unused cluster role behind.
 
 ## Development
 
 ```bash
-npm run dev    # watch mode (rebuilds on change)
-npm run build  # production build
-npm start      # run the MCP server directly
+npm run typecheck
+npm test
+npm run build
+npm pack
 ```
 
-### Project Structure
+Set `AGENT_BRIDGE_TEST_DATABASE_URL` to run the live PostgreSQL contract and migration tests. CI runs Node 22 and 24 on Linux, macOS, and Windows, plus PostgreSQL and clean package-install jobs.
 
-```
-agent-bridge/
-├── src/
-│   ├── index.ts          # Entry point
-│   └── server.ts         # MCP server (3 tools, Supabase REST client)
-├── bin/
-│   └── agent-bridge      # Bash CLI (curl → Supabase REST API)
-├── sql/
-│   └── setup.sql         # Database schema + RPC function
-├── dist/                  # Built output (gitignored)
-├── package.json
-├── tsconfig.json
-├── tsup.config.ts         # Build config (ESM bundle)
-└── .env.example           # Template for credentials
-```
+## Documentation
 
-## Maintenance
-
-### Cleanup old entries
-
-Over time, the `shared_context` table will grow. To clean up old entries:
-
-```sql
--- Delete entries older than 30 days
-DELETE FROM shared_context WHERE created_at < now() - interval '30 days';
-
--- Delete entries that all known agents have acknowledged
-DELETE FROM shared_context WHERE acked_by @> ARRAY['agent-a', 'agent-b'];
-```
-
-### Monitoring
-
-Use the CLI to check health:
-
-```bash
-agent-bridge status
-```
-
-Use Supabase dashboard to monitor table size and query performance.
-
-### Adding new agents
-
-No schema changes needed. Just pick a unique agent name and start posting/reading. The `unacked_by` filter automatically works for any agent name.
-
-### Adding new categories
-
-Categories are free-form text: no schema change needed. Just start posting with a new category string. Update your agent instructions to document what the new category means.
+- [docs/architecture-v2.md](docs/architecture-v2.md): protocol and storage decisions.
+- [SKILL.md](SKILL.md): runtime-neutral agent operating instructions.
+- [llms.txt](llms.txt): compact machine-readable project map.
+- [docs/postmortems/2026-07-08-wrapper-source-drift.md](docs/postmortems/2026-07-08-wrapper-source-drift.md): wrapper and source-identity incident.
+- [CLAUDE.md](CLAUDE.md): repository rules, architecture constraints, and documentation ownership.
+- [CHANGELOG.md](CHANGELOG.md): released and pending changes.
 
 ## License
 
-MIT
+Apache-2.0

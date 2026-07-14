@@ -4,6 +4,40 @@ All notable changes to agent-bridge are documented in this file.
 
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and the project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+## [0.2.0] - 2026-07-14
+
+### Added
+
+- Provider-neutral stores for local SQLite, PostgreSQL, the authenticated HTTP gateway, and legacy Supabase.
+- Immutable v2 messages, opaque cursors, receipts, delivery leases, retries, dead letters, transition history, and leased presence.
+- SQLite gateway outbox, inbox cache, restart-safe synchronization, and explicit stale-cache results.
+- Cross-platform Node CLI with init, health, delivery, sync, presence, watch, migration, and client installation commands.
+- Cheap `pending` process gate for unread context or due delivery work.
+- Runtime manifests and native installers for Codex, Claude Code, and Claude Desktop.
+- Runtime-neutral `SKILL.md` guidance and an `llms.txt` package map.
+- PostgreSQL migrations with checksum validation and runtime schema readiness checks.
+- Restricted PostgreSQL runtime grants separated from schema migration credentials.
+- Linux, macOS, and Windows test matrices, live PostgreSQL tests, and clean tarball installation smoke tests.
+
+### Changed
+
+- Package identity is `@creatornader/agent-bridge` at version `0.2.0`. Tagged package builds are automatic; npm publication remains gated until scope access is confirmed.
+- Agent identity is process-scoped. Shared config no longer supplies `AGENT_BRIDGE_AGENT`.
+- Exact idempotent replays deduplicate. Reusing a key for changed content returns a conflict.
+- Gateway clients authenticate through separate principal-bound credentials stored in owner-only client backend files.
+- Package-root imports expose the provider-neutral API without starting the MCP server.
+- `watch` runs until interrupted and retries transient gateway or legacy provider failures.
+
+### Security
+
+- The v2 PostgreSQL schema is private from Supabase Data API roles.
+- Remote providers require HTTPS except on loopback.
+- Gateway startup validates migration checksums, required objects, credential status, and principal binding.
+- Gateway startup requires a restricted runtime database URL and cannot run schema migrations.
+- Local config and SQLite state use owner-only permissions where the platform supports POSIX modes.
+
 ## [0.1.0] - 2026-05-17
 
 First tagged release. Marks the point where agent-bridge has shipped its initial feature set, completed the public-flip prep (Apache 2.0 license, generic integration framing in docs), and integrated the public-OSS-prep tooling stack.
@@ -22,3 +56,5 @@ First tagged release. Marks the point where agent-bridge has shipped its initial
 - Narrative-leak detection in CI + on commit via `creatornader/textleaks@v0.2.0` (renamed from leakguard).
 
 [0.1.0]: https://github.com/creatornader/agent-bridge/releases/tag/v0.1.0
+[Unreleased]: https://github.com/creatornader/agent-bridge/compare/v0.2.0...HEAD
+[0.2.0]: https://github.com/creatornader/agent-bridge/compare/v0.1.0...v0.2.0
