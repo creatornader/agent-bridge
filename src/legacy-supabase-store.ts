@@ -91,7 +91,8 @@ export class LegacySupabaseRestStore implements BridgeStore {
     }
   }
 
-  async initialize(): Promise<void> {
+  async initialize(options: { mode?: "active" | "passive" } = {}): Promise<void> {
+    if (options.mode === "passive") return;
     if (this.initialized) return;
     await this.request("/shared_context?select=id&limit=1");
     this.initialized = true;

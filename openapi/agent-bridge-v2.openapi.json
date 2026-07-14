@@ -903,6 +903,49 @@
                     "oldestAvailableAt": {
                       "type": "string"
                     },
+                    "due": {
+                      "anyOf": [
+                        {
+                          "type": "number"
+                        },
+                        {
+                          "type": "null"
+                        }
+                      ]
+                    },
+                    "scheduled": {
+                      "anyOf": [
+                        {
+                          "type": "number"
+                        },
+                        {
+                          "type": "null"
+                        }
+                      ]
+                    },
+                    "expiredLeases": {
+                      "anyOf": [
+                        {
+                          "type": "number"
+                        },
+                        {
+                          "type": "null"
+                        }
+                      ]
+                    },
+                    "oldestDueAt": {
+                      "type": "string"
+                    },
+                    "queueLagMs": {
+                      "anyOf": [
+                        {
+                          "type": "number"
+                        },
+                        {
+                          "type": "null"
+                        }
+                      ]
+                    },
                     "principal": {
                       "type": "object",
                       "required": [
@@ -918,24 +961,6 @@
                         }
                       },
                       "additionalProperties": true
-                    },
-                    "remoteReachable": {
-                      "type": "boolean"
-                    },
-                    "outboxPending": {
-                      "type": "number"
-                    },
-                    "outboxBlocked": {
-                      "type": "number"
-                    },
-                    "cachedMessages": {
-                      "type": "number"
-                    },
-                    "lastSyncAt": {
-                      "type": "string"
-                    },
-                    "lastSyncError": {
-                      "type": "string"
                     }
                   },
                   "additionalProperties": true

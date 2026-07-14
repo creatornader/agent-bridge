@@ -322,16 +322,21 @@ The original v1 schema remains in [`sql/setup.sql`](sql/setup.sql). Ordered gate
 
 ## Health and operations
 
-`doctor` and `status` return JSON with:
+`status` is a passive snapshot. It does not synchronize or probe a remote provider. An unprobed remote reports `status: "unknown"`, `connected: false`, and `remoteReachable: null`. Passive status still exits 0. `doctor` evaluates named checks and exits 0 for `ok`, 2 for `degraded`, and 1 for `failed`. Both return JSON with:
 
 - Provider and actual schema version.
 - Bound workspace, agent, and instance.
 - Endpoint or database path.
 - Cursor and queue state.
-- Pending, claimed, retrying, and dead delivery counts.
-- Gateway reachability, outbox depth, blocked outbox rows, cache size, and last sync error.
+- Pending, claimed, retrying, and dead delivery counts, plus due versus scheduled work, expired leases, oldest-due time, and bounded queue lag.
+- Gateway reachability, outbox due/scheduled/leased/blocked depth, cache size, blocked age/attempt/error, next retry, last outbound/inbound sync, and last attempt.
+- Explicit check results. Blocked outbox rows, expired leases, dead deliveries, or a known-unreachable gateway prevent a healthy result.
 
-Local edge health and remote reachability are separate: a healthy offline gateway client reports `localHealthy: true`, `remoteReachable: false`, `connected: false`, and `status: "degraded"` while retaining usable cached reads and queued sends.
+Local edge health and remote reachability are separate. A healthy offline gateway client after a doctor probe reports `localHealthy: true`, `remoteReachable: false`, `connected: false`, and `status: "degraded"` while retaining usable cached reads and queued sends. Fatal local edge errors report `localHealthy: false` without hiding the queue snapshot. Blocked age is null for rows created by an older client before transition timestamps existed.
+
+Client-local outbox and synchronization fields appear only in CLI status output. Authenticated HTTP `/v2/status` reports gateway delivery diagnostics and does not advertise client-local state.
+
+In-process `SyncingBridgeStore` diagnostics also expose the current loop state and a sanitized loop error. Standalone CLI health commands omit those fields because their short-lived diagnostic runtime is not the long-lived MCP client.
 
 The gateway exposes unauthenticated `/readyz`. `/v2/status` and `/metrics` require a valid credential.
 

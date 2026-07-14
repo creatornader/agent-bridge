@@ -80,6 +80,37 @@ function cliOutput(
   value: unknown,
   invocation?: { command: string; optionNames?: readonly string[] },
 ): void { output(parseCliResponse(operationId, value, invocation)); }
+function failedClientStatus(
+  config: ClientConfig,
+  error: unknown,
+  failure: { component: "local-store" | "remote"; remoteAttempted?: boolean },
+): void {
+  const schemaVersion = config.provider === "legacy-supabase"
+    ? "legacy-v1"
+    : config.provider === "gateway" ? "postgres-v2" : "local-v2";
+  const remote = config.provider === "local" || !failure.remoteAttempted ? null : false;
+  const localHealthy = failure.component !== "local-store";
+  const code = error && typeof error === "object" && "code" in error && typeof error.code === "string"
+    ? error.code
+    : "diagnostics_failed";
+  cliOutput("client_status", {
+    status: "failed",
+    localHealthy,
+    connected: false,
+    remoteReachable: remote,
+    provider: config.provider,
+    workspace: config.principal.workspace,
+    agent: config.principal.agent,
+    instance: config.principal.instance ?? null,
+    schemaVersion,
+    endpoint: config.url ?? null,
+    database: config.provider === "local" ? config.databasePath : null,
+    cursorPath: config.cursorPath,
+    lastCursor: cursor(config.cursorPath) ?? null,
+    queue: { schemaVersion, deliverySupported: false, pending: null, claimed: null, retrying: null, dead: null },
+    checks: [{ name: failure.component, status: "failed", message: `${failure.component} diagnostics failed (${code})` }],
+  });
+}
 function cursor(path: string): string | undefined { try { return readFileSync(path, "utf8").trim() || undefined; } catch { return undefined; } }
 function saveCursor(path: string, value: string | undefined): void { if (!value) return; mkdirSync(dirname(path), { recursive: true }); const temporary = `${path}.${process.pid}.tmp`; writeFileSync(temporary, `${value}\n`, { mode: 0o600 }); renameSync(temporary, path); }
 function watchCursorPath(path: string, project: string | undefined): string {
@@ -306,12 +337,83 @@ export async function runCli(argv = process.argv.slice(2)): Promise<void> {
   }
   const config = configFor(options, command);
   validateCanonicalCommandOptions(raw, options, config);
-  const assertedUnackedBy = one(options, "unacked-by"); if (assertedUnackedBy !== undefined && assertedUnackedBy !== config.principal.agent) throw new Error("--unacked-by must equal the configured principal"); const runtime = await createClientRuntime(config);
+  const assertedUnackedBy = one(options, "unacked-by");
+  if (assertedUnackedBy !== undefined && assertedUnackedBy !== config.principal.agent) throw new Error("--unacked-by must equal the configured principal");
+  if (command === "capabilities") {
+    validateRequest("capabilities", {});
+    cliOutput("capabilities", capabilityDocument({ surface: "cli", provider: config.provider }));
+    return;
+  }
+  let runtime: Awaited<ReturnType<typeof createClientRuntime>>;
   try {
-    if (command === "capabilities") { validateRequest("capabilities", {}); cliOutput("capabilities", capabilityDocument({ surface: "cli", provider: config.provider })); return; }
-    if (command === "doctor" || command === "status") { validateRequest("client_status", {}); const diagnostics = await runtime.store.diagnostics?.(config.principal) ?? { schemaVersion: config.provider === "legacy-supabase" ? "legacy-v1" : "local-v2", deliverySupported: false, pending: null, claimed: null, retrying: null, dead: null }; const remoteReachable = "remoteReachable" in diagnostics ? diagnostics.remoteReachable : null; cliOutput("client_status", { status: remoteReachable === false ? "degraded" : "ok", localHealthy: true, connected: remoteReachable ?? true, remoteReachable, provider: config.provider, workspace: config.principal.workspace, agent: config.principal.agent, instance: config.principal.instance ?? null, schemaVersion: diagnostics.schemaVersion, endpoint: config.url ?? null, database: config.provider === "local" ? config.databasePath : null, cursorPath: config.cursorPath, lastCursor: cursor(config.cursorPath) ?? null, queue: diagnostics }); return; }
+    runtime = await createClientRuntime(config, {
+      autoSync: command !== "doctor" && command !== "status",
+      initializationMode: command === "status" ? "passive" : "active",
+    });
+  } catch (error) {
+    if (command !== "doctor" && command !== "status") throw error;
+    const remoteInitialization = command === "doctor" && config.provider === "legacy-supabase";
+    failedClientStatus(config, error, {
+      component: remoteInitialization ? "remote" : "local-store",
+      remoteAttempted: remoteInitialization,
+    });
+    process.exitCode = 1;
+    return;
+  }
+  try {
+    if (command === "doctor" || command === "status") {
+      validateRequest("client_status", {});
+      const active = command === "doctor";
+      try {
+        const diagnostics = await runtime.store.diagnostics?.(config.principal, { mode: active ? "probe" : "snapshot" }) ?? { schemaVersion: config.provider === "legacy-supabase" ? "legacy-v1" as const : "local-v2" as const, deliverySupported: false, pending: null, claimed: null, retrying: null, dead: null };
+        const remoteReachable = "remoteReachable" in diagnostics
+          ? diagnostics.remoteReachable ?? null
+          : active && config.provider === "legacy-supabase" ? true : null;
+        type CheckStatus = "ok" | "unknown" | "degraded" | "failed";
+        const checks: Array<{ name: string; status: CheckStatus; message: string }> = [{
+          name: "local-store",
+          status: "ok",
+          message: "local diagnostics are readable",
+        }];
+        if (config.provider !== "local") {
+          const provider = config.provider === "gateway" ? "gateway" : "legacy provider";
+          const remoteError = "remoteError" in diagnostics && typeof diagnostics.remoteError === "string"
+            ? diagnostics.remoteError
+            : undefined;
+          checks.push({
+            name: "remote",
+            status: remoteReachable === false ? "degraded" : remoteError ? "failed" : remoteReachable === true ? "ok" : "unknown",
+            message: remoteReachable === false ? `${provider} is unreachable` : remoteError ? `${provider} rejected diagnostics (${remoteError})` : remoteReachable === true ? `${provider} is reachable` : `${provider} reachability has not been checked`,
+          });
+        }
+        const blocked = "outboxBlocked" in diagnostics ? Number(diagnostics.outboxBlocked ?? 0) : 0;
+        checks.push({ name: "blocked-outbox", status: blocked > 0 ? "degraded" : "ok", message: blocked > 0 ? `${blocked} outbound message(s) require intervention` : "no blocked outbound messages" });
+        const expired = Number(diagnostics.expiredLeases ?? 0);
+        checks.push({ name: "expired-leases", status: expired > 0 ? "degraded" : "ok", message: expired > 0 ? `${expired} delivery lease(s) are expired` : "no expired delivery leases" });
+        const dead = Number(diagnostics.dead ?? 0);
+        checks.push({ name: "dead-deliveries", status: dead > 0 ? "degraded" : "ok", message: dead > 0 ? `${dead} dead delivery/deliveries are visible` : "no dead deliveries" });
+        const status: CheckStatus = checks.some((check) => check.status === "failed")
+          ? "failed"
+          : checks.some((check) => check.status === "degraded")
+            ? "degraded"
+            : checks.some((check) => check.status === "unknown") ? "unknown" : "ok";
+        const remoteError = "remoteError" in diagnostics && typeof diagnostics.remoteError === "string";
+        const connected = config.provider === "local" ? true : remoteReachable === true && !remoteError;
+        const queue = { ...diagnostics } as Record<string, unknown>;
+        delete queue.syncLoopState;
+        delete queue.syncLoopError;
+        cliOutput("client_status", { status, localHealthy: true, connected, remoteReachable, provider: config.provider, workspace: config.principal.workspace, agent: config.principal.agent, instance: config.principal.instance ?? null, schemaVersion: diagnostics.schemaVersion, endpoint: config.url ?? null, database: config.provider === "local" ? config.databasePath : null, cursorPath: config.cursorPath, lastCursor: cursor(config.cursorPath) ?? null, queue, checks });
+        if (active && status !== "ok") process.exitCode = status === "failed" ? 1 : 2;
+      } catch (error) {
+        failedClientStatus(config, error, { component: "local-store" });
+        process.exitCode = 1;
+      }
+      return;
+    }
     if (command === "pending") {
-      const diagnostics = await runtime.store.diagnostics?.(config.principal);
+      const diagnostics = await runtime.store.diagnostics?.(config.principal, {
+        mode: config.provider === "gateway" ? "probe" : "snapshot",
+      });
       const page = await runtime.service.history(config.principal, {
         limit: 1,
         project: one(options, "project"),
@@ -327,7 +429,7 @@ export async function runCli(argv = process.argv.slice(2)): Promise<void> {
       const unread = page.messages.length > 0;
       const available = deliveryAvailable || unread;
       const diagnosticsAuthoritative = !diagnostics || !("remoteReachable" in diagnostics) ||
-        diagnostics.remoteReachable !== false;
+        diagnostics.remoteReachable === true;
       const pageAuthority = page as typeof page & {
         source?: "remote" | "cache";
         stale?: boolean;

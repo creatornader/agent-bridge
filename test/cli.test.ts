@@ -297,6 +297,142 @@ describe("agent-bridge CLI", () => {
       status: "ok",
       connected: true,
       queue: { deliverySupported: true, pending: 0, claimed: 0, retrying: 0, dead: 0 },
+      checks: expect.arrayContaining([expect.objectContaining({ name: "blocked-outbox", status: "ok" })]),
+    });
+  });
+  it("keeps status passive and makes an unreachable gateway doctor degraded", () => {
+    const home = mkdtempSync(join(tmpdir(), "agent-bridge-cli-")); homes.push(home);
+    const environment = {
+      AGENT_BRIDGE_PROVIDER: "gateway",
+      AGENT_BRIDGE_URL: "http://127.0.0.1:1",
+      AGENT_BRIDGE_TOKEN: "test-token",
+      AGENT_BRIDGE_WORKSPACE: "acme",
+      AGENT_BRIDGE_AGENT: "worker",
+    };
+    const status = runAt(home, ["status"], environment);
+    expect(status.status).toBe(0);
+    expect(JSON.parse(status.stdout)).toMatchObject({
+      status: "unknown",
+      connected: false,
+      remoteReachable: null,
+      checks: expect.arrayContaining([expect.objectContaining({ name: "remote", status: "unknown" })]),
+    });
+    const doctor = runAt(home, ["doctor"], environment);
+    expect(doctor.status).toBe(2);
+    expect(JSON.parse(doctor.stdout)).toMatchObject({
+      status: "degraded",
+      remoteReachable: false,
+      checks: expect.arrayContaining([expect.objectContaining({ name: "remote", status: "degraded" })]),
+    });
+  });
+  it("does not contact a gateway while reading passive status", async () => {
+    const home = mkdtempSync(join(tmpdir(), "agent-bridge-cli-")); homes.push(home);
+    let requests = 0;
+    const server = createServer((_request, response) => {
+      requests += 1;
+      response.end(JSON.stringify({ status: "ok" }));
+    });
+    await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+    const address = server.address();
+    if (!address || typeof address === "string") throw new Error("test gateway did not bind TCP");
+    try {
+      const result = await runAtAsync(home, ["status"], {
+        AGENT_BRIDGE_PROVIDER: "gateway",
+        AGENT_BRIDGE_URL: `http://127.0.0.1:${address.port}`,
+        AGENT_BRIDGE_TOKEN: "test-token",
+        AGENT_BRIDGE_WORKSPACE: "acme",
+        AGENT_BRIDGE_AGENT: "worker",
+      });
+      expect(result.status).toBe(0);
+      const payload = JSON.parse(result.stdout);
+      expect(payload).toMatchObject({ status: "unknown", connected: false });
+      expect(payload.queue).not.toHaveProperty("syncLoopState");
+      expect(payload.queue).not.toHaveProperty("syncLoopError");
+      expect(requests).toBe(0);
+    } finally {
+      await new Promise<void>((resolve, reject) => server.close((error) => error ? reject(error) : resolve()));
+    }
+  });
+  it("does not contact a legacy provider while reading passive status", async () => {
+    const home = mkdtempSync(join(tmpdir(), "agent-bridge-cli-")); homes.push(home);
+    let requests = 0;
+    const server = createServer((_request, response) => {
+      requests += 1;
+      response.end(JSON.stringify([]));
+    });
+    await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+    const address = server.address();
+    if (!address || typeof address === "string") throw new Error("test legacy provider did not bind TCP");
+    try {
+      const result = await runAtAsync(home, ["status"], {
+        AGENT_BRIDGE_PROVIDER: "legacy-supabase",
+        AGENT_BRIDGE_URL: `http://127.0.0.1:${address.port}`,
+        AGENT_BRIDGE_KEY: "test-key",
+        AGENT_BRIDGE_WORKSPACE: "acme",
+        AGENT_BRIDGE_AGENT: "worker",
+      });
+      expect(result.status).toBe(0);
+      expect(JSON.parse(result.stdout)).toMatchObject({ status: "unknown", connected: false });
+      expect(requests).toBe(0);
+    } finally {
+      await new Promise<void>((resolve, reject) => server.close((error) => error ? reject(error) : resolve()));
+    }
+  });
+  it("degrades doctor when the status probe returns a retryable failure", async () => {
+    const home = mkdtempSync(join(tmpdir(), "agent-bridge-cli-")); homes.push(home);
+    let statusRequests = 0;
+    const server = createServer((request, response) => {
+      response.setHeader("content-type", "application/json");
+      response.setHeader("x-agent-bridge-protocol-version", "2.1");
+      response.setHeader("x-agent-bridge-supported-protocol-versions", "2.0,2.1");
+      if (request.url === "/readyz") {
+        response.end(JSON.stringify({ status: "ok" }));
+        return;
+      }
+      if (request.url === "/v2/status") {
+        statusRequests += 1;
+        response.statusCode = 503;
+        response.end(JSON.stringify({ error: { code: "gateway_unavailable" } }));
+        return;
+      }
+      response.statusCode = 404;
+      response.end(JSON.stringify({ error: { code: "not_found" } }));
+    });
+    await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+    const address = server.address();
+    if (!address || typeof address === "string") throw new Error("test gateway did not bind TCP");
+    try {
+      const result = await runAtAsync(home, ["doctor"], {
+        AGENT_BRIDGE_PROVIDER: "gateway",
+        AGENT_BRIDGE_URL: `http://127.0.0.1:${address.port}`,
+        AGENT_BRIDGE_TOKEN: "test-token",
+        AGENT_BRIDGE_WORKSPACE: "acme",
+        AGENT_BRIDGE_AGENT: "worker",
+      });
+      expect(result.status).toBe(2);
+      expect(JSON.parse(result.stdout)).toMatchObject({
+        status: "degraded",
+        connected: false,
+        remoteReachable: false,
+      });
+      expect(statusRequests).toBe(1);
+    } finally {
+      await new Promise<void>((resolve, reject) => server.close((error) => error ? reject(error) : resolve()));
+    }
+  });
+  it.each(["doctor", "status"] as const)("returns sanitized failed %s JSON when local initialization fails", (command) => {
+    const home = mkdtempSync(join(tmpdir(), "agent-bridge-cli-")); homes.push(home);
+    const database = join(home, "not-a-database");
+    mkdirSync(database);
+    const result = runAt(home, [command], { AGENT_BRIDGE_DB: database });
+    expect(result.status).toBe(1);
+    expect(result.stderr).not.toContain("Error:");
+    const payload = JSON.parse(result.stdout);
+    expect(payload.checks[0].message).not.toContain(database);
+    expect(payload).toMatchObject({
+      status: "failed",
+      localHealthy: false,
+      checks: [{ name: "local-store", status: "failed" }],
     });
   });
   it("provides a cheap pending-work process gate", () => {
@@ -523,6 +659,60 @@ describe("agent-bridge CLI", () => {
       authoritative: false,
       state: "unknown",
     });
+  });
+  it("reports gateway delivery work when there is no unread message", async () => {
+    const home = mkdtempSync(join(tmpdir(), "agent-bridge-cli-")); homes.push(home);
+    const server = createServer((request, response) => {
+      response.setHeader("content-type", "application/json");
+      response.setHeader("x-agent-bridge-protocol-version", "2.1");
+      response.setHeader("x-agent-bridge-supported-protocol-versions", "2.0,2.1");
+      if (request.url === "/readyz") {
+        response.end(JSON.stringify({ status: "ok" }));
+        return;
+      }
+      if (request.url === "/v2/status") {
+        response.end(JSON.stringify({
+          schemaVersion: "postgres-v2",
+          deliverySupported: true,
+          pending: 1,
+          claimed: 0,
+          retrying: 0,
+          dead: 0,
+          oldestAvailableAt: new Date(Date.now() - 1_000).toISOString(),
+          principal: { workspace: "acme", agent: "worker" },
+        }));
+        return;
+      }
+      if (request.url?.startsWith("/v2/history")) {
+        response.end(JSON.stringify({ messages: [] }));
+        return;
+      }
+      response.statusCode = 404;
+      response.end(JSON.stringify({ error: { code: "not_found" } }));
+    });
+    await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+    const address = server.address();
+    if (!address || typeof address === "string") throw new Error("test gateway did not bind TCP");
+    try {
+      const result = await runAtAsync(home, ["pending"], {
+        AGENT_BRIDGE_PROVIDER: "gateway",
+        AGENT_BRIDGE_URL: `http://127.0.0.1:${address.port}`,
+        AGENT_BRIDGE_TOKEN: "test-token",
+        AGENT_BRIDGE_AGENT: "worker",
+        AGENT_BRIDGE_WORKSPACE: "acme",
+      });
+      expect(result.status).toBe(0);
+      expect(JSON.parse(result.stdout)).toMatchObject({
+        available: true,
+        unread: false,
+        deliveryAvailable: true,
+        pending: 1,
+        authoritative: true,
+        state: "available",
+      });
+    } finally {
+      await new Promise<void>((resolve, reject) => server.close((error) => error ? reject(error) : resolve()));
+    }
   });
   it("reports cached gateway candidates as available but not authoritative", async () => {
     const home = mkdtempSync(join(tmpdir(), "agent-bridge-cli-")); homes.push(home);

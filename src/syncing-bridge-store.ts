@@ -46,12 +46,28 @@ export interface SyncReport {
 }
 
 export interface SyncDiagnostics extends BridgeDiagnostics {
-  remoteReachable: boolean;
+  remoteReachable: boolean | null;
   outboxPending: number;
   outboxBlocked: number;
   cachedMessages: number;
   lastSyncAt?: string;
   lastSyncError?: string;
+  outboxDue: number;
+  outboxScheduled: number;
+  outboxLeased: number;
+  outboxOldestDueAt?: string;
+  outboxQueueLagMs: number;
+  outboxOldestBlockedAt?: string;
+  outboxBlockedAgeMs: number | null;
+  outboxBlockedMaxAttempts: number;
+  outboxBlockedLastError?: string;
+  outboxNextRetryAt?: string;
+  lastOutboundSyncAt?: string;
+  lastInboundSyncAt?: string;
+  lastSyncAttemptAt?: string;
+  syncLoopState: "disabled" | "idle" | "running" | "backoff" | "stopped" | "failed";
+  syncLoopError?: string;
+  remoteError?: string;
 }
 
 export interface SyncingBridgeStoreOptions {
@@ -114,6 +130,8 @@ export class SyncingBridgeStore implements BridgeStore {
   private readonly closeController = new AbortController();
   private backgroundError: unknown;
   private wakeRequested = false;
+  private remoteReachable: boolean | null = null;
+  private loopState: SyncDiagnostics["syncLoopState"];
 
   constructor(
     private readonly edge: SQLiteEdgeStore,
@@ -128,6 +146,7 @@ export class SyncingBridgeStore implements BridgeStore {
     this.leaseMs = options.leaseMs ?? 30_000;
     this.autoSync = options.autoSync ?? true;
     this.idleDelayMs = Math.max(this.baseDelayMs + 1, options.idleDelayMs ?? 30_000);
+    this.loopState = this.autoSync ? "idle" : "disabled";
   }
 
   async initialize(): Promise<void> {
@@ -140,6 +159,7 @@ export class SyncingBridgeStore implements BridgeStore {
     if (this.background) return;
     this.background = this.transportLoop().catch((error) => {
       this.backgroundError = error;
+      this.loopState = "failed";
     });
   }
 
@@ -185,6 +205,7 @@ export class SyncingBridgeStore implements BridgeStore {
     let failures = 0;
     await this.wait(this.delay(0));
     while (!this.stopped) {
+      this.loopState = "running";
       const report = await this.sync({ maxPush: 100, maxPages: 1, signal: this.closeController.signal });
       if (this.stopped) break;
       if (report.failureRetryable === false) {
@@ -192,9 +213,11 @@ export class SyncingBridgeStore implements BridgeStore {
           new Error(`gateway synchronization failed permanently: ${report.lastError ?? "sync_error"}`),
           { code: report.lastError ?? "sync_error" },
         );
+        this.loopState = "failed";
         return;
       }
       failures = report.online ? 0 : Math.min(failures + 1, 20);
+      this.loopState = report.online ? "idle" : "backoff";
       await this.wait(report.pending > 0 ? this.delay(Math.max(0, failures - 1)) : this.idleDelayMs);
     }
   }
@@ -210,7 +233,13 @@ export class SyncingBridgeStore implements BridgeStore {
         throw error;
       });
     }
-    await this.remoteReady;
+    try {
+      await this.remoteReady;
+      this.remoteReachable = true;
+    } catch (error) {
+      this.remoteReachable = false;
+      throw error;
+    }
   }
 
   private assertPrincipal(principal: BridgePrincipal, includeInstance = true): void {
@@ -236,6 +265,7 @@ export class SyncingBridgeStore implements BridgeStore {
   }
 
   private async flushOne(signal?: AbortSignal): Promise<FlushResult> {
+    await this.edge.noteAttempt(this.now());
     try {
       await this.ensureRemote(signal);
     } catch (error) {
@@ -250,16 +280,17 @@ export class SyncingBridgeStore implements BridgeStore {
     if (!record) return { state: "empty" };
     try {
       const result = await this.remote.insertMessage(record.draft, { signal });
+      this.remoteReachable = true;
       if (result.message.id !== record.draft.id) {
         const error = new Error("idempotency key resolved to a different message ID");
         Object.assign(error, { status: 409, code: "idempotency_conflict" });
-        await this.edge.block(record, codeOf(error));
+        await this.edge.block(record, codeOf(error), this.now());
         return { state: "blocked", error, messageId: record.draft.id };
       }
       if (edgeMessageFingerprint(result.message) !== record.payloadHash) {
         const error = new Error("idempotency key resolved to different message content");
         Object.assign(error, { status: 409, code: "idempotency_conflict" });
-        await this.edge.block(record, codeOf(error));
+        await this.edge.block(record, codeOf(error), this.now());
         return { state: "blocked", error, messageId: record.draft.id };
       }
       try {
@@ -270,6 +301,7 @@ export class SyncingBridgeStore implements BridgeStore {
       return { state: "committed", result, messageId: record.draft.id };
     } catch (error) {
       const caught = error instanceof Error ? error : new Error(String(error));
+      this.remoteReachable = isRetryableSyncError(error) ? false : true;
       if (this.cancelled(signal)) {
         await this.edge.retry(record, "request_cancelled", this.now());
         return { state: "retry", error: caught, retryable: true };
@@ -282,7 +314,7 @@ export class SyncingBridgeStore implements BridgeStore {
         );
         return { state: "retry", error: caught, retryable: true };
       }
-      await this.edge.block(record, codeOf(error));
+      await this.edge.block(record, codeOf(error), this.now());
       return { state: "blocked", error: caught, messageId: record.draft.id };
     }
   }
@@ -344,7 +376,9 @@ export class SyncingBridgeStore implements BridgeStore {
           includeExpired: true,
           mailbox: "all",
         }, { signal });
+        this.remoteReachable = true;
       } catch (error) {
+        this.remoteReachable = isRetryableSyncError(error) ? false : true;
         await this.edge.noteError(codeOf(error));
         return {
           online: false,
@@ -367,6 +401,7 @@ export class SyncingBridgeStore implements BridgeStore {
   async sync(options: { maxPush?: number; maxPages?: number; signal?: AbortSignal } = {}): Promise<SyncReport> {
     this.assertHealthy();
     await this.edge.initialize();
+    await this.edge.noteAttempt(this.now());
     const maxPush = Math.min(Math.max(Math.trunc(options.maxPush ?? 100), 0), 1_000);
     const maxPages = Math.min(Math.max(Math.trunc(options.maxPages ?? 20), 0), 100);
     let pushed = 0;
@@ -376,7 +411,7 @@ export class SyncingBridgeStore implements BridgeStore {
     let failureRetryable: boolean | undefined;
 
     if (options.signal?.aborted) {
-      const stats = await this.edge.stats();
+      const stats = await this.edge.stats(this.now());
       return {
         online: false, pushed: 0, deduplicated: 0, pulled: 0,
         pending: stats.pending, blocked: stats.blocked, cached: stats.cached,
@@ -412,7 +447,7 @@ export class SyncingBridgeStore implements BridgeStore {
       }
     }
 
-    const stats = await this.edge.stats();
+    const stats = await this.edge.stats(this.now());
     return {
       online,
       pushed,
@@ -437,13 +472,15 @@ export class SyncingBridgeStore implements BridgeStore {
       await this.ensureRemote();
       remotePage = await this.remote.listMessages(principal, query);
     } catch (error) {
-      if (!isRetryableSyncError(error)) throw error;
+      const retryable = isRetryableSyncError(error);
+      this.remoteReachable = retryable ? false : true;
+      if (!retryable) throw error;
       await this.edge.noteError(codeOf(error));
       let cached: MessagePage;
       let stats: Awaited<ReturnType<SQLiteEdgeStore["stats"]>>;
       try {
         cached = await this.edge.list(query);
-        stats = await this.edge.stats();
+        stats = await this.edge.stats(this.now());
       } catch (cacheError) {
         throw this.fatal(cacheError);
       }
@@ -452,8 +489,9 @@ export class SyncingBridgeStore implements BridgeStore {
         lastSyncedAt: stats.lastSyncAt };
     }
     try {
+      this.remoteReachable = true;
       await this.edge.cacheLatest(remotePage.messages, this.now());
-      const stats = await this.edge.stats();
+      const stats = await this.edge.stats(this.now());
       return { ...remotePage, source: "remote", stale: false, degraded: false,
         acknowledgements: "authoritative", lastSyncedAt: stats.lastSyncAt };
     } catch (error) {
@@ -506,17 +544,21 @@ export class SyncingBridgeStore implements BridgeStore {
   async cancelDelivery(principal:BridgePrincipal,id:string){this.assertPrincipal(principal);await this.ensureRemote();if(!this.remote.cancelDelivery)throw new Error("delivery cancellation is not supported");return this.remote.cancelDelivery(principal,id);}
   async requeueDelivery(principal:BridgePrincipal,id:string){this.assertPrincipal(principal);await this.ensureRemote();if(!this.remote.requeueDelivery)throw new Error("delivery requeue is not supported");return this.remote.requeueDelivery(principal,id);}
 
-  async diagnostics(principal: BridgePrincipal): Promise<SyncDiagnostics> {
+  async diagnostics(principal: BridgePrincipal, options: { mode?: "snapshot" | "probe" } = {}): Promise<SyncDiagnostics> {
     this.assertPrincipal(principal);
-    this.assertHealthy();
-    const edge = await this.edge.stats();
+    const edge = await this.edge.stats(this.now());
     let remote: BridgeDiagnostics | undefined;
-    try {
-      await this.ensureRemote();
-      remote = await this.remote.diagnostics?.(principal);
-    } catch (error) {
-      if (!isRetryableSyncError(error)) throw error;
-      // Edge diagnostics remain available during an outage.
+    let remoteError: string | undefined;
+    if (options.mode === "probe") {
+      try {
+        if (this.remote.diagnostics) remote = await this.remote.diagnostics(principal);
+        else await this.ensureRemote();
+        this.remoteReachable = true;
+      } catch (error) {
+        const retryable = isRetryableSyncError(error);
+        this.remoteReachable = retryable ? false : true;
+        remoteError = codeOf(error);
+      }
     }
     return {
       schemaVersion: remote?.schemaVersion ?? "postgres-v2",
@@ -527,13 +569,34 @@ export class SyncingBridgeStore implements BridgeStore {
       dead: remote?.dead ?? null,
       cancelled: remote?.cancelled ?? null,
       oldestAvailableAt: remote?.oldestAvailableAt,
+      due: remote?.due ?? null,
+      scheduled: remote?.scheduled ?? null,
+      expiredLeases: remote?.expiredLeases ?? null,
+      oldestDueAt: remote?.oldestDueAt,
+      queueLagMs: remote?.queueLagMs ?? null,
       principal: { workspace: principal.workspace, agent: principal.agent },
-      remoteReachable: Boolean(remote),
+      remoteReachable: options.mode === "probe" ? this.remoteReachable : null,
       outboxPending: edge.pending,
       outboxBlocked: edge.blocked,
       cachedMessages: edge.cached,
       lastSyncAt: edge.lastSyncAt,
       lastSyncError: edge.lastError,
+      outboxDue: edge.due,
+      outboxScheduled: edge.scheduled,
+      outboxLeased: edge.leased,
+      outboxOldestDueAt: edge.oldestDueAt,
+      outboxQueueLagMs: edge.queueLagMs,
+      outboxOldestBlockedAt: edge.oldestBlockedAt,
+      outboxBlockedAgeMs: edge.blockedAgeMs,
+      outboxBlockedMaxAttempts: edge.blockedMaxAttempts,
+      outboxBlockedLastError: edge.blockedLastError,
+      outboxNextRetryAt: edge.nextRetryAt,
+      lastOutboundSyncAt: edge.lastOutboundSyncAt,
+      lastInboundSyncAt: edge.lastInboundSyncAt,
+      lastSyncAttemptAt: edge.lastAttemptAt,
+      syncLoopState: this.backgroundError ? "failed" : this.loopState,
+      syncLoopError: this.backgroundError ? codeOf(this.backgroundError) : undefined,
+      remoteError,
     };
   }
 
@@ -553,6 +616,7 @@ export class SyncingBridgeStore implements BridgeStore {
 
   async close(): Promise<void> {
     this.stopped = true;
+    this.loopState = "stopped";
     this.closeController.abort(new Error("synchronization stopped"));
     if (this.wakeTimer) clearTimeout(this.wakeTimer);
     this.wake?.();

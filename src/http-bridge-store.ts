@@ -45,7 +45,8 @@ export class HttpBridgeStore implements BridgeStore {
     }
     this.fetchImpl = options.fetch ?? fetch;
   }
-  async initialize(options: { signal?: AbortSignal } = {}): Promise<void> {
+  async initialize(options: { signal?: AbortSignal; mode?: "active" | "passive" } = {}): Promise<void> {
+    if (options.mode === "passive") return;
     await this.request(undefined, "/readyz", { authenticated: false, signal: options.signal });
     const status = await this.request("status", "/v2/status", { signal: options.signal });
     this.assertBoundPrincipal(status);

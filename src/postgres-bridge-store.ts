@@ -598,27 +598,36 @@ export class PostgresBridgeStore implements BridgeStore {
 
   async diagnostics(principal: BridgePrincipal): Promise<BridgeDiagnostics> {
     const result = await this.db.query<Row>(
-      `SELECT state, count(*)::integer AS count, min(available_at) AS oldest
-       FROM agent_bridge.deliveries
-       WHERE workspace=$1 AND recipient=$2
-       GROUP BY state`,
+      `SELECT
+         count(*) FILTER (WHERE state='pending')::integer AS pending,
+         count(*) FILTER (WHERE state='claimed')::integer AS claimed,
+         count(*) FILTER (WHERE state='retrying')::integer AS retrying,
+         count(*) FILTER (WHERE state='dead')::integer AS dead,
+         count(*) FILTER (WHERE state='cancelled')::integer AS cancelled,
+         min(available_at) FILTER (WHERE state IN ('pending','retrying')) AS oldest_available,
+         count(*) FILTER (WHERE state IN ('pending','retrying') AND available_at<=now())::integer AS due,
+         count(*) FILTER (WHERE state IN ('pending','retrying') AND available_at>now())::integer AS scheduled,
+         count(*) FILTER (WHERE state='claimed' AND lease_expires_at<=now())::integer AS expired_leases,
+         min(available_at) FILTER (WHERE state IN ('pending','retrying') AND available_at<=now()) AS oldest_due,
+         coalesce(greatest(0,extract(epoch FROM (now()-min(available_at) FILTER (WHERE state IN ('pending','retrying') AND available_at<=now())))*1000),0)::bigint AS queue_lag_ms
+       FROM agent_bridge.deliveries WHERE workspace=$1 AND recipient=$2`,
       [principal.workspace, principal.agent],
     );
-    const counts = new Map(result.rows.map((row) => [String(row.state), Number(row.count)]));
-    const oldest = result.rows
-      .filter((row) => row.state === "pending" || row.state === "retrying")
-      .map((row) => asTimestamp(row.oldest))
-      .filter((value): value is string => Boolean(value))
-      .sort()[0];
+    const queue = result.rows[0] ?? {};
     return {
       schemaVersion: "postgres-v2",
       deliverySupported: true,
-      pending: counts.get("pending") ?? 0,
-      claimed: counts.get("claimed") ?? 0,
-      retrying: counts.get("retrying") ?? 0,
-      dead: counts.get("dead") ?? 0,
-      cancelled: counts.get("cancelled") ?? 0,
-      oldestAvailableAt: oldest,
+      pending: Number(queue.pending ?? 0),
+      claimed: Number(queue.claimed ?? 0),
+      retrying: Number(queue.retrying ?? 0),
+      dead: Number(queue.dead ?? 0),
+      cancelled: Number(queue.cancelled ?? 0),
+      oldestAvailableAt: asTimestamp(queue.oldest_available),
+      due: Number(queue.due ?? 0),
+      scheduled: Number(queue.scheduled ?? 0),
+      expiredLeases: Number(queue.expired_leases ?? 0),
+      oldestDueAt: asTimestamp(queue.oldest_due),
+      queueLagMs: Number(queue.queue_lag_ms ?? 0),
     };
   }
 

@@ -147,6 +147,62 @@ afterEach(async () => {
 });
 
 describe("offline SQLite synchronization", () => {
+  it("replaces stale reachability after a failed probe", async () => {
+    const root = directory();
+    const principal = { workspace: "acme", agent: "sender" };
+    const remote = new SwitchableRemote();
+    remote.online = true;
+    const syncing = new SyncingBridgeStore(
+      edge(join(root, "edge.sqlite3"), principal), remote, principal, { autoSync: false },
+    );
+    await syncing.initialize();
+    expect(await syncing.diagnostics(principal, { mode: "probe" })).toMatchObject({ remoteReachable: true });
+    remote.online = false;
+    expect(await syncing.diagnostics(principal, { mode: "probe" })).toMatchObject({
+      remoteReachable: false,
+      remoteError: "network_error",
+    });
+    await syncing.close();
+  });
+
+  it("reports scheduled, due, and leased outbox work without head-of-line blocking", async () => {
+    const root = directory();
+    const principal = { workspace: "acme", agent: "sender" };
+    const localEdge = edge(join(root, "edge.sqlite3"), principal);
+    const now = new Date("2026-07-14T12:00:00.000Z");
+    await localEdge.enqueue(draft(principal), now);
+    const first = await localEdge.claimNext(now, 30_000);
+    expect(first).toBeDefined();
+    await localEdge.retry(first!, "network_error", new Date(now.getTime() + 60_000));
+    await localEdge.enqueue(draft(principal, "018f4a70-0000-7000-8000-000000000102"), now);
+
+    expect(await localEdge.stats(now)).toMatchObject({ pending: 2, due: 1, scheduled: 1, leased: 0 });
+    const second = await localEdge.claimNext(now, 30_000);
+    expect(second?.draft.id).toBe("018f4a70-0000-7000-8000-000000000102");
+    expect(await localEdge.stats(now)).toMatchObject({ pending: 2, due: 0, scheduled: 1, leased: 1 });
+    await localEdge.close();
+  });
+
+  it("measures blocked age from the blocked transition", async () => {
+    const root = directory();
+    const principal = { workspace: "acme", agent: "sender" };
+    const localEdge = edge(join(root, "edge.sqlite3"), principal);
+    const enqueuedAt = new Date("2026-07-14T10:00:00.000Z");
+    const blockedAt = new Date("2026-07-14T11:00:00.000Z");
+    await localEdge.enqueue(draft(principal), enqueuedAt);
+    const record = await localEdge.claimNext(enqueuedAt, 30_000);
+    expect(record).toBeDefined();
+    await localEdge.block(record!, "invalid_input", blockedAt);
+
+    expect(await localEdge.stats(new Date(blockedAt.getTime() + 5_000))).toMatchObject({
+      blocked: 1,
+      oldestBlockedAt: blockedAt.toISOString(),
+      blockedAgeMs: 5_000,
+      blockedLastError: "invalid_input",
+    });
+    await localEdge.close();
+  });
+
   it("includes remote cancelled deliveries in syncing diagnostics", async () => {
     const root = directory();
     const principal = { workspace: "acme", agent: "worker", instance: "one" };
@@ -162,7 +218,7 @@ describe("offline SQLite synchronization", () => {
       edge(join(root, "edge.sqlite3"), principal), remote, principal, { autoSync: false },
     );
     await syncing.initialize();
-    expect(await syncing.diagnostics(principal)).toMatchObject({ cancelled: 1 });
+    expect(await syncing.diagnostics(principal, { mode: "probe" })).toMatchObject({ cancelled: 1 });
     await syncing.close();
   });
 
@@ -527,7 +583,10 @@ describe("offline SQLite synchronization", () => {
     });
     expect(insert).not.toHaveBeenCalled();
     await expect(syncing.sync()).rejects.toMatchObject({ code: "local_edge_commit_failed" });
-    await expect(syncing.diagnostics(principal)).rejects.toMatchObject({ code: "local_edge_commit_failed" });
+    await expect(syncing.diagnostics(principal)).resolves.toMatchObject({
+      syncLoopState: "failed",
+      syncLoopError: "local_edge_commit_failed",
+    });
     await expect(syncing.close()).rejects.toMatchObject({ code: "local_edge_commit_failed" });
   });
 
@@ -549,8 +608,9 @@ describe("offline SQLite synchronization", () => {
       code: "local_edge_commit_failed",
     });
     expect(insert).not.toHaveBeenCalled();
-    await expect(syncing.diagnostics(principal)).rejects.toMatchObject({
-      code: "local_edge_commit_failed",
+    await expect(syncing.diagnostics(principal)).resolves.toMatchObject({
+      syncLoopState: "failed",
+      syncLoopError: "local_edge_commit_failed",
     });
     await expect(syncing.close()).rejects.toMatchObject({
       code: "local_edge_commit_failed",
@@ -610,6 +670,8 @@ describe("offline SQLite synchronization", () => {
     expect(await syncing.diagnostics(principal)).toMatchObject({
       outboxPending: 0,
       outboxBlocked: 1,
+      outboxBlockedMaxAttempts: 1,
+      outboxBlockedLastError: "invalid_input",
     });
     expect(await syncing.sync({ maxPages: 0 })).toMatchObject({ pushed: 0, blocked: 1 });
 
@@ -622,6 +684,9 @@ describe("offline SQLite synchronization", () => {
     expect(await syncing.diagnostics(principal)).toMatchObject({
       outboxPending: 0,
       outboxBlocked: 1,
+      outboxBlockedMaxAttempts: 1,
+      outboxBlockedLastError: "invalid_input",
+      lastOutboundSyncAt: expect.any(String),
     });
     await syncing.close();
   });
@@ -713,8 +778,9 @@ describe("offline SQLite synchronization", () => {
     expect(remoteInsert).not.toHaveBeenCalled();
     expect((await localEdge.stats()).pending).toBe(1);
     await expect(syncing.sync()).rejects.toMatchObject({ code: "local_edge_commit_failed" });
-    await expect(syncing.diagnostics(principal)).rejects.toMatchObject({
-      code: "local_edge_commit_failed",
+    await expect(syncing.diagnostics(principal)).resolves.toMatchObject({
+      syncLoopState: "failed",
+      syncLoopError: "local_edge_commit_failed",
     });
     await expect(syncing.close()).rejects.toMatchObject({ code: "local_edge_commit_failed" });
   });
@@ -766,8 +832,12 @@ describe("offline SQLite synchronization", () => {
       code: "principal_mismatch",
     });
     expect(insertCalls).toBe(0);
-    await expect(syncing.diagnostics(principal)).rejects.toMatchObject({
-      code: "principal_mismatch",
+    await expect(syncing.diagnostics(principal)).resolves.toMatchObject({
+      remoteReachable: null,
+    });
+    await expect(syncing.diagnostics(principal, { mode: "probe" })).resolves.toMatchObject({
+      remoteReachable: true,
+      remoteError: "principal_mismatch",
     });
     await syncing.close();
   });
