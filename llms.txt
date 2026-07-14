@@ -28,6 +28,7 @@ History uses mailbox `inbox` (default), `sent`, or `all`. Receipt state is `any`
 ## MCP tools
 
 - `capabilities`: return operations, required scopes, provider-specific enforcement, and supported protocol versions. Gateway access needs an active credential but no named scope for this operation.
+- Production gateway capabilities report `requestAuthority: true` and `rowIsolation: false`. Node hashes the bearer credential before PostgreSQL matches it and derives workspace, principal, and scopes within one request transaction; this is not RLS.
 
 Compatibility: post_context, get_context, ack_context.
 Reliable messaging: send, history, claim, extend, acknowledge, negative_acknowledge, heartbeat, presence, sync.

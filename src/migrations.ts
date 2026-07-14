@@ -46,6 +46,14 @@ const REQUIRED_COLUMNS = new Map([
   ["rate_limit_buckets.policy_id", "text"],
   ["rate_limit_buckets.tokens", "numeric"],
   ["rate_limit_buckets.updated_at", "timestamptz"],
+  ["request_authorities.backend_pid", "int4"],
+  ["request_authorities.transaction_id", "xid8"],
+  ["request_authorities.request_id", "uuid"],
+  ["request_authorities.credential_id", "uuid"],
+  ["request_authorities.workspace_id", "text"],
+  ["request_authorities.principal", "text"],
+  ["request_authorities.scopes", "_text"],
+  ["request_authorities.opened_session_user", "name"],
   ["messages.sequence", "int8"],
   ["messages.id", "uuid"],
   ["messages.workspace", "text"],
@@ -106,6 +114,7 @@ export const REQUIRED_MIGRATIONS = [
   { version: 9, name: "mailbox_query_indexes" },
   { version: 10, name: "publisher_delivery_policy" },
   { version: 11, name: "credential_security" },
+  { version: 12, name: "request_authority" },
 ] as const;
 
 function checksum(source: string): string {
@@ -179,7 +188,7 @@ export async function runtimeSchemaReady(db: PgQueryable): Promise<boolean> {
   );
   if ([...REQUIRED_COLUMNS].some(([name, type]) => actual.get(name) !== type)) return false;
 
-  const objects = await db.query<{ immutable: boolean; deliveryAudit: boolean; idempotency: boolean; claim: boolean; publisher: boolean; terminal: boolean; source: boolean; thread: boolean; created: boolean; presence: boolean; project: boolean; targets: boolean; scopeSets: boolean; securityEvents: boolean; ratePolicies: boolean; rateBuckets: boolean; replacement: boolean; rateCleanup: boolean; credentialSecurity: boolean; eventAppendOnly: boolean; scopeAudit: boolean; rateConsume: boolean; securityReady: boolean }>(
+  const objects = await db.query<{ immutable: boolean; deliveryAudit: boolean; idempotency: boolean; claim: boolean; publisher: boolean; terminal: boolean; source: boolean; thread: boolean; created: boolean; presence: boolean; project: boolean; targets: boolean; scopeSets: boolean; securityEvents: boolean; ratePolicies: boolean; rateBuckets: boolean; replacement: boolean; rateCleanup: boolean; credentialSecurity: boolean; eventAppendOnly: boolean; scopeAudit: boolean; rateConsume: boolean; securityReady: boolean; requestAuthorities: boolean; authorityOpen: boolean; authorityClose: boolean; credentialDigestHidden: boolean; authorityRowsHidden: boolean; principalTablesHidden: boolean; authorityTablesLocked: boolean; authorityCatalog: boolean }>(
     `SELECT
        EXISTS (
          SELECT 1 FROM pg_trigger
@@ -219,7 +228,73 @@ export async function runtimeSchemaReady(db: PgQueryable): Promise<boolean> {
        ) AS "eventAppendOnly",
        to_regprocedure('agent_bridge.record_scope_denial(uuid,text,uuid)') IS NOT NULL AS "scopeAudit",
        to_regprocedure('agent_bridge.consume_rate_limit(uuid,text,uuid)') IS NOT NULL AS "rateConsume",
-       to_regprocedure('agent_bridge.security_schema_ready()') IS NOT NULL AS "securityReady"`,
+       to_regprocedure('agent_bridge.security_schema_ready()') IS NOT NULL AS "securityReady",
+       to_regclass('agent_bridge.request_authorities') IS NOT NULL AS "requestAuthorities",
+       to_regprocedure('agent_bridge.open_request_authority(uuid,text,uuid)') IS NOT NULL
+         AND to_regprocedure('agent_bridge.resolve_credential_hash(text)') IS NOT NULL AS "authorityOpen",
+       to_regprocedure('agent_bridge.close_request_authority()') IS NOT NULL AS "authorityClose",
+       ((SELECT usesuper FROM pg_user WHERE usename=current_user)
+         OR NOT has_table_privilege(current_user,'agent_bridge.credentials','SELECT')) AS "credentialDigestHidden",
+       ((SELECT usesuper FROM pg_user WHERE usename=current_user)
+         OR NOT has_table_privilege(current_user,'agent_bridge.request_authorities','SELECT')) AS "authorityRowsHidden",
+       ((SELECT usesuper FROM pg_user WHERE usename=current_user)
+         OR (NOT has_table_privilege(current_user,'agent_bridge.agents','SELECT')
+           AND NOT has_table_privilege(current_user,'agent_bridge.workspaces','SELECT'))) AS "principalTablesHidden",
+       ((SELECT usesuper FROM pg_user WHERE usename=current_user) OR (
+         NOT EXISTS (
+           SELECT 1
+           FROM unnest(ARRAY[
+             'agent_bridge.credentials','agent_bridge.agents',
+             'agent_bridge.workspaces','agent_bridge.request_authorities'
+           ]) protected_table(value)
+           CROSS JOIN unnest(ARRAY[
+             'SELECT','INSERT','UPDATE','DELETE','TRUNCATE','REFERENCES','TRIGGER'
+           ]) requested_privilege(value)
+           WHERE has_table_privilege(current_user,protected_table.value,requested_privilege.value)
+         )
+         AND NOT EXISTS (
+           SELECT 1
+           FROM unnest(ARRAY[
+             'agent_bridge.credentials','agent_bridge.agents',
+             'agent_bridge.workspaces','agent_bridge.request_authorities'
+           ]) protected_table(value)
+           CROSS JOIN unnest(ARRAY['SELECT','INSERT','UPDATE','REFERENCES']) requested_privilege(value)
+           WHERE has_any_column_privilege(current_user,protected_table.value,requested_privilege.value)
+         )
+       )) AS "authorityTablesLocked",
+       ((SELECT usesuper FROM pg_user WHERE usename=current_user) OR (
+         has_function_privilege(current_user,'agent_bridge.resolve_credential_hash(text)','EXECUTE')
+         AND has_function_privilege(current_user,'agent_bridge.open_request_authority(uuid,text,uuid)','EXECUTE')
+         AND has_function_privilege(current_user,'agent_bridge.close_request_authority()','EXECUTE')
+         AND has_function_privilege(current_user,'agent_bridge.record_scope_denial(uuid,text,uuid)','EXECUTE')
+         AND has_function_privilege(current_user,'agent_bridge.consume_rate_limit(uuid,text,uuid)','EXECUTE')
+         AND NOT has_function_privilege(current_user,'agent_bridge.active_request_authority()','EXECUTE')
+         AND NOT has_function_privilege(current_user,'agent_bridge.assert_active_request_credential(uuid)','EXECUTE')
+         AND NOT has_function_privilege(current_user,'agent_bridge.record_scope_denial_unbound_011(uuid,text,uuid)','EXECUTE')
+         AND NOT has_function_privilege(current_user,'agent_bridge.consume_rate_limit_unbound_011(uuid,text,uuid)','EXECUTE')
+         AND NOT has_function_privilege('public','agent_bridge.resolve_credential_hash(text)','EXECUTE')
+         AND NOT has_function_privilege('public','agent_bridge.open_request_authority(uuid,text,uuid)','EXECUTE')
+         AND NOT has_function_privilege('public','agent_bridge.close_request_authority()','EXECUTE')
+         AND NOT has_function_privilege('public','agent_bridge.record_scope_denial(uuid,text,uuid)','EXECUTE')
+         AND NOT has_function_privilege('public','agent_bridge.consume_rate_limit(uuid,text,uuid)','EXECUTE')
+         AND NOT has_function_privilege('public','agent_bridge.record_scope_denial_unbound_011(uuid,text,uuid)','EXECUTE')
+         AND NOT has_function_privilege('public','agent_bridge.consume_rate_limit_unbound_011(uuid,text,uuid)','EXECUTE')
+         AND NOT EXISTS (
+           SELECT 1 FROM pg_proc procedure
+           JOIN pg_namespace namespace ON namespace.oid=procedure.pronamespace
+           WHERE namespace.nspname='agent_bridge'
+             AND procedure.proname IN (
+               'resolve_credential_hash','open_request_authority','active_request_authority',
+               'assert_active_request_credential','close_request_authority','record_scope_denial',
+               'consume_rate_limit','record_scope_denial_unbound_011','consume_rate_limit_unbound_011'
+             )
+             AND (
+               NOT procedure.prosecdef
+               OR procedure.proowner <> (SELECT nspowner FROM pg_namespace WHERE nspname='agent_bridge')
+               OR NOT coalesce(procedure.proconfig @> ARRAY['search_path=""'],false)
+             )
+         )
+       )) AS "authorityCatalog"`,
   );
   const row = objects.rows[0];
   if (!Boolean(
@@ -227,7 +302,9 @@ export async function runtimeSchemaReady(db: PgQueryable): Promise<boolean> {
     row.terminal && row.source && row.thread && row.created && row.presence && row.project &&
     row.targets && row.scopeSets && row.securityEvents && row.ratePolicies && row.rateBuckets &&
     row.replacement && row.rateCleanup && row.credentialSecurity && row.eventAppendOnly &&
-    row.scopeAudit && row.rateConsume && row.securityReady
+    row.scopeAudit && row.rateConsume && row.securityReady && row.requestAuthorities &&
+    row.authorityOpen && row.authorityClose && row.credentialDigestHidden && row.authorityRowsHidden &&
+    row.principalTablesHidden && row.authorityTablesLocked && row.authorityCatalog
   )) return false;
   try {
     const security = await db.query<{ ready: boolean }>(

@@ -80,7 +80,8 @@ Sync triggers:
 - Upgraded gateways preserve released 2.0 clients. New 2.1 clients require complete, consistent 2.1 negotiation before mutation and reject headerless or selected 2.0 gateways instead of downgrading. Upgrade the gateway before 2.1 clients.
 - OpenAPI paths describe protocol 2.1. The embedded 2.0 vendor extensions contain limited compatibility schema metadata, not a second OpenAPI description.
 - Gateway credentials enforce the canonical operation scopes. Capabilities requires an active credential but no named scope. Local and legacy providers report scope enforcement as false.
-- Every gateway request consumes a credential-wide rate bucket and an operation bucket through narrow security-definer functions. Scope and rate denials append secret-free security events before the gateway reads a request body.
+- For requests with bodies, the gateway validates media type, size, and JSON before opening the request transaction. Every authorized operation then consumes a credential-wide rate bucket and an operation bucket through narrow security-definer functions. Scope and rate denials append secret-free security events before domain work begins.
+- Production PostgreSQL routes use one checked-out client and one explicit outer transaction. Node hashes the bearer credential before PostgreSQL receives it. Migration 012 matches that hash and derives canonical workspace, principal, and scopes on the request backend; request-local stores and security objects reuse it. This is request authority, not RLS or database row isolation.
 - Credential replacement links are immutable and principal-bound. Revocation and ordinary expiry always win; a successor grace cutoff may only shorten predecessor access.
 
 ### Providers

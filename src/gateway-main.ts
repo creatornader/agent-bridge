@@ -10,6 +10,7 @@ import {
   runtimeSchemaReady,
 } from "./migrations.js";
 import { PostgresBridgeStore } from "./postgres-bridge-store.js";
+import { PostgresRequestAuthority } from "./postgres-request-authority.js";
 
 function integer(value: string | undefined, fallback: number, name: string): number {
   if (value === undefined) return fallback;
@@ -75,6 +76,7 @@ async function main(): Promise<void> {
     store,
     credentials: new PostgresCredentialResolver(pool),
     security: new PostgresGatewaySecurity(pool),
+    requestAuthority: new PostgresRequestAuthority(pool),
     allowedOrigins,
     bodyLimitBytes,
     requestDeadlineMs: deadline,

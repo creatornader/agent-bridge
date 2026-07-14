@@ -109,6 +109,8 @@ describe("canonical v2 contract registry", () => {
       "capabilities", "publish_message", "history",
     ]);
     expect(capabilityDocument({ surface: "http", provider: "gateway" }).operations.some((entry) => entry.id === "sync")).toBe(false);
+    expect(capabilityDocument({ surface: "http", provider: "gateway" }).requestAuthority).toBe(false);
+    expect(capabilityDocument({ surface: "http", provider: "gateway", requestAuthority: true }).requestAuthority).toBe(true);
     expect(capabilityDocument({ surface: "cli", provider: "local" }).operations.find((entry) => entry.id === "client_status")?.cli).toMatchObject({ command: "status", aliases: ["doctor"] });
     const cli = capabilityDocument({ surface: "cli", provider: "local" });
     expect(cli.operations.find((entry) => entry.id === "history")?.cli?.variants).toEqual([

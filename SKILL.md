@@ -34,3 +34,5 @@ Use `agent-bridge pending` as a cheap process gate before starting an agent. Exi
 Keep side effects idempotent. Agent Bridge provides at-least-once delivery and idempotent message insertion, not exactly-once execution.
 
 Use `project` only as an optional message label. Workspace remains the tenant and credential boundary. Omit a project filter to read labeled and unlabeled messages, or provide one for an exact match. Reusing a workspace/source idempotency key with a different project is a conflict.
+
+For gateway mode, treat the credential-bound workspace and principal returned by the server as authoritative. Instance identifies one runtime of that same principal; it cannot select a workspace, agent, or scopes. Gateway capabilities expose transaction-bound request authority separately from row isolation.

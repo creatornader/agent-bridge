@@ -34,13 +34,15 @@ export interface PgQueryable {
   ): Promise<{ rows: T[]; rowCount: number | null }>;
   connect?(): Promise<PgTransactionClient>;
   release?(): void;
+  /** True when the queryable is already owned by an explicit request transaction. */
+  inTransaction?: boolean;
 }
-interface PgTransactionClient {
+export interface PgTransactionClient {
   query<T extends Record<string, unknown> = Record<string, unknown>>(
     sql: string,
     values?: unknown[],
   ): Promise<{ rows: T[]; rowCount: number | null }>;
-  release(): void;
+  release(error?: Error | boolean): void;
 }
 
 type Row = Record<string, any>;
@@ -141,6 +143,7 @@ function asDeliveryEvent(row: Row): BridgeDeliveryEvent {
 }
 
 async function transaction<T>(db: PgQueryable, work: (client: PgQueryable) => Promise<T>): Promise<T> {
+  if (db.inTransaction) return work(db);
   const borrowed = !db.release && Boolean(db.connect);
   const client = borrowed ? await db.connect!() : db;
   try {

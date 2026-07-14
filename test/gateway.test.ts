@@ -8,11 +8,12 @@ import { join } from "node:path";
 import { SQLiteBridgeStore } from "../src/sqlite-bridge-store.js";
 import { BridgeService } from "../src/bridge-service.js";
 import { createGateway } from "../src/gateway.js";
-import type { CredentialResolver } from "../src/gateway-auth.js";
+import { hashCredential, type CredentialResolver } from "../src/gateway-auth.js";
 import { BridgeHttpError, HttpBridgeStore } from "../src/http-bridge-store.js";
 import { installClient } from "../src/client-installer.js";
 import { resolveClientConfig } from "../src/client-config.js";
 import { AUTHORIZATION_SCOPES } from "../src/contracts/registry.js";
+import { PostgresRequestAuthority } from "../src/postgres-request-authority.js";
 
 const servers: Array<ReturnType<typeof createGateway>> = [];
 const stores: SQLiteBridgeStore[] = [];
@@ -632,6 +633,89 @@ describe("authenticated v2 gateway", () => {
     expect(aborted).toBe(true);
   });
 
+  it("returns a live deadline while request authority remains hung", async () => {
+    const base = await gateway(undefined, {
+      requestDeadlineMs: 20,
+      requestAuthority: { run: async () => new Promise(() => {}) },
+    });
+    const response = await fetch(`${base}/v2/history`, { headers: auth() });
+    expect(response.status).toBe(504);
+    expect((await response.json()).error.code).toBe("request_timeout");
+  });
+
+  it("passes only a credential hash to authority and preserves Retry-After", async () => {
+    let receivedHash = "";
+    const denied = {
+      recordScopeDenial: async () => {},
+      consume: async () => ({
+        allowed: false, policyId: "history", limit: 1, remaining: 0, retryAfterSeconds: 2.2,
+      }),
+    };
+    const base = await gateway(undefined, {
+      requestAuthority: {
+        run: async (credentialId: string, credentialHash: string, _requestId: string, _signal: AbortSignal, work: any) => {
+          receivedHash = credentialHash;
+          return work({
+            credential: {
+              id: credentialId,
+              principal: { workspace: "workspace-a", agent: "agent-a" },
+              scopes: AUTHORIZATION_SCOPES,
+            },
+            store: undefined,
+            security: denied,
+            beginDomainWork: async () => {},
+          });
+        },
+      },
+    });
+    const response = await fetch(`${base}/v2/history`, { headers: auth() });
+    expect(response.status).toBe(429);
+    expect(response.headers.get("retry-after")).toBe("3");
+    expect(receivedHash).toBe(hashCredential("good"));
+    expect(receivedHash).not.toBe("good");
+  });
+
+  it("preserves security_unavailable after PostgreSQL aborts the transaction", async () => {
+    const calls: string[] = [];
+    let aborted = false;
+    let released: unknown;
+    const client = {
+      query: async (sql: string) => {
+        calls.push(sql);
+        if (sql === "ROLLBACK") {
+          aborted = false;
+          return { rows: [], rowCount: 0 };
+        }
+        if (aborted) {
+          throw Object.assign(new Error("current transaction is aborted"), { code: "25P02" });
+        }
+        if (sql.includes("open_request_authority")) {
+          return { rows: [{
+            credential_id: "credential",
+            workspace_id: "workspace-a",
+            principal: "agent-a",
+            scopes: AUTHORIZATION_SCOPES,
+          }], rowCount: 1 };
+        }
+        if (sql.includes("consume_rate_limit")) {
+          aborted = true;
+          throw new Error("rate storage failed");
+        }
+        return { rows: [], rowCount: 0 };
+      },
+      release: (error?: unknown) => { released = error; },
+    };
+    const base = await gateway(undefined, {
+      requestAuthority: new PostgresRequestAuthority({ connect: async () => client } as any),
+    });
+    const response = await fetch(`${base}/v2/history`, { headers: auth() });
+    expect(response.status).toBe(503);
+    expect(await response.json()).toMatchObject({ error: { code: "security_unavailable" } });
+    expect(calls.filter((sql) => sql === "ROLLBACK")).toHaveLength(1);
+    expect(calls).not.toContain("COMMIT");
+    expect(released).toBeUndefined();
+  });
+
   it("does not continue after a resolver ignores the deadline", async () => {
     let calls = 0;
     const base = await gateway({
@@ -686,16 +770,21 @@ describe("authenticated v2 gateway", () => {
   });
 
   it("reports an unknown outcome when a mutation outlives its deadline", async () => {
+    let releaseMutation!: () => void;
+    let markMutationComplete!: () => void;
+    const mutationGate = new Promise<void>((resolve) => { releaseMutation = resolve; });
+    const mutationComplete = new Promise<void>((resolve) => { markMutationComplete = resolve; });
     class SlowStore extends SQLiteBridgeStore {
       override async insertMessage(
         ...args: Parameters<SQLiteBridgeStore["insertMessage"]>
       ): ReturnType<SQLiteBridgeStore["insertMessage"]> {
-        await new Promise((resolve) => setTimeout(resolve, 40));
-        return super.insertMessage(...args);
+        await mutationGate;
+        const result = await super.insertMessage(...args);
+        markMutationComplete();
+        return result;
       }
     }
     const base = await gateway(undefined, { requestDeadlineMs: 10 }, new SlowStore());
-    const started = Date.now();
     const response = await fetch(`${base}/v2/messages`, {
       method: "POST",
       headers: auth(),
@@ -703,8 +792,8 @@ describe("authenticated v2 gateway", () => {
     });
     expect(response.status).toBe(504);
     expect((await response.json()).error.code).toBe("mutation_outcome_unknown");
-    expect(Date.now() - started).toBeLessThan(35);
-    await new Promise((resolve) => setTimeout(resolve, 50));
+    releaseMutation();
+    await mutationComplete;
     const history = await fetch(`${base}/v2/history`, { headers: auth() });
     expect((await history.json()).messages).toHaveLength(1);
   });

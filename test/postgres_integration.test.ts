@@ -604,7 +604,7 @@ integration("PostgreSQL BridgeStore integration", () => {
     await expect(pool!.query(
       "SELECT agent_bridge.record_scope_denial($1,'not-an-operation',$2)",
       [credential.rows[0]!.id, randomUUID()],
-    )).rejects.toThrow(/unavailable/);
+    )).rejects.toThrow(/active request authority is required/);
   });
 
   it("enforces canonical scopes and preserves the transitional full default", async () => {
@@ -807,14 +807,25 @@ integration("PostgreSQL BridgeStore integration", () => {
       expect(await new PostgresCredentialResolver(client).resolve(token)).toMatchObject({
         principal: { workspace: workspaceId, agent: "worker" },
       });
-      expect((await new PostgresGatewaySecurity(client).consume(
+      await expect(new PostgresGatewaySecurity(client).consume(
         (await new PostgresCredentialResolver(client).resolve(token))!.id,
         "status",
         randomUUID(),
-      )).allowed).toBe(true);
+      )).rejects.toThrow(/permission denied/);
       await expect(
         client.query("SELECT * FROM agent_bridge.rate_limit_policies"),
       ).rejects.toThrow(/permission denied/);
+      for (const table of ["credentials", "agents", "workspaces", "request_authorities"]) {
+        await expect(
+          client.query(`SELECT * FROM agent_bridge.${table}`),
+        ).rejects.toThrow(/permission denied/);
+      }
+      await expect(
+        client.query(
+          "SELECT agent_bridge.record_scope_denial($1,'history',$2)",
+          [(await new PostgresCredentialResolver(client).resolve(token))!.id, randomUUID()],
+        ),
+      ).rejects.toThrow(/active request authority is required/);
       await expect(
         client.query("INSERT INTO agent_bridge.security_events(event_type) VALUES ('scope_denied')"),
       ).rejects.toThrow(/permission denied/);
@@ -985,6 +996,7 @@ integration("PostgreSQL BridgeStore integration", () => {
         claim!.delivery.id,
         claim!.leaseToken,
       ))?.state).toBe("acked");
+      expect((await pool!.query("SELECT count(*)::integer AS count FROM agent_bridge.request_authorities")).rows[0]!.count).toBe(0);
     } finally {
       await claudeRuntime?.close();
       await codexRuntime?.close();
@@ -1021,6 +1033,42 @@ integration("PostgreSQL BridgeStore integration", () => {
       "UPDATE agent_bridge.schema_migrations SET checksum=$1 WHERE version=3",
       [recorded.rows[0]!.checksum],
     );
+  });
+
+  it("detects request-authority privilege and definer drift", async () => {
+    const client = await pool!.connect();
+    const role = await runtimeRole(client);
+    const asRuntime = async () => {
+      await client.query(`SET ROLE ${role}`);
+      try {
+        return await runtimeSchemaReady(client);
+      } finally {
+        await client.query("RESET ROLE");
+      }
+    };
+    try {
+      expect(await asRuntime()).toBe(true);
+
+      await client.query(`GRANT INSERT ON agent_bridge.request_authorities TO ${role}`);
+      expect(await asRuntime()).toBe(false);
+      await client.query(`REVOKE INSERT ON agent_bridge.request_authorities FROM ${role}`);
+      expect(await asRuntime()).toBe(true);
+
+      await client.query(
+        "ALTER FUNCTION agent_bridge.open_request_authority(uuid,text,uuid) SECURITY INVOKER",
+      );
+      expect(await asRuntime()).toBe(false);
+      await client.query(
+        "ALTER FUNCTION agent_bridge.open_request_authority(uuid,text,uuid) SECURITY DEFINER",
+      );
+      expect(await asRuntime()).toBe(true);
+    } finally {
+      await client.query(`REVOKE INSERT ON agent_bridge.request_authorities FROM ${role}`);
+      await client.query(
+        "ALTER FUNCTION agent_bridge.open_request_authority(uuid,text,uuid) SECURITY DEFINER",
+      );
+      client.release();
+    }
   });
 
   it("upgrades v0.2 credentials with compatible canonical scopes and exact migration state", async () => {
