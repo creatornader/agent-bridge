@@ -3,10 +3,6 @@ name: test
 on:
   push:
     branches: [main]
-    paths-ignore:
-      - 'docs/**'
-      - '**/*.md'
-      - '.github/dependabot.yml'
   pull_request:
     branches: [main]
   workflow_dispatch:
@@ -20,18 +16,77 @@ permissions:
 
 jobs:
   test:
-    name: test (vitest)
-    runs-on: ubuntu-latest
+    name: test (${{ matrix.os }}, node ${{ matrix.node }})
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+        node: [22, 24]
+    runs-on: ${{ matrix.os }}
     timeout-minutes: 10
     steps:
       - uses: actions/checkout@v7
 
-      - uses: actions/setup-node@v6
+      - uses: actions/setup-node@v7
         with:
-          node-version: "22"
+          node-version: ${{ matrix.node }}
           cache: npm
           cache-dependency-path: package-lock.json
 
       - run: npm ci
-      - run: npm run build
+      - run: npm run check
+
+  postgres:
+    name: postgres integration
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    services:
+      postgres:
+        image: postgres:17
+        env:
+          POSTGRES_HOST_AUTH_METHOD: trust
+          POSTGRES_DB: agent_bridge_test
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres -d agent_bridge_test"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+    env:
+      AGENT_BRIDGE_TEST_DATABASE_URL: postgresql://postgres@127.0.0.1:5432/agent_bridge_test
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v7
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: package-lock.json
+      - run: npm ci
       - run: npm test
+
+  package:
+    name: package install smoke
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v7
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: package-lock.json
+      - run: npm ci
+      - name: Pack from a clean build state
+        run: |
+          rm -rf dist
+          npm pack --pack-destination "$RUNNER_TEMP"
+      - name: Install and run the packed CLI
+        working-directory: ${{ runner.temp }}
+        run: |
+          mkdir package-smoke
+          cd package-smoke
+          npm init -y
+          npm install ../creatornader-agent-bridge-*.tgz
+          node --input-type=module -e "import { BridgeService, SQLiteBridgeStore } from '@creatornader/agent-bridge'; if (typeof BridgeService !== 'function' || typeof SQLiteBridgeStore !== 'function') process.exit(1)"
+          ./node_modules/.bin/agent-bridge demo

@@ -1,0 +1,39 @@
+# Agent Bridge
+
+Repository: https://github.com/creatornader/agent-bridge
+Package: @creatornader/agent-bridge
+
+Agent Bridge carries durable context and executable work between AI agents in different clients, processes, sessions, and machines.
+
+## Modes
+
+- local: SQLite WAL, no account or daemon
+- gateway: authenticated HTTPS, PostgreSQL authority, SQLite edge outbox and cache
+- legacy-supabase: compatibility with the v1 shared_context schema
+
+## Commands
+
+- agent-bridge init --provider local
+- agent-bridge demo
+- agent-bridge doctor
+- agent-bridge pending
+- agent-bridge send, inbox, history, acknowledge
+- agent-bridge claim, extend, ack, nack
+- agent-bridge sync, watch, join, presence
+- agent-bridge clients install <runtime> --identity <principal>
+
+## MCP tools
+
+Compatibility: post_context, get_context, ack_context.
+Reliable messaging: send, history, claim, extend, acknowledge, negative_acknowledge, heartbeat, presence.
+
+## Identity rule
+
+The active runtime supplies AGENT_BRIDGE_AGENT and AGENT_BRIDGE_INSTANCE. Do not hardcode another client name and do not store agent identity in the shared backend config. Gateway installations use a separate principal-bound token and owner-only backend file for each client.
+
+## References
+
+- README.md: setup, commands, security, and provider behavior
+- docs/architecture-v2.md: protocol, storage, identity, delivery, and acceptance decisions
+- clients/*.json: runtime adapter manifests
+- SKILL.md: concise agent operating instructions

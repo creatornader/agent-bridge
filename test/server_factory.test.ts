@@ -1,12 +1,20 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
+import { ErrorCode } from "@modelcontextprotocol/sdk/types.js";
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { createAgentBridgeServer, configFromEnv } from "../src/server.js";
 
 describe("createAgentBridgeServer", () => {
+  it("rejects plaintext non-loopback legacy providers without a configured agent", () => {
+    expect(() => createAgentBridgeServer({
+      supabaseUrl: "http://bridge.example.test",
+      supabaseKey: "secret",
+    })).toThrow("requires HTTPS");
+  });
+
   afterEach(() => {
     vi.restoreAllMocks();
   });
@@ -107,7 +115,7 @@ describe("createAgentBridgeServer", () => {
         });
         expect(calls[1]?.url).toContain("acked_by=not.cs.%7Bcodex%7D");
         expect(JSON.parse(String(calls[2]?.init?.body))).toEqual({
-          entry_ids: [7],
+          entry_ids: ["7"],
           agent_name: "codex",
         });
       } finally {
@@ -117,6 +125,146 @@ describe("createAgentBridgeServer", () => {
     },
     15_000,
   );
+
+  it("does not advertise v2 delivery tools on the legacy provider", async () => {
+    vi.spyOn(globalThis, "fetch").mockResolvedValue(new Response("[]", { status: 200 }));
+    const server = createAgentBridgeServer({
+      supabaseUrl: "https://bridge.example.test",
+      supabaseKey: "anon-key",
+      agent: "codex",
+      provider: "legacy-supabase",
+      workspace: "*",
+      instance: undefined,
+    });
+    const client = new Client({ name: "factory-test", version: "0.0.0" });
+    const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
+    await Promise.all([server.connect(serverTransport), client.connect(clientTransport)]);
+    try {
+      const names = (await client.listTools()).tools.map((tool) => tool.name);
+      expect(names).toEqual(["post_context", "get_context", "ack_context", "send", "history"]);
+      expect(names).not.toContain("claim");
+      expect(names).not.toContain("negative_acknowledge");
+    } finally {
+      await client.close();
+      await server.close();
+    }
+  });
+
+  it("advertises delivery tools and complete history filters for local v2", async () => {
+    const server = createAgentBridgeServer({
+      provider: "local",
+      databasePath: ":memory:",
+      workspace: "workspace-a",
+      agent: "codex",
+      instance: "codex-desktop",
+    });
+    const client = new Client({ name: "factory-test", version: "0.0.0" });
+    const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
+    await Promise.all([server.connect(serverTransport), client.connect(clientTransport)]);
+    try {
+      const tools = await client.listTools();
+      expect(tools.tools.map((tool) => tool.name)).toContain("claim");
+      const history = tools.tools.find((tool) => tool.name === "history");
+      expect(history?.inputSchema.properties).toHaveProperty("threadId");
+      expect(history?.inputSchema.properties).toHaveProperty("latest");
+      expect(history?.outputSchema).toBeDefined();
+      await expect(client.callTool({ name: "get_context", arguments: { limit: -1 } }))
+        .rejects.toThrow();
+      await expect(client.callTool({
+        name: "send",
+        arguments: { type: "note", content: "   " },
+      })).rejects.toMatchObject({ code: ErrorCode.InvalidParams });
+      const heartbeat = await client.callTool({
+        name: "heartbeat",
+        arguments: { runtimeType: "codex", capabilities: ["mcp"] },
+      });
+      expect(heartbeat.structuredContent).toMatchObject({
+        agent: "codex",
+        instance: "codex-desktop",
+      });
+      const sent = await client.callTool({
+        name: "send",
+        arguments: {
+          type: "work",
+          content: "exercise delivery tools",
+          targets: ["codex"],
+        },
+      });
+      const sentId = (sent.structuredContent as any).message.id as string;
+      const listed = await client.callTool({
+        name: "history",
+        arguments: { types: ["work"], source: "codex" },
+      });
+      expect((listed.structuredContent as any).messages[0].id).toBe(sentId);
+      const claimed = await client.callTool({
+        name: "claim",
+        arguments: { leaseMs: 30_000 },
+      });
+      const delivery = (claimed.structuredContent as any).delivery;
+      const leaseToken = (claimed.structuredContent as any).leaseToken;
+      const extended = await client.callTool({
+        name: "extend",
+        arguments: { deliveryId: delivery.id, leaseToken, leaseMs: 60_000 },
+      });
+      expect((extended.structuredContent as any).state).toBe("claimed");
+      await expect(client.callTool({
+        name: "negative_acknowledge",
+        arguments: {
+          deliveryId: delivery.id,
+          leaseToken,
+          error: "must stay retryable",
+          dead: "false",
+        } as any,
+      })).rejects.toMatchObject({ code: ErrorCode.InvalidParams });
+      const nacked = await client.callTool({
+        name: "negative_acknowledge",
+        arguments: {
+          deliveryId: delivery.id,
+          leaseToken,
+          error: "stop this test delivery",
+          dead: true,
+        },
+      });
+      expect((nacked.structuredContent as any).state).toBe("dead");
+
+      await client.callTool({
+        name: "send",
+        arguments: { type: "work", content: "ack this delivery", targets: ["codex"] },
+      });
+      const secondClaim = await client.callTool({
+        name: "claim",
+        arguments: { leaseMs: 30_000 },
+      });
+      const second = secondClaim.structuredContent as any;
+      const acknowledged = await client.callTool({
+        name: "acknowledge",
+        arguments: {
+          deliveryId: second.delivery.id,
+          leaseToken: second.leaseToken,
+        },
+      });
+      expect((acknowledged.structuredContent as any).state).toBe("acked");
+      const presence = await client.callTool({ name: "presence", arguments: {} });
+      expect((presence.structuredContent as any).agents).toHaveLength(1);
+      const legacyId = "00000000-0000-8000-8000-000000000003";
+      await client.callTool({
+        name: "post_context",
+        arguments: {
+          category: "operational",
+          content: "migrated legacy row",
+          message_id: legacyId,
+        },
+      });
+      const legacyAck = await client.callTool({
+        name: "ack_context",
+        arguments: { ids: [3] },
+      });
+      expect(legacyAck.structuredContent).toMatchObject({ acknowledged: 1 });
+    } finally {
+      await client.close();
+      await server.close();
+    }
+  });
 });
 
 describe("configFromEnv", () => {
@@ -143,7 +291,19 @@ describe("configFromEnv", () => {
       supabaseUrl: "https://bridge.example.test",
       supabaseKey: "anon-key",
       agent: "codex",
+      provider: "legacy-supabase",
+      workspace: "*",
+      instance: undefined,
     });
+  });
+
+  it("rejects a provider typo instead of falling back to legacy mode", () => {
+    expect(() => configFromEnv({
+      AGENT_BRIDGE_PROVIDER: "gatewy",
+      AGENT_BRIDGE_URL: "https://bridge.example.test",
+      AGENT_BRIDGE_KEY: "legacy-key",
+      AGENT_BRIDGE_AGENT: "codex",
+    })).toThrow("Unsupported AGENT_BRIDGE_PROVIDER: gatewy");
   });
 
   it("reads credentials from the shared config file when env is unset", () => {
@@ -163,6 +323,29 @@ describe("configFromEnv", () => {
         supabaseUrl: "https://bridge.example.test",
         supabaseKey: "anon-key",
         agent: "codex",
+        provider: "legacy-supabase",
+        workspace: "*",
+        instance: undefined,
+      });
+    } finally {
+      rmSync(home, { recursive: true, force: true });
+    }
+  });
+
+  it("ignores a legacy identity stored in the shared config file", () => {
+    const home = withBridgeConfig(`
+      AGENT_BRIDGE_URL=https://bridge.example.test
+      AGENT_BRIDGE_KEY=anon-key
+      AGENT_BRIDGE_AGENT=codex
+    `);
+    try {
+      expect(configFromEnv({ HOME: home })).toEqual({
+        supabaseUrl: "https://bridge.example.test",
+        supabaseKey: "anon-key",
+        agent: undefined,
+        provider: "legacy-supabase",
+        workspace: "*",
+        instance: undefined,
       });
     } finally {
       rmSync(home, { recursive: true, force: true });
@@ -186,6 +369,9 @@ describe("configFromEnv", () => {
         supabaseUrl: "https://env.example.test",
         supabaseKey: "env-key",
         agent: undefined,
+        provider: "legacy-supabase",
+        workspace: "*",
+        instance: undefined,
       });
     } finally {
       rmSync(home, { recursive: true, force: true });
@@ -203,6 +389,9 @@ describe("configFromEnv", () => {
         supabaseUrl: "https://bridge.example.test",
         supabaseKey: "anon-key",
         agent: undefined,
+        provider: "legacy-supabase",
+        workspace: "*",
+        instance: undefined,
       });
     } finally {
       rmSync(home, { recursive: true, force: true });
@@ -242,6 +431,9 @@ describe("configFromEnv", () => {
         supabaseUrl: "https://explicit.example.test",
         supabaseKey: "explicit-key",
         agent: undefined,
+        provider: "legacy-supabase",
+        workspace: "*",
+        instance: undefined,
       });
     } finally {
       rmSync(home, { recursive: true, force: true });

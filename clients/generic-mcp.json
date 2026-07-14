@@ -1,0 +1,13 @@
+{
+  "schema": "agent-bridge.runtime-manifest.v1",
+  "runtime": "generic-mcp",
+  "transport": "stdio",
+  "command": "agent-bridge-mcp",
+  "identity": { "source": "env", "variable": "AGENT_BRIDGE_AGENT", "required": true },
+  "instance": { "source": "env", "variable": "AGENT_BRIDGE_INSTANCE", "required": true },
+  "backendConfig": { "source": "env", "variable": "AGENT_BRIDGE_CONFIG", "perClient": true },
+  "configLocations": ["~/.agent-bridge/config"],
+  "install": { "method": "operator-configured", "identityValue": "operator-selected", "instanceValue": "operator-selected", "backendConfigValue": "operator-selected", "restartRequired": true },
+  "wakeModes": ["poll"],
+  "healthCommand": ["agent-bridge", "doctor", "--json"]
+}
