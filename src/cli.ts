@@ -25,7 +25,7 @@ const SUPPORTED_OPTIONS = new Set([
   "metadata", "payload", "payload-ciphertext", "payload-mime", "payload-ref",
   "polls", "priority", "project", "provider", "reply-to-id", "since", "source",
   "target", "target-agent", "target-agents", "thread-id", "token", "type",
-  "unacked-by", "url", "workspace",
+  "unacked-by", "url", "workspace", "mailbox", "receipt-state",
   "identity", "command", "scope",
   "runtime", "capability",
   "max-pages", "max-push",
@@ -79,7 +79,7 @@ function watchCursorPath(path: string, project: string | undefined): string {
   const scope = createHash("sha256").update(project).digest("hex").slice(0, 16);
   return `${path}.project-${scope}`;
 }
-function help(): void { process.stdout.write(`agent-bridge: provider-neutral agent messaging\n\nCommands:\n  init, doctor, status, pending, migrate, reconcile-legacy-projects, sync, demo, join, presence\n  send (post), inbox (get), history, acknowledge, claim, extend, ack, nack, watch\n  clients install <codex|claude-code|claude-desktop> --identity <name>\n`); }
+function help(): void { process.stdout.write(`agent-bridge: provider-neutral agent messaging\n\nCommands:\n  init, doctor, status, pending, migrate, reconcile-legacy-projects, sync, demo, join, presence\n  send (post), inbox (get), sent, history, acknowledge, claim, extend, ack, nack, watch\n  clients install <codex|claude-code|claude-desktop> --identity <name>\n`); }
 function rejectUnknownOptions(options: Options): void {
   const unknown = Object.keys(options).filter((key) => !SUPPORTED_OPTIONS.has(key));
   if (unknown.length) throw new Error(`unknown option: --${unknown[0]}`);
@@ -270,7 +270,7 @@ export async function runCli(argv = process.argv.slice(2)): Promise<void> {
     finally { await pool.end(); }
     return;
   }
-  const config = configFor(options, command); const runtime = await createClientRuntime(config);
+  const config = configFor(options, command); const assertedUnackedBy = one(options, "unacked-by"); if (assertedUnackedBy !== undefined && assertedUnackedBy !== config.principal.agent) throw new Error("--unacked-by must equal the configured principal"); const runtime = await createClientRuntime(config);
   try {
     if (command === "doctor" || command === "status") { const diagnostics = await runtime.store.diagnostics?.(config.principal) ?? { schemaVersion: config.provider === "legacy-supabase" ? "legacy-v1" : "local-v2", deliverySupported: false, pending: null, claimed: null, retrying: null, dead: null }; const remoteReachable = "remoteReachable" in diagnostics ? diagnostics.remoteReachable : null; output({ status: remoteReachable === false ? "degraded" : "ok", localHealthy: true, connected: remoteReachable ?? true, remoteReachable, provider: config.provider, workspace: config.principal.workspace, agent: config.principal.agent, instance: config.principal.instance ?? null, schemaVersion: diagnostics.schemaVersion, endpoint: config.url ?? null, database: config.provider === "local" ? config.databasePath : null, cursorPath: config.cursorPath, lastCursor: cursor(config.cursorPath) ?? null, queue: diagnostics }); return; }
     if (command === "pending") {
@@ -278,7 +278,7 @@ export async function runCli(argv = process.argv.slice(2)): Promise<void> {
       const page = await runtime.service.history(config.principal, {
         limit: 1,
         project: one(options, "project"),
-        unacknowledgedBy: config.principal.agent,
+        receiptState: "unread",
       });
       const pendingDeliveries = diagnostics?.pending ?? 0;
       const retryingDeliveries = diagnostics?.retrying ?? 0;
@@ -322,7 +322,7 @@ export async function runCli(argv = process.argv.slice(2)): Promise<void> {
       }));
       return;
     }
-    if (command === "history" || command === "inbox") { const page = await runtime.service.history(config.principal, { cursor: one(options, "cursor"), limit: integer(options, "limit", 20), types: list(options, "type").concat(list(options, "category")), source: one(options, "source"), project: one(options, "project"), since: since(options), unacknowledgedBy: one(options, "unacked-by"), threadId: one(options, "thread-id"), latest: raw === "get" }); if (raw === "get") { output(page.messages.map((message) => ({ id: config.provider === "legacy-supabase" ? Number(message.sequence) : message.id, source: message.source, category: message.type, content: message.content, priority: message.priority, project: message.project ?? null, metadata: legacyContextMetadata(message), created_at: message.createdAt }))); } else output(page); return; }
+    if (command === "history" || command === "inbox" || command === "sent") { const page = await runtime.service.history(config.principal, { cursor: one(options, "cursor"), limit: integer(options, "limit", 20), types: list(options, "type").concat(list(options, "category")), source: one(options, "source"), project: one(options, "project"), since: since(options), mailbox: command === "inbox" ? "inbox" : command === "sent" ? "sent" : one(options, "mailbox") as any, receiptState: one(options, "receipt-state") as any, unacknowledgedBy: assertedUnackedBy, threadId: one(options, "thread-id"), latest: raw === "get" }); if (raw === "get") { output(page.messages.map((message) => ({ id: config.provider === "legacy-supabase" ? Number(message.sequence) : message.id, source: message.source, category: message.type, content: message.content, priority: message.priority, project: message.project ?? null, metadata: legacyContextMetadata(message), created_at: message.createdAt }))); } else output(page); return; }
     if (command === "acknowledge" || (command === "ack" && one(options, "ids"))) {
       const rawIds = list(options, "ids");
       const acknowledged = config.provider === "legacy-supabase" &&

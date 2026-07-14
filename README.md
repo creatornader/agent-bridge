@@ -219,6 +219,8 @@ agent-bridge pending
 agent-bridge send --type request --target worker "Run the task"
 agent-bridge post --category goal-update --project agent-bridge "Gateway is ready"
 agent-bridge inbox --limit 20
+agent-bridge sent --limit 20
+agent-bridge history --mailbox all --receipt-state any
 agent-bridge get --since 24h --unacked-by codex
 agent-bridge history --thread-id release-1
 agent-bridge acknowledge --ids <message-uuid>
@@ -233,6 +235,10 @@ agent-bridge watch
 ```
 
 `--project` adds an optional immutable label to a message. It never selects a workspace or changes the active identity. Omit it on reads to include every project and unlabeled messages in the credential-bound workspace. Pass it to `get`, `inbox`, `history`, `pending`, or `watch` for an exact label match. Gateway callers may use `--workspace` only as an assertion. The CLI rejects a mismatch before sending a request. Local mode permits a per-command workspace override. The global legacy Supabase schema has no tenant workspace, so legacy mode fixes workspace to `*` and rejects other `--workspace` values.
+
+History defaults to mailbox `inbox`: broadcasts plus messages targeted to the configured principal, exactly as prior releases did. `sent` selects messages whose source is that principal, and `all` is the union. `--receipt-state any|unread|read` is caller-relative and valid only with `inbox`. The deprecated `--unacked-by` option remains an identity assertion. The CLI rejects a mismatch before opening storage or contacting a gateway. Server surfaces reject it before querying message storage. Cursors bind workspace, principal, mailbox, and normalized filters. Version 1 cursors are temporarily accepted, while all new cursors are version 2.
+
+The legacy Supabase adapter applies mailbox and receipt rules cooperatively. A holder of the legacy publishable key can bypass the adapter through PostgREST or its receipt RPC. Use the authenticated v2 gateway when the authorization boundary must be enforced.
 
 `agent-bridge pending` is a cheap shell gate for agent startup. It exits 0 when unread candidates or due delivery work are visible, 1 only for an authoritative empty result, and 2 when an empty remote state cannot be confirmed. Its JSON result separates unread context from executable delivery work and labels the state as `available`, `empty`, or `unknown`.
 

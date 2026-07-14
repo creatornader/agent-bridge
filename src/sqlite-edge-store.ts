@@ -4,6 +4,7 @@ import { createRequire } from "node:module";
 import { dirname } from "node:path";
 import type { DatabaseSync as Database, SQLInputValue } from "node:sqlite";
 import {
+  cursorScope,
   decodeCursor,
   encodeCursor,
   type BridgeMessage,
@@ -11,6 +12,7 @@ import {
   type JsonValue,
 } from "./bridge-domain.js";
 import type { MessagePage, MessageQuery } from "./bridge-store.js";
+import { retrySqliteBusy } from "./sqlite-retry.js";
 
 const require = createRequire(import.meta.url);
 function openDatabase(path: string): Database {
@@ -30,7 +32,8 @@ CREATE TABLE IF NOT EXISTS edge_scopes (
   agent TEXT NOT NULL,
   pull_cursor TEXT,
   last_sync_at TEXT,
-  last_error TEXT
+  last_error TEXT,
+  cache_contract INTEGER NOT NULL DEFAULT 1
 );
 CREATE TABLE IF NOT EXISTS edge_outbox (
   position INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -177,6 +180,7 @@ export class SQLiteEdgeStore {
   private readonly db: Database;
   private readonly key: string;
   private initialized = false;
+  private initialization?: Promise<void>;
 
   constructor(private readonly path: string, private readonly scope: EdgeScope, private readonly busyTimeoutMs = 2_000) {
     if (path !== ":memory:") mkdirSync(dirname(path), { recursive: true, mode: 0o700 });
@@ -199,9 +203,25 @@ export class SQLiteEdgeStore {
 
   async initialize(): Promise<void> {
     if (this.initialized) return;
-    this.db.exec(`PRAGMA busy_timeout = ${Math.max(1, Math.trunc(this.busyTimeoutMs))}; ${schema}`);
-    this.db.exec("BEGIN IMMEDIATE");
+    if (!this.initialization) {
+      this.initialization = this.initializeOnce().then(() => {
+        this.initialized = true;
+      }).catch((error) => {
+        this.initialization = undefined;
+        throw error;
+      });
+    }
+    return this.initialization;
+  }
+
+  private async initializeOnce(): Promise<void> {
+    await retrySqliteBusy(() => this.db.exec(schema), this.busyTimeoutMs);
+    await retrySqliteBusy(() => this.db.exec("BEGIN IMMEDIATE"), this.busyTimeoutMs);
     try {
+      const scopeColumns = this.db.prepare("PRAGMA table_info(edge_scopes)").all() as Row[];
+      if (!scopeColumns.some((column) => column.name === "cache_contract")) {
+        this.db.exec("ALTER TABLE edge_scopes ADD COLUMN cache_contract INTEGER NOT NULL DEFAULT 0");
+      }
       const columns = this.db.prepare("PRAGMA table_info(edge_inbox)").all() as Row[];
       if (!columns.some((column) => column.name === "project")) {
         this.db.exec("ALTER TABLE edge_inbox ADD COLUMN project TEXT");
@@ -217,7 +237,14 @@ export class SQLiteEdgeStore {
     this.db.prepare(`INSERT INTO edge_scopes (scope_key, endpoint_hash, workspace, agent)
       VALUES (?, ?, ?, ?) ON CONFLICT(scope_key) DO NOTHING`)
       .run(this.key, endpointHash, this.scope.principal.workspace, this.scope.principal.agent);
-    this.initialized = true;
+    const contract = this.db.prepare("SELECT cache_contract FROM edge_scopes WHERE scope_key=?").get(this.key) as Row;
+    if (Number(contract.cache_contract) < 1) {
+      this.db.exec("BEGIN IMMEDIATE");
+      try {
+        this.db.prepare("UPDATE edge_scopes SET pull_cursor=NULL, cache_contract=1 WHERE scope_key=?").run(this.key);
+        this.db.exec("COMMIT");
+      } catch (error) { this.db.exec("ROLLBACK"); throw error; }
+    }
   }
 
   private async ready(): Promise<void> {
@@ -315,13 +342,12 @@ export class SQLiteEdgeStore {
   async commit(
     record: EdgeOutboxRecord,
     message: BridgeMessage,
-    cacheVisible: boolean,
     now = new Date(),
   ): Promise<void> {
     await this.ready();
     this.db.exec("BEGIN IMMEDIATE");
     try {
-      if (cacheVisible) this.cacheOne(message);
+      this.cacheOne(message);
       const deleted = this.db.prepare(`DELETE FROM edge_outbox
         WHERE scope_key=? AND position=? AND lease_token=?`)
         .run(this.key, record.position, record.leaseToken);
@@ -363,6 +389,7 @@ export class SQLiteEdgeStore {
 
   async cachePage(messages: BridgeMessage[], cursor: string | undefined, now = new Date()): Promise<void> {
     await this.ready();
+    const scope = cursorScope(this.scope.principal, { mailbox: "all", includeExpired: true });
     this.db.exec("BEGIN IMMEDIATE");
     try {
       for (const message of messages) this.cacheOne(message);
@@ -371,7 +398,7 @@ export class SQLiteEdgeStore {
       const currentCursor = current.pull_cursor ? String(current.pull_cursor) : undefined;
       const nextCursor = !cursor
         ? currentCursor
-        : !currentCursor || sequenceKey(decodeCursor(cursor)!) >= sequenceKey(decodeCursor(currentCursor)!)
+        : !currentCursor || sequenceKey(decodeCursor(cursor, scope)!) >= sequenceKey(decodeCursor(currentCursor, scope)!)
           ? cursor
           : currentCursor;
       this.db.prepare(`UPDATE edge_scopes SET pull_cursor=?, last_sync_at=?, last_error=NULL
@@ -399,6 +426,28 @@ export class SQLiteEdgeStore {
 
   async list(query: MessageQuery = {}): Promise<MessagePage> {
     await this.ready();
+    const scope = cursorScope(this.scope.principal, query);
+    const inputSequence = query.latest ? undefined : decodeCursor(query.cursor, scope) ?? "0";
+    const cachedHighWater = query.latest ? undefined : this.db.prepare(`SELECT remote_sequence
+      FROM edge_inbox WHERE scope_key=? ORDER BY sequence_key DESC LIMIT 1`)
+      .get(this.key) as Row | undefined;
+    const syncState = query.latest ? undefined : this.db.prepare(
+      "SELECT pull_cursor FROM edge_scopes WHERE scope_key=?",
+    ).get(this.key) as Row | undefined;
+    const syncScope = cursorScope(this.scope.principal, {
+      mailbox: "all",
+      includeExpired: true,
+    });
+    const syncSequence = syncState?.pull_cursor
+      ? decodeCursor(String(syncState.pull_cursor), syncScope) ?? "0"
+      : "0";
+    const highWaterSequence = query.latest ? undefined : [
+      inputSequence ?? "0",
+      syncSequence,
+      cachedHighWater?.remote_sequence ? String(cachedHighWater.remote_sequence) : "0",
+    ].reduce((highest, candidate) => (
+      sequenceKey(candidate) > sequenceKey(highest) ? candidate : highest
+    ), "0");
     // Receipts are remote authority and are deliberately not mirrored. During
     // an outage callers may still inspect the cached candidate set, but the
     // wrapping store must label acknowledgement state as unknown.
@@ -406,7 +455,7 @@ export class SQLiteEdgeStore {
     const args: SQLInputValue[] = [this.key];
     if (!query.latest) {
       clauses.push("sequence_key>?");
-      args.push(sequenceKey(decodeCursor(query.cursor) ?? "0"));
+      args.push(sequenceKey(inputSequence ?? "0"));
     }
     if (!query.includeExpired) {
       clauses.push("(expires_at IS NULL OR expires_at>?)");
@@ -419,6 +468,15 @@ export class SQLiteEdgeStore {
     if (query.source) {
       clauses.push("source=?");
       args.push(query.source);
+    }
+    const mailbox = query.mailbox ?? "inbox";
+    if (mailbox === "sent") { clauses.push("source=?"); args.push(this.scope.principal.agent); }
+    else if (mailbox !== "all") {
+      clauses.push("(json_array_length(json_extract(message_json, '$.targets'))=0 OR EXISTS (SELECT 1 FROM json_each(json_extract(message_json, '$.targets')) WHERE value=?))");
+      args.push(this.scope.principal.agent);
+    } else {
+      clauses.push("(source=? OR json_array_length(json_extract(message_json, '$.targets'))=0 OR EXISTS (SELECT 1 FROM json_each(json_extract(message_json, '$.targets')) WHERE value=?))");
+      args.push(this.scope.principal.agent, this.scope.principal.agent);
     }
     if (query.project) {
       clauses.push("project=?");
@@ -438,7 +496,15 @@ export class SQLiteEdgeStore {
       .all(...args, limit) as Row[];
     const messages = rows.map((row) => parseMessage(row.message_json));
     const cursorMessage = query.latest ? messages[0] : messages[messages.length - 1];
-    return { messages, cursor: cursorMessage ? encodeCursor(cursorMessage.sequence) : query.cursor };
+    if (query.latest || messages.length === limit) {
+      return { messages, cursor: cursorMessage ? encodeCursor(cursorMessage.sequence, scope) : query.cursor };
+    }
+    return {
+      messages,
+      cursor: highWaterSequence && highWaterSequence !== "0"
+        ? encodeCursor(highWaterSequence, scope)
+        : query.cursor,
+    };
   }
 
   async pullCursor(): Promise<string | undefined> {

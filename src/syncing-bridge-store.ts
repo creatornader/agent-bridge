@@ -257,10 +257,8 @@ export class SyncingBridgeStore implements BridgeStore {
         await this.edge.block(record, codeOf(error));
         return { state: "blocked", error, messageId: record.draft.id };
       }
-      const cacheVisible = result.message.targets.length === 0 ||
-        result.message.targets.includes(this.principal.agent);
       try {
-        await this.edge.commit(record, result.message, cacheVisible, this.now());
+        await this.edge.commit(record, result.message, this.now());
       } catch (error) {
         return { state: "fatal", error: this.fatal(error) };
       }
@@ -322,6 +320,7 @@ export class SyncingBridgeStore implements BridgeStore {
           cursor: before,
           limit: 200,
           includeExpired: true,
+          mailbox: "all",
         }, { signal });
       } catch (error) {
         await this.edge.noteError(codeOf(error));
@@ -427,7 +426,7 @@ export class SyncingBridgeStore implements BridgeStore {
         throw this.fatal(cacheError);
       }
       return { ...cached, source: "cache", stale: true, degraded: true,
-        acknowledgements: query.unacknowledgedBy ? "unknown" : "authoritative",
+        acknowledgements: (query.receiptState && query.receiptState !== "any") || "unacknowledgedBy" in query ? "unknown" : "authoritative",
         lastSyncedAt: stats.lastSyncAt };
     }
     try {
@@ -441,14 +440,13 @@ export class SyncingBridgeStore implements BridgeStore {
   }
 
   async recordReceipt(
-    workspace: string,
+    principal: BridgePrincipal,
     messageIds: string[],
-    principal: string,
     readAt?: Date,
   ): Promise<number> {
-    this.assertPrincipal({ workspace, agent: principal }, false);
+    this.assertPrincipal(principal, false);
     await this.ensureRemote();
-    return this.remote.recordReceipt(workspace, messageIds, principal, readAt);
+    return this.remote.recordReceipt(principal, messageIds, readAt);
   }
 
   async claimDelivery(principal: BridgePrincipal, options: ClaimOptions): Promise<BridgeDelivery | null> {

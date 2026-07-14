@@ -2,6 +2,7 @@ import { randomUUID } from "node:crypto";
 import {
   decodeCursor,
   encodeCursor,
+  cursorScope,
   type AgentPresence,
   type BridgeDelivery,
   type BridgeDeliveryEvent,
@@ -194,7 +195,8 @@ export class PostgresBridgeStore implements BridgeStore {
     principal: BridgePrincipal,
     query: MessageQuery = {},
   ): Promise<MessagePage> {
-    const cursor = decodeCursor(query.cursor) ?? "0";
+    const scope = cursorScope(principal, query);
+    const cursor = decodeCursor(query.cursor, scope) ?? "0";
     const limit = Math.min(Math.max(Math.trunc(query.limit ?? 50), 1), 200);
     const boundary = query.latest ? undefined : await this.db.query<{ sequence: string | null }>(
       "SELECT max(sequence)::text AS sequence FROM agent_bridge.messages WHERE workspace=$1",
@@ -204,9 +206,12 @@ export class PostgresBridgeStore implements BridgeStore {
     const values: unknown[] = query.latest
       ? [principal.workspace, principal.agent]
       : [principal.workspace, cursor, principal.agent];
-    let sql =
-      `SELECT * FROM agent_bridge.messages WHERE workspace=$1 ${query.latest ? "" : "AND sequence>$2::bigint "}` +
-      `AND (targets='[]'::jsonb OR targets ? $${query.latest ? 2 : 3})`;
+    const mailbox = query.mailbox ?? "inbox";
+    const agentParam = query.latest ? 2 : 3;
+    const visibility = mailbox === "sent" ? `source=$${agentParam}`
+      : mailbox === "all" ? `(source=$${agentParam} OR targets='[]'::jsonb OR targets ? $${agentParam})`
+      : `(targets='[]'::jsonb OR targets ? $${agentParam})`;
+    let sql = `SELECT * FROM agent_bridge.messages WHERE workspace=$1 ${query.latest ? "" : "AND sequence>$2::bigint "}AND ${visibility}`;
 
     if (highWater) {
       values.push(highWater);
@@ -232,13 +237,12 @@ export class PostgresBridgeStore implements BridgeStore {
       values.push(query.since);
       sql += ` AND created_at >= $${values.length}::timestamptz`;
     }
-    if (query.unacknowledgedBy) {
-      values.push(query.unacknowledgedBy);
-      sql += ` AND NOT EXISTS (
+    if (query.receiptState && query.receiptState !== "any") {
+      sql += ` AND ${query.receiptState === "unread" ? "NOT " : ""}EXISTS (
         SELECT 1 FROM agent_bridge.receipts receipt
         WHERE receipt.workspace=agent_bridge.messages.workspace
           AND receipt.message_id=agent_bridge.messages.id
-          AND receipt.principal=$${values.length}
+          AND receipt.principal=$${agentParam}
       )`;
     }
     if (query.threadId) {
@@ -253,15 +257,14 @@ export class PostgresBridgeStore implements BridgeStore {
     );
     const messages = result.rows.map(asMessage);
     const last = messages[messages.length - 1];
-    if (query.latest) return { messages, cursor: messages[0] ? encodeCursor(messages[0].sequence) : query.cursor };
-    if (messages.length === limit) return { messages, cursor: encodeCursor(last!.sequence) };
-    return { messages, cursor: highWater ? encodeCursor(highWater) : query.cursor };
+    if (query.latest) return { messages, cursor: messages[0] ? encodeCursor(messages[0].sequence, scope) : query.cursor };
+    if (messages.length === limit) return { messages, cursor: encodeCursor(last!.sequence, scope) };
+    return { messages, cursor: highWater ? encodeCursor(highWater, scope) : query.cursor };
   }
 
   async recordReceipt(
-    workspace: string,
+    principal: BridgePrincipal,
     ids: string[],
-    principal: string,
     readAt = new Date(),
   ): Promise<number> {
     const result = await this.db.query(
@@ -271,7 +274,7 @@ export class PostgresBridgeStore implements BridgeStore {
        WHERE message.workspace = $1 AND message.id = ANY($2::uuid[])
          AND (message.targets='[]'::jsonb OR message.targets ? $3)
        ON CONFLICT DO NOTHING`,
-      [workspace, ids, principal, readAt],
+      [principal.workspace, ids, principal.agent, readAt],
     );
     return result.rowCount ?? 0;
   }

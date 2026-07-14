@@ -2,9 +2,10 @@ import { randomUUID } from "node:crypto";
 import { chmodSync, existsSync } from "node:fs";
 import { createRequire } from "node:module";
 import type { DatabaseSync as Database, SQLInputValue } from "node:sqlite";
-import { decodeCursor, encodeCursor, type AgentPresence, type BridgeDelivery, type BridgeDeliveryEvent, type BridgeMessage, type BridgePrincipal, type RetryPolicy } from "./bridge-domain.js";
+import { cursorScope, decodeCursor, encodeCursor, type AgentPresence, type BridgeDelivery, type BridgeDeliveryEvent, type BridgeMessage, type BridgePrincipal, type RetryPolicy } from "./bridge-domain.js";
 import type { BridgeDiagnostics, BridgeStore, ClaimOptions, InsertMessageResult, MessagePage, MessageQuery } from "./bridge-store.js";
 import { assertIdempotentReplay } from "./idempotency.js";
+import { retrySqliteBusy } from "./sqlite-retry.js";
 
 type Row = Record<string, unknown>;
 const require = createRequire(import.meta.url);
@@ -81,6 +82,7 @@ function deliveryEvent(row: Row): BridgeDeliveryEvent { return { sequence: Strin
 export class SQLiteBridgeStore implements BridgeStore {
   private readonly db: Database;
   private initialized = false;
+  private initialization?: Promise<void>;
   constructor(private readonly path = ":memory:", private readonly busyTimeoutMs = 2_000) { this.db = openDatabase(path); this.db.exec(`PRAGMA busy_timeout = ${Math.max(1, Math.trunc(this.busyTimeoutMs))}`); this.restrictFiles(); }
   private restrictFiles(): void {
     if (this.path === ":memory:") return;
@@ -88,7 +90,39 @@ export class SQLiteBridgeStore implements BridgeStore {
       if (existsSync(path)) chmodSync(path, 0o600);
     }
   }
-  async initialize(): Promise<void> { if (this.initialized) return; const versionRow = this.db.prepare("SELECT sqlite_version() AS version").get() as Row; const parts = String(versionRow.version).split(".").map(Number); const encoded = (parts[0] ?? 0) * 1_000_000 + (parts[1] ?? 0) * 1_000 + (parts[2] ?? 0); if (encoded < 3_051_003) throw new Error("SQLite 3.51.3 or newer is required"); this.db.exec(`PRAGMA busy_timeout = ${Math.max(1, Math.trunc(this.busyTimeoutMs))}; ${schema}`); this.db.exec("BEGIN IMMEDIATE"); try { const columns = this.db.prepare("PRAGMA table_info(bridge_messages)").all() as Row[]; if (!columns.some((column) => column.name === "project")) this.db.exec("ALTER TABLE bridge_messages ADD COLUMN project TEXT"); this.db.exec("CREATE INDEX IF NOT EXISTS bridge_messages_project ON bridge_messages(workspace, project, sequence)"); this.db.exec("COMMIT"); } catch (error) { this.db.exec("ROLLBACK"); throw error; } this.restrictFiles(); this.initialized = true; }
+  async initialize(): Promise<void> {
+    if (this.initialized) return;
+    if (!this.initialization) {
+      this.initialization = this.initializeOnce().then(() => {
+        this.initialized = true;
+      }).catch((error) => {
+        this.initialization = undefined;
+        throw error;
+      });
+    }
+    return this.initialization;
+  }
+
+  private async initializeOnce(): Promise<void> {
+    const versionRow = this.db.prepare("SELECT sqlite_version() AS version").get() as Row;
+    const parts = String(versionRow.version).split(".").map(Number);
+    const encoded = (parts[0] ?? 0) * 1_000_000 + (parts[1] ?? 0) * 1_000 + (parts[2] ?? 0);
+    if (encoded < 3_051_003) throw new Error("SQLite 3.51.3 or newer is required");
+    await retrySqliteBusy(() => this.db.exec(schema), this.busyTimeoutMs);
+    await retrySqliteBusy(() => this.db.exec("BEGIN IMMEDIATE"), this.busyTimeoutMs);
+    try {
+      const columns = this.db.prepare("PRAGMA table_info(bridge_messages)").all() as Row[];
+      if (!columns.some((column) => column.name === "project")) {
+        this.db.exec("ALTER TABLE bridge_messages ADD COLUMN project TEXT");
+      }
+      this.db.exec("CREATE INDEX IF NOT EXISTS bridge_messages_project ON bridge_messages(workspace, project, sequence)");
+      this.db.exec("COMMIT");
+    } catch (error) {
+      this.db.exec("ROLLBACK");
+      throw error;
+    }
+    this.restrictFiles();
+  }
   private async ready() { await this.initialize(); }
   async insertMessage(input: Omit<BridgeMessage, "sequence" | "createdAt">): Promise<InsertMessageResult> {
     await this.ready(); const createdAt = new Date().toISOString();
@@ -101,31 +135,31 @@ export class SQLiteBridgeStore implements BridgeStore {
     } catch (error) { this.db.exec("ROLLBACK"); throw error; }
   }
   async listMessages(principal: BridgePrincipal, query: MessageQuery = {}): Promise<MessagePage> {
-    await this.ready(); const cursor = decodeCursor(query.cursor); const limit = Math.min(Math.max(Math.trunc(query.limit ?? 50), 1), 200); const now = new Date().toISOString();
+    await this.ready(); const scope = cursorScope(principal, query); const cursor = decodeCursor(query.cursor, scope); const limit = Math.min(Math.max(Math.trunc(query.limit ?? 50), 1), 200); const now = new Date().toISOString();
     const highWaterRow = query.latest ? undefined : this.db.prepare("SELECT max(sequence) AS sequence FROM bridge_messages WHERE workspace=?").get(principal.workspace) as Row;
     const highWater = highWaterRow?.sequence === null || highWaterRow?.sequence === undefined
       ? undefined
       : String(highWaterRow.sequence);
-    const clauses = ["workspace = ?", query.latest ? "1=1" : "sequence > ?", "(targets = '[]' OR EXISTS (SELECT 1 FROM json_each(targets) WHERE value = ?))"]; const args: SQLInputValue[] = query.latest ? [principal.workspace, principal.agent] : [principal.workspace, cursor ?? "0", principal.agent];
+    const mailbox = query.mailbox ?? "inbox"; const visibility = mailbox === "sent" ? "source = ?" : mailbox === "all" ? "(source = ? OR targets = '[]' OR EXISTS (SELECT 1 FROM json_each(targets) WHERE value = ?))" : "(targets = '[]' OR EXISTS (SELECT 1 FROM json_each(targets) WHERE value = ?))"; const clauses = ["workspace = ?", query.latest ? "1=1" : "sequence > ?", visibility]; const args: SQLInputValue[] = query.latest ? [principal.workspace] : [principal.workspace, cursor ?? "0"]; if (mailbox === "all") args.push(principal.agent, principal.agent); else args.push(principal.agent);
     if (highWater) { clauses.push("sequence <= ?"); args.push(highWater); }
     if (!query.includeExpired) { clauses.push("(expires_at IS NULL OR expires_at > ?)"); args.push(now); }
     if (query.types?.length) { clauses.push(`type IN (${query.types.map(() => "?").join(",")})`); args.push(...query.types); }
     if (query.source) { clauses.push("source = ?"); args.push(query.source); }
     if (query.project) { clauses.push("project = ?"); args.push(query.project); }
     if (query.since) { clauses.push("created_at >= ?"); args.push(query.since); }
-    if (query.unacknowledgedBy) {
-      clauses.push("NOT EXISTS (SELECT 1 FROM bridge_receipts receipt WHERE receipt.workspace=bridge_messages.workspace AND receipt.message_id=bridge_messages.id AND receipt.principal=?)");
-      args.push(query.unacknowledgedBy);
+    if (query.receiptState && query.receiptState !== "any") {
+      clauses.push(`${query.receiptState === "unread" ? "NOT " : ""}EXISTS (SELECT 1 FROM bridge_receipts receipt WHERE receipt.workspace=bridge_messages.workspace AND receipt.message_id=bridge_messages.id AND receipt.principal=?)`);
+      args.push(principal.agent);
     }
     if (query.threadId) { clauses.push("thread_id = ?"); args.push(query.threadId); }
     const rows = this.db.prepare(`SELECT * FROM bridge_messages WHERE ${clauses.join(" AND ")} ORDER BY sequence ${query.latest ? "DESC" : "ASC"} LIMIT ?`).all(...args, limit) as Row[];
     const messages = rows.map(message);
     const last = messages[messages.length - 1];
-    if (query.latest) return { messages, cursor: messages[0] ? encodeCursor(messages[0].sequence) : query.cursor };
-    if (messages.length === limit) return { messages, cursor: encodeCursor(last!.sequence) };
-    return { messages, cursor: highWater ? encodeCursor(highWater) : query.cursor };
+    if (query.latest) return { messages, cursor: messages[0] ? encodeCursor(messages[0].sequence, scope) : query.cursor };
+    if (messages.length === limit) return { messages, cursor: encodeCursor(last!.sequence, scope) };
+    return { messages, cursor: highWater ? encodeCursor(highWater, scope) : query.cursor };
   }
-  async recordReceipt(workspace: string, messageIds: string[], principal: string, readAt = new Date()): Promise<number> { await this.ready(); const stmt = this.db.prepare("INSERT OR IGNORE INTO bridge_receipts (workspace,message_id,principal,read_at) SELECT workspace,id,?,? FROM bridge_messages WHERE workspace=? AND id=? AND (targets='[]' OR EXISTS (SELECT 1 FROM json_each(targets) WHERE value=?))"); let changed = 0; this.db.exec("BEGIN IMMEDIATE"); try { for (const id of messageIds) changed += Number(stmt.run(principal,readAt.toISOString(),workspace,id,principal).changes); this.db.exec("COMMIT"); return changed; } catch (e) { this.db.exec("ROLLBACK"); throw e; } }
+  async recordReceipt(principal: BridgePrincipal, messageIds: string[], readAt = new Date()): Promise<number> { await this.ready(); const stmt = this.db.prepare("INSERT OR IGNORE INTO bridge_receipts (workspace,message_id,principal,read_at) SELECT workspace,id,?,? FROM bridge_messages WHERE workspace=? AND id=? AND (targets='[]' OR EXISTS (SELECT 1 FROM json_each(targets) WHERE value=?))"); let changed = 0; this.db.exec("BEGIN IMMEDIATE"); try { for (const id of messageIds) changed += Number(stmt.run(principal.agent,readAt.toISOString(),principal.workspace,id,principal.agent).changes); this.db.exec("COMMIT"); return changed; } catch (e) { this.db.exec("ROLLBACK"); throw e; } }
   async claimDelivery(principal: BridgePrincipal, options: ClaimOptions): Promise<BridgeDelivery | null> {
     await this.ready(); const now = options.now ?? new Date(); const nowText = now.toISOString(); const expires = new Date(now.getTime() + options.leaseMs).toISOString(); const owner = principal.instance ?? principal.agent; const maxAttempts = options.maxAttempts ?? 5;
     this.db.exec("BEGIN IMMEDIATE"); try {

@@ -146,8 +146,14 @@ describe("createAgentBridgeServer", () => {
     async () => {
       const calls: Array<{ url: string; init?: RequestInit }> = [];
       vi.spyOn(globalThis, "fetch").mockImplementation(async (url, init) => {
-        calls.push({ url: String(url), init });
-        return new Response(JSON.stringify(url.toString().includes("/rpc/") ? 1 : []), {
+        const requestUrl = String(url);
+        calls.push({ url: requestUrl, init });
+        const response = requestUrl.includes("/rpc/")
+          ? 1
+          : requestUrl.includes("id=in.(7)")
+            ? [{ id: 7, source: "sender", metadata: {} }]
+            : [];
+        return new Response(JSON.stringify(response), {
           status: 200,
         });
       });
@@ -184,7 +190,8 @@ describe("createAgentBridgeServer", () => {
           source: "codex",
         });
         expect(calls[1]?.url).toContain("acked_by=not.cs.%7Bcodex%7D");
-        expect(JSON.parse(String(calls[2]?.init?.body))).toEqual({
+        const receiptCall = calls.find((call) => call.url.includes("/rpc/ack_context"));
+        expect(JSON.parse(String(receiptCall?.init?.body))).toEqual({
           entry_ids: ["7"],
           agent_name: "codex",
         });
@@ -360,6 +367,10 @@ describe("createAgentBridgeServer", () => {
       });
       expect(history?.inputSchema.properties).toHaveProperty("threadId");
       expect(history?.inputSchema.properties).toHaveProperty("latest");
+      expect(history?.inputSchema.properties).toMatchObject({
+        mailbox: { enum: ["inbox", "sent", "all"] },
+        receiptState: { enum: ["any", "unread", "read"] },
+      });
       expect(send?.inputSchema.properties).toHaveProperty("project");
       expect(history?.inputSchema.properties).toHaveProperty("project");
       expect(getContext?.inputSchema.properties).toHaveProperty("project");
@@ -400,6 +411,15 @@ describe("createAgentBridgeServer", () => {
       });
       expect((listed.structuredContent as any).messages[0].id).toBe(sentId);
       expect(JSON.parse(String(listed.content[0]?.text))).toEqual(listed.structuredContent);
+      const sentView = await client.callTool({
+        name: "history",
+        arguments: { mailbox: "sent" },
+      });
+      expect((sentView.structuredContent as any).messages[0].id).toBe(sentId);
+      await expect(client.callTool({
+        name: "history",
+        arguments: { unacknowledgedBy: "other-agent" },
+      })).rejects.toMatchObject({ code: ErrorCode.InvalidParams });
       const claimed = await client.callTool({
         name: "claim",
         arguments: { leaseMs: 30_000 },

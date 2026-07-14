@@ -54,6 +54,7 @@ export const REQUIRED_MIGRATIONS = [
   { version: 6, name: "legacy_shared_context_import" },
   { version: 7, name: "runtime_role" },
   { version: 8, name: "message_projects" },
+  { version: 9, name: "mailbox_query_indexes" },
 ] as const;
 
 function checksum(source: string): string {
@@ -122,7 +123,7 @@ export async function runtimeSchemaReady(db: PgQueryable): Promise<boolean> {
   );
   if ([...REQUIRED_COLUMNS].some(([name, type]) => actual.get(name) !== type)) return false;
 
-  const objects = await db.query<{ immutable: boolean; deliveryAudit: boolean; idempotency: boolean; claim: boolean; source: boolean; thread: boolean; created: boolean; presence: boolean; project: boolean }>(
+  const objects = await db.query<{ immutable: boolean; deliveryAudit: boolean; idempotency: boolean; claim: boolean; source: boolean; thread: boolean; created: boolean; presence: boolean; project: boolean; targets: boolean }>(
     `SELECT
        EXISTS (
          SELECT 1 FROM pg_trigger
@@ -140,10 +141,11 @@ export async function runtimeSchemaReady(db: PgQueryable): Promise<boolean> {
        to_regclass('agent_bridge.messages_thread') IS NOT NULL AS thread,
        to_regclass('agent_bridge.messages_created') IS NOT NULL AS created,
        to_regclass('agent_bridge.messages_project') IS NOT NULL AS project,
+       to_regclass('agent_bridge.messages_targets_gin') IS NOT NULL AS targets,
        to_regclass('agent_bridge.agent_instances_active') IS NOT NULL AS presence`,
   );
   const row = objects.rows[0];
-  return Boolean(row?.immutable && row.deliveryAudit && row.idempotency && row.claim && row.source && row.thread && row.created && row.presence && row.project);
+  return Boolean(row?.immutable && row.deliveryAudit && row.idempotency && row.claim && row.source && row.thread && row.created && row.presence && row.project && row.targets);
 }
 
 export async function runMigrations(

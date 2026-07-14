@@ -1,4 +1,4 @@
-import { randomBytes } from "node:crypto";
+import { createHash, randomBytes } from "node:crypto";
 import { normalizeReceiptId } from "./atrib-receipt.js";
 
 export type JsonValue =
@@ -113,6 +113,11 @@ const RECORD_HASH_RE = /^sha256:[a-f0-9]{64}$/i;
 
 export class BridgeValidationError extends Error {
   readonly code = "invalid_input";
+}
+
+export class BridgePrincipalMismatchError extends Error {
+  readonly code = "principal_mismatch";
+  readonly status = 403;
 }
 
 function clean(value: unknown, field: string, max = 512): string {
@@ -297,14 +302,41 @@ export function validateMessageDraft(
   };
 }
 
-export function encodeCursor(sequence: string): string {
+interface CursorScopeQuery {
+  mailbox?: "inbox" | "sent" | "all";
+  receiptState?: "any" | "unread" | "read";
+  project?: string;
+  types?: string[];
+  includeExpired?: boolean;
+  source?: string;
+  since?: string;
+  threadId?: string;
+}
+
+export function cursorScope(principal: BridgePrincipal, query: CursorScopeQuery): string {
+  const normalized = {
+    workspace: principal.workspace,
+    principal: principal.agent,
+    mailbox: query.mailbox ?? "inbox",
+    receiptState: query.receiptState ?? "any",
+    project: query.project ?? null,
+    types: [...new Set(query.types ?? [])].sort(),
+    includeExpired: query.includeExpired === true,
+    source: query.source ?? null,
+    since: query.since ?? null,
+    threadId: query.threadId ?? null,
+  };
+  return createHash("sha256").update(JSON.stringify(normalized)).digest("base64url");
+}
+
+export function encodeCursor(sequence: string, scope?: string): string {
   if (!SEQUENCE_RE.test(sequence)) {
     throw new BridgeValidationError("sequence is invalid");
   }
-  return Buffer.from(JSON.stringify({ v: 1, sequence })).toString("base64url");
+  return Buffer.from(JSON.stringify(scope ? { v: 2, sequence, scope } : { v: 1, sequence })).toString("base64url");
 }
 
-export function decodeCursor(cursor: string | undefined): string | undefined {
+export function decodeCursor(cursor: string | undefined, scope?: string): string | undefined {
   if (!cursor) return undefined;
 
   if (typeof cursor !== "string" || cursor.length > 256) {
@@ -314,10 +346,11 @@ export function decodeCursor(cursor: string | undefined): string | undefined {
   try {
     const parsed = JSON.parse(Buffer.from(cursor, "base64url").toString("utf8"));
     if (
-      parsed?.v !== 1 ||
+      ![1, 2].includes(parsed?.v) ||
       typeof parsed.sequence !== "string" ||
       !SEQUENCE_RE.test(parsed.sequence) ||
-      BigInt(parsed.sequence) > POSTGRES_BIGINT_MAX
+      BigInt(parsed.sequence) > POSTGRES_BIGINT_MAX ||
+      (parsed.v === 2 && (typeof parsed.scope !== "string" || parsed.scope !== scope))
     ) {
       throw new Error();
     }

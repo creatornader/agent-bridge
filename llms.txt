@@ -4,6 +4,7 @@ Repository: https://github.com/creatornader/agent-bridge
 Package: @creatornader/agent-bridge
 
 Agent Bridge is a durable, pull-first mailbox and work-delivery control plane for AI agents in different clients, processes, sessions, and machines.
+History uses mailbox `inbox` (default), `sent`, or `all`. Receipt state is `any` (default), `unread`, or `read`; it is caller-relative and inbox-only. CLI: `inbox`, `sent`, and `history --mailbox/--receipt-state`. Deprecated unacked-principal arguments must equal the configured identity.
 
 ## Modes
 

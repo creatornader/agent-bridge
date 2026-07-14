@@ -8,6 +8,9 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and 
 
 ### Added
 
+- Caller-bound `inbox`, `sent`, and `all` mailbox history plus `any`, `unread`, and `read` receipt state across MCP, CLI, HTTP, PostgreSQL, SQLite, legacy, and offline gateway mode.
+- Scope-bound v2 cursors with temporary v1 cursor compatibility and authoritative edge-cache backfill after the visibility contract upgrade.
+- Deprecated arbitrary-principal receipt filters. The CLI checks compatibility assertions before opening storage or contacting a gateway, and server surfaces reject mismatches before querying message storage.
 - Optional immutable project labels across local, gateway, legacy, CLI, and MCP message paths, with exact project reads and unfiltered cross-project reads.
 - Additive PostgreSQL migration 008, safe local and edge SQLite upgrades, and an owner-only dry-run-first legacy project reconciliation command.
 

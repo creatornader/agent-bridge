@@ -7,6 +7,7 @@ import { pathToFileURL } from "node:url";
 import { promisify } from "node:util";
 import { afterEach, describe, expect, it } from "vitest";
 import { BridgeService } from "../src/bridge-service.js";
+import { encodeCursor } from "../src/bridge-domain.js";
 import { SQLiteBridgeStore } from "../src/sqlite-bridge-store.js";
 
 const temporaryDirectories: string[] = [];
@@ -152,6 +153,42 @@ function bridgeStoreContract(name: string, makeStore: () => SQLiteBridgeStore) {
       expect((await service.history({ workspace: "acme", agent: "claude" })).messages).toHaveLength(1);
     });
 
+    it("supports caller-relative inbox, sent, all, and receipt states", async () => {
+      const service = new BridgeService(makeStore());
+      const sender = { workspace: "acme", agent: "sender" };
+      const worker = { workspace: "acme", agent: "worker" };
+      const other = { workspace: "acme", agent: "other" };
+      const targeted = await service.publish(sender, { type: "work", content: "targeted", targets: ["worker"] });
+      const away = await service.publish(sender, { type: "work", content: "away", targets: ["other"] });
+      const broadcast = await service.publish(other, { type: "context", content: "broadcast" });
+
+      expect((await service.history(worker)).messages.map((message) => message.id)).toEqual([targeted.message.id, broadcast.message.id]);
+      expect((await service.history(sender, { mailbox: "sent" })).messages.map((message) => message.id)).toEqual([targeted.message.id, away.message.id]);
+      expect((await service.history(sender, { mailbox: "all" })).messages.map((message) => message.id)).toEqual([targeted.message.id, away.message.id, broadcast.message.id]);
+      await service.acknowledge(worker, [targeted.message.id]);
+      expect((await service.history(worker, { receiptState: "read" })).messages.map((message) => message.id)).toEqual([targeted.message.id]);
+      expect((await service.history(worker, { receiptState: "unread" })).messages.map((message) => message.id)).toEqual([broadcast.message.id]);
+      await expect(service.history(worker, { mailbox: "sent", receiptState: "read" })).rejects.toThrow("receiptState is valid only for inbox");
+      await expect(service.history(worker, { unacknowledgedBy: "other" })).rejects.toMatchObject({
+        code: "principal_mismatch",
+        status: 403,
+      });
+      expect((await service.history({ workspace: "elsewhere", agent: "sender" }, { mailbox: "sent" })).messages).toEqual([]);
+    });
+
+    it("binds v2 cursors to principal and normalized query scope while accepting v1", async () => {
+      const service = new BridgeService(makeStore());
+      const sender = { workspace: "acme", agent: "sender" };
+      await service.publish(sender, { type: "work", content: "one", targets: ["worker"] });
+      await service.publish(sender, { type: "work", content: "two", targets: ["worker"] });
+      const page = await service.history({ workspace: "acme", agent: "worker" }, { limit: 1 });
+      await expect(service.history({ workspace: "acme", agent: "other" }, { cursor: page.cursor })).rejects.toThrow("cursor is invalid");
+      await expect(service.history({ workspace: "acme", agent: "worker" }, { cursor: page.cursor, project: "different" })).rejects.toThrow("cursor is invalid");
+      const legacy = await service.history({ workspace: "acme", agent: "worker" }, { cursor: encodeCursor("1") });
+      expect(legacy.messages).toHaveLength(1);
+      expect(JSON.parse(Buffer.from(legacy.cursor!, "base64url").toString()).v).toBe(2);
+    });
+
     it("advances its cursor across messages that are invisible to the reader", async () => {
       const service = new BridgeService(makeStore());
       const sender = { workspace: "acme", agent: "codex" };
@@ -232,9 +269,7 @@ function bridgeStoreContract(name: string, makeStore: () => SQLiteBridgeStore) {
         ))?.state,
       ).toBe("acked");
 
-      const unread = await service.history(worker, {
-        unacknowledgedBy: "worker",
-      });
+      const unread = await service.history(worker, { receiptState: "unread" });
       expect(unread.messages.map((message) => message.id)).toEqual([
         settledWithoutRead.message.id,
       ]);
@@ -369,6 +404,14 @@ function bridgeStoreContract(name: string, makeStore: () => SQLiteBridgeStore) {
 bridgeStoreContract("SQLite", createStore);
 
 describe("SQLite project schema upgrade", () => {
+  it("shares one initialization across concurrent calls on the same store", async () => {
+    const store = new SQLiteBridgeStore();
+    stores.push(store);
+    await Promise.all(Array.from({ length: 8 }, () => store.initialize()));
+    expect((await store.listMessages({ workspace: "acme", agent: "codex" })).messages)
+      .toEqual([]);
+  });
+
   it("adds the project column without losing messages from the prior schema", async () => {
     const directory = mkdtempSync(join(tmpdir(), "agent-bridge-v2-upgrade-"));
     temporaryDirectories.push(directory);

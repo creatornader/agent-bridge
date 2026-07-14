@@ -1,4 +1,4 @@
-import { decodeCursor, encodeCursor, type BridgeDelivery, type BridgeMessage, type BridgePrincipal, type RetryPolicy } from "./bridge-domain.js";
+import { cursorScope, decodeCursor, encodeCursor, type BridgeDelivery, type BridgeMessage, type BridgePrincipal, type RetryPolicy } from "./bridge-domain.js";
 import type {
   BridgeStore,
   BridgeDiagnostics,
@@ -29,7 +29,13 @@ function messageId(row: LegacyRow): string {
 function isVisible(row: LegacyRow, principal: BridgePrincipal, query: MessageQuery): boolean {
   const envelope = row.metadata?.message_envelope;
   const targets = Array.isArray(envelope?.target_agents) ? envelope.target_agents : [];
-  if (targets.length && !targets.includes(principal.agent)) return false;
+  const inbox = !targets.length || targets.includes(principal.agent);
+  const sent = row.source === principal.agent;
+  const mailbox = query.mailbox ?? "inbox";
+  if (mailbox === "inbox" && !inbox) return false;
+  if (query.mailbox === "sent" && !sent) return false;
+  if (query.mailbox === "all" && !inbox && !sent) return false;
+  if (!["inbox", "sent", "all"].includes(mailbox) && !inbox) return false;
 
   const type = envelope?.kind ?? row.category;
   if (query.types?.length && !query.types.includes(type)) return false;
@@ -117,6 +123,27 @@ export class LegacySupabaseRestStore implements BridgeStore {
     }
   }
 
+  private async visibleReceiptIds(
+    entryIds: string[],
+    principal: BridgePrincipal,
+  ): Promise<string[]> {
+    if (!entryIds.length || entryIds.length > 200) {
+      throw new Error("legacy receipt IDs must contain between 1 and 200 entries");
+    }
+    const uniqueIds = [...new Set(entryIds)];
+    const rows = await this.request(
+      `/shared_context?select=id,source,metadata&id=in.(${uniqueIds.join(",")})`,
+    );
+    const visible = new Set(
+      Array.isArray(rows)
+        ? rows
+          .filter((row) => isVisible(row as LegacyRow, principal, { mailbox: "inbox" }))
+          .map((row) => String((row as LegacyRow).id))
+        : [],
+    );
+    return entryIds.filter((entryId) => visible.has(entryId));
+  }
+
   async insertMessage(
     input: Omit<BridgeMessage, "sequence" | "createdAt">,
   ): Promise<InsertMessageResult> {
@@ -191,7 +218,8 @@ export class LegacySupabaseRestStore implements BridgeStore {
     query: MessageQuery = {},
   ): Promise<MessagePage> {
     const limit = query.limit ?? 50;
-    let after = decodeCursor(query.cursor) ?? "0";
+    const scope = cursorScope(principal, query);
+    let after = decodeCursor(query.cursor, scope) ?? "0";
     let before: string | undefined;
     let latestCursor: string | undefined;
     const messages: BridgeMessage[] = [];
@@ -201,21 +229,22 @@ export class LegacySupabaseRestStore implements BridgeStore {
       const workspaceFilter = query.project
         ? `&project=eq.${encodeURIComponent(query.project)}`
         : "";
-      const sourceFilter = query.source
-        ? `&source=eq.${encodeURIComponent(query.source)}`
+      const effectiveSource = query.source ?? (query.mailbox === "sent" ? principal.agent : undefined);
+      const sourceFilter = effectiveSource
+        ? `&source=eq.${encodeURIComponent(effectiveSource)}`
         : "";
       const sinceFilter = query.since
         ? `&created_at=gte.${encodeURIComponent(query.since)}`
         : "";
-      const unacknowledgedFilter = query.unacknowledgedBy
-        ? `&acked_by=not.cs.%7B${encodeURIComponent(query.unacknowledgedBy)}%7D`
-        : "";
+      const receiptFilter = query.receiptState === "unread"
+        ? `&acked_by=not.cs.%7B${encodeURIComponent(principal.agent)}%7D`
+        : query.receiptState === "read" ? `&acked_by=cs.%7B${encodeURIComponent(principal.agent)}%7D` : "";
       const cursorFilter = query.latest
         ? before ? `&id=lt.${encodeURIComponent(before)}` : ""
         : `&id=gt.${encodeURIComponent(after)}`;
       const rows = (await this.request(
         `/shared_context?select=*${cursorFilter}` +
-          `${workspaceFilter}${sourceFilter}${sinceFilter}${unacknowledgedFilter}` +
+          `${workspaceFilter}${sourceFilter}${sinceFilter}${receiptFilter}` +
           `&order=id.${query.latest ? "desc" : "asc"}&limit=${batchLimit}`,
       )) as LegacyRow[];
       if (!rows.length) break;
@@ -233,10 +262,13 @@ export class LegacySupabaseRestStore implements BridgeStore {
     }
 
     const next = query.latest ? latestCursor : after === "0" ? undefined : after;
-    return { messages, cursor: next ? encodeCursor(next) : query.cursor };
+    return { messages, cursor: next ? encodeCursor(next, scope) : query.cursor };
   }
 
-  async recordReceipt(_workspace: string, ids: string[], principal: string): Promise<number> {
+  async recordReceipt(principal: BridgePrincipal, ids: string[]): Promise<number> {
+    if (!ids.length || ids.length > 200) {
+      throw new Error("message IDs must contain between 1 and 200 entries");
+    }
     const entryIds = await Promise.all(ids.map(async (id) => {
       const mapped = this.legacyIds.get(id);
       if (mapped) return mapped;
@@ -254,22 +286,32 @@ export class LegacySupabaseRestStore implements BridgeStore {
       if (decodedSequence !== undefined) return decodedSequence;
       throw new LegacySupabaseError(404, "message_not_found");
     }));
+    const visibleIds = await this.visibleReceiptIds(entryIds, principal);
+    if (!visibleIds.length) return 0;
     return this.request("/rpc/ack_context", {
       method: "POST",
-      body: JSON.stringify({ entry_ids: entryIds, agent_name: principal }),
+      body: JSON.stringify({ entry_ids: visibleIds, agent_name: principal.agent }),
     });
   }
 
   async recordLegacyReceipt(ids: string[], principal: string): Promise<number> {
+    if (!ids.length || ids.length > 200) {
+      throw new Error("legacy receipt IDs must contain between 1 and 200 entries");
+    }
     const entryIds = ids.map((id) => {
       if (!/^\d+$/.test(id)) throw new Error("legacy receipt IDs must be numeric");
       const value = BigInt(id);
       if (value > 0x7fffffffffffffffn) throw new Error("legacy receipt ID exceeds bigint range");
       return value.toString();
     });
+    const visibleIds = await this.visibleReceiptIds(entryIds, {
+      workspace: "*",
+      agent: principal,
+    });
+    if (!visibleIds.length) return 0;
     return this.request("/rpc/ack_context", {
       method: "POST",
-      body: JSON.stringify({ entry_ids: entryIds, agent_name: principal }),
+      body: JSON.stringify({ entry_ids: visibleIds, agent_name: principal }),
     });
   }
 

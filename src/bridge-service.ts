@@ -1,4 +1,5 @@
 import {
+  BridgePrincipalMismatchError,
   BridgeValidationError,
   encodeCursor,
   validateMessageDraft,
@@ -27,7 +28,9 @@ function validateLeaseMs(value = 30_000): number {
   return value;
 }
 
-function validateQuery(query: MessageQuery): MessageQuery {
+export type PublicMessageQuery = MessageQuery & { unacknowledgedBy?: string };
+
+function validateQuery(query: PublicMessageQuery, principal: BridgePrincipal): MessageQuery {
   const limit = query.limit ?? 50;
   if (!Number.isSafeInteger(limit) || limit < 1 || limit > 200) {
     throw new BridgeValidationError("limit must be between 1 and 200");
@@ -53,6 +56,16 @@ function validateQuery(query: MessageQuery): MessageQuery {
   ) {
     throw new BridgeValidationError("unacknowledgedBy filter is invalid");
   }
+  if (unacknowledgedBy !== undefined && unacknowledgedBy !== principal.agent) {
+    throw new BridgePrincipalMismatchError("unacknowledgedBy must equal the configured principal");
+  }
+  const mailbox = query.mailbox ?? "inbox";
+  if (!["inbox", "sent", "all"].includes(mailbox)) throw new BridgeValidationError("mailbox is invalid");
+  const receiptState = query.receiptState ?? (unacknowledgedBy ? "unread" : "any");
+  if (!["any", "unread", "read"].includes(receiptState)) throw new BridgeValidationError("receiptState is invalid");
+  if (mailbox !== "inbox" && receiptState !== "any") {
+    throw new BridgeValidationError("receiptState is valid only for inbox");
+  }
   let since: string | undefined;
   if (query.since !== undefined) {
     const date = new Date(query.since);
@@ -66,7 +79,8 @@ function validateQuery(query: MessageQuery): MessageQuery {
   if (query.latest && query.cursor) {
     throw new BridgeValidationError("latest cannot be combined with cursor");
   }
-  return { ...query, project: validateProject(query.project), limit, source, since, unacknowledgedBy, threadId, latest: query.latest === true };
+  const { unacknowledgedBy: _compat, ...storeQuery } = query;
+  return { ...storeQuery, mailbox, receiptState, project: validateProject(query.project), limit, source, since, threadId, latest: query.latest === true };
 }
 
 export class BridgeService {
@@ -87,9 +101,10 @@ export class BridgeService {
 
   async history(
     principalInput: BridgePrincipal,
-    query: MessageQuery = {},
+    query: PublicMessageQuery = {},
   ): Promise<MessagePage> {
-    return this.store.listMessages(validatePrincipal(principalInput), validateQuery(query));
+    const principal = validatePrincipal(principalInput);
+    return this.store.listMessages(principal, validateQuery(query, principal));
   }
 
   async acknowledge(principalInput: BridgePrincipal, messageIds: string[]): Promise<number> {
@@ -98,7 +113,7 @@ export class BridgeService {
       throw new BridgeValidationError("messageIds must contain between 1 and 200 entries");
     }
     const ids = messageIds.map((id) => validateUuid(id, "messageId"));
-    return this.store.recordReceipt(principal.workspace, ids, principal.agent);
+    return this.store.recordReceipt(principal, ids);
   }
 
   async claim(
