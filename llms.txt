@@ -27,7 +27,7 @@ History uses mailbox `inbox` (default), `sent`, or `all`. Receipt state is `any`
 
 ## MCP tools
 
-- `capabilities`: return operations for the current provider and surface, reserved scope metadata, and supported protocol versions.
+- `capabilities`: return operations, required scopes, provider-specific enforcement, and supported protocol versions. Gateway access needs an active credential but no named scope for this operation.
 
 Compatibility: post_context, get_context, ack_context.
 Reliable messaging: send, history, claim, extend, acknowledge, negative_acknowledge, heartbeat, presence, sync.

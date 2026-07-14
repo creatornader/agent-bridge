@@ -33,7 +33,7 @@ The canonical v2 operation registry generates [JSON Schema](schemas/agent-bridge
 
 Protocol 2.1 uses a gateway-first rollout. An upgraded gateway continues to serve released 2.0 clients, including headerless requests and their direct or null delivery results. A 2.1 client probes before mutation and proceeds only when complete, consistent response headers select 2.1 and advertise 2.1 support. It rejects mutation against a headerless or 2.0 gateway instead of downgrading. Upgrade the gateway before installing or starting 2.1 clients.
 
-The OpenAPI paths describe protocol 2.1. The embedded `x-agent-bridge-protocol-2.0` and `x-agent-bridge-schemas-2.0` vendor extensions contain frozen compatibility schema metadata for released 2.0 clients. They are not a second OpenAPI description. Scope names are reserved metadata. Gateway credentials currently authorize all operations for their bound principal. Local mode uses process identity, and legacy mode uses its configured key.
+The OpenAPI paths describe protocol 2.1. The embedded `x-agent-bridge-protocol-2.0` and `x-agent-bridge-schemas-2.0` vendor extensions contain frozen compatibility schema metadata for released 2.0 clients. They are not a second OpenAPI description. Gateway credentials enforce the operation scopes declared by the canonical registry. Local mode uses process identity, and legacy mode uses its configured key. Provider-neutral artifacts report this difference instead of claiming one authorization model for every backend.
 
 ## Architecture
 
@@ -70,7 +70,7 @@ A2A and application task semantics sit above Agent Bridge. MCP, CLI, and HTTPS a
 
 ## Install from source
 
-The unscoped npm name belongs to another project. This repository uses `@creatornader/agent-bridge`. The release workflow always builds a tagged package. Publishing remains disabled until the `npm` environment has an approval rule, npm trusts `release.yml` as this package's publisher, and `NPM_PUBLISH_ENABLED` is set to `true`.
+The unscoped npm name belongs to another project. This repository uses the published package `@creatornader/agent-bridge`. The release workflow builds every tagged package before the protected npm publication step.
 
 ```bash
 git clone https://github.com/creatornader/agent-bridge.git
@@ -179,7 +179,7 @@ insert into agent_bridge.credentials (workspace_id, agent_id, token_hash, label)
 values ('team', '<agent uuid>', '<sha256 token hash>', 'codex laptop');
 ```
 
-Repeat the agent and credential inserts for Claude Code, Claude Desktop, or any other principal. Each plaintext token should be random, unique, and shown only to the matching client installer.
+Migration 011 gives direct inserts the full compatibility scope set. This keeps the released provisioning command working until owner commands replace raw SQL. A capabilities-only credential may use an empty `scopes` array. Custom arrays must use only the declared scopes, without duplicates, in lexical order. Repeat the agent and credential inserts for Claude Code, Claude Desktop, or any other principal. Each plaintext token should be random, unique, and shown only to the matching client installer.
 
 Start the gateway:
 
@@ -334,6 +334,10 @@ The original v1 schema remains in [`sql/setup.sql`](sql/setup.sql). Ordered gate
 Local edge health and remote reachability are separate: a healthy offline gateway client reports `localHealthy: true`, `remoteReachable: false`, `connected: false`, and `status: "degraded"` while retaining usable cached reads and queued sends.
 
 The gateway exposes unauthenticated `/readyz`. `/v2/status` and `/metrics` require a valid credential.
+
+Each gateway operation checks the scopes in the canonical registry. `capabilities` needs an active credential but no named scope. The gateway audits scope denials and applies both a credential-wide token bucket and an operation bucket before it reads a request body. Missing policy state or a failed denial audit closes the request with `security_unavailable`. Rate denials return the same rounded delay in `Retry-After` and `error.details.retryAfterSeconds`.
+
+Credential replacement links are immutable and stay within one workspace and principal. A replacement grace period can shorten the predecessor's lifetime but cannot extend ordinary expiry or override revocation. Replacement, revocation, scope denial, and rate denial events use explicit append-only columns. They do not store tokens, hashes, authorization headers, request bodies, message content, arbitrary metadata, URLs, IP addresses, or database errors.
 
 Before dropping an Agent Bridge database, remove its gateway login and database-specific runtime role. Run this while connected to that database so `current_database()` still identifies the right role:
 

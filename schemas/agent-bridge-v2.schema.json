@@ -3,7 +3,11 @@
   "$id": "https://agent-bridge.dev/schemas/v2/operations.json",
   "title": "Agent Bridge v2 operation contracts",
   "protocolVersion": "2.1",
-  "scopeEnforcement": false,
+  "scopeEnforcementByProvider": {
+    "local": false,
+    "gateway": true,
+    "legacy-supabase": false
+  },
   "$defs": {
     "ErrorEnvelope": {
       "type": "object",
@@ -306,6 +310,7 @@
         },
         "authorizationModel": {
           "enum": [
+            "scoped-credential",
             "credential-wide",
             "process-identity",
             "legacy-key"
@@ -391,6 +396,7 @@
         },
         "authorizationModel": {
           "enum": [
+            "scoped-credential",
             "credential-wide",
             "process-identity",
             "legacy-key"

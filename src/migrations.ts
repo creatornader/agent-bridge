@@ -13,6 +13,39 @@ const REQUIRED_COLUMNS = new Map([
   ["credentials.workspace_id", "text"],
   ["credentials.agent_id", "uuid"],
   ["credentials.token_hash", "bpchar"],
+  ["credentials.scopes", "_text"],
+  ["credentials.scope_set_name", "text"],
+  ["credentials.replaces_credential_id", "uuid"],
+  ["credentials.revoked_by", "text"],
+  ["credentials.revocation_reason", "text"],
+  ["credentials.expiry_grace_until", "timestamptz"],
+  ["credential_scope_sets.name", "text"],
+  ["credential_scope_sets.scopes", "_text"],
+  ["credential_scope_sets.created_at", "timestamptz"],
+  ["security_events.sequence", "int8"],
+  ["security_events.event_id", "uuid"],
+  ["security_events.event_type", "text"],
+  ["security_events.outcome", "text"],
+  ["security_events.reason_code", "text"],
+  ["security_events.workspace_id", "text"],
+  ["security_events.principal", "text"],
+  ["security_events.actor_principal", "text"],
+  ["security_events.credential_id", "uuid"],
+  ["security_events.related_credential_id", "uuid"],
+  ["security_events.operation_id", "text"],
+  ["security_events.request_id", "uuid"],
+  ["security_events.policy_id", "text"],
+  ["security_events.retry_after_seconds", "int4"],
+  ["security_events.created_at", "timestamptz"],
+  ["rate_limit_policies.policy_id", "text"],
+  ["rate_limit_policies.operation_id", "text"],
+  ["rate_limit_policies.capacity", "int4"],
+  ["rate_limit_policies.refill_per_second", "numeric"],
+  ["rate_limit_policies.enabled", "bool"],
+  ["rate_limit_buckets.credential_id", "uuid"],
+  ["rate_limit_buckets.policy_id", "text"],
+  ["rate_limit_buckets.tokens", "numeric"],
+  ["rate_limit_buckets.updated_at", "timestamptz"],
   ["messages.sequence", "int8"],
   ["messages.id", "uuid"],
   ["messages.workspace", "text"],
@@ -72,6 +105,7 @@ export const REQUIRED_MIGRATIONS = [
   { version: 8, name: "message_projects" },
   { version: 9, name: "mailbox_query_indexes" },
   { version: 10, name: "publisher_delivery_policy" },
+  { version: 11, name: "credential_security" },
 ] as const;
 
 function checksum(source: string): string {
@@ -131,16 +165,21 @@ export async function migrationsReady(
 
 export async function runtimeSchemaReady(db: PgQueryable): Promise<boolean> {
   const columns = await db.query<{ table_name: string; column_name: string; udt_name: string }>(
-    `SELECT table_name, column_name, udt_name
-     FROM information_schema.columns
-     WHERE table_schema='agent_bridge'`,
+    `SELECT relation.relname AS table_name, attribute.attname AS column_name,
+       type.typname AS udt_name
+     FROM pg_catalog.pg_attribute attribute
+     JOIN pg_catalog.pg_class relation ON relation.oid=attribute.attrelid
+     JOIN pg_catalog.pg_namespace namespace ON namespace.oid=relation.relnamespace
+     JOIN pg_catalog.pg_type type ON type.oid=attribute.atttypid
+     WHERE namespace.nspname='agent_bridge'
+       AND attribute.attnum>0 AND NOT attribute.attisdropped`,
   );
   const actual = new Map(
     columns.rows.map((row) => [`${row.table_name}.${row.column_name}`, row.udt_name]),
   );
   if ([...REQUIRED_COLUMNS].some(([name, type]) => actual.get(name) !== type)) return false;
 
-  const objects = await db.query<{ immutable: boolean; deliveryAudit: boolean; idempotency: boolean; claim: boolean; publisher: boolean; terminal: boolean; source: boolean; thread: boolean; created: boolean; presence: boolean; project: boolean; targets: boolean }>(
+  const objects = await db.query<{ immutable: boolean; deliveryAudit: boolean; idempotency: boolean; claim: boolean; publisher: boolean; terminal: boolean; source: boolean; thread: boolean; created: boolean; presence: boolean; project: boolean; targets: boolean; scopeSets: boolean; securityEvents: boolean; ratePolicies: boolean; rateBuckets: boolean; replacement: boolean; rateCleanup: boolean; credentialSecurity: boolean; eventAppendOnly: boolean; scopeAudit: boolean; rateConsume: boolean; securityReady: boolean }>(
     `SELECT
        EXISTS (
          SELECT 1 FROM pg_trigger
@@ -161,10 +200,43 @@ export async function runtimeSchemaReady(db: PgQueryable): Promise<boolean> {
        to_regclass('agent_bridge.messages_created') IS NOT NULL AS created,
        to_regclass('agent_bridge.messages_project') IS NOT NULL AS project,
        to_regclass('agent_bridge.messages_targets_gin') IS NOT NULL AS targets,
-       to_regclass('agent_bridge.agent_instances_active') IS NOT NULL AS presence`,
+       to_regclass('agent_bridge.agent_instances_active') IS NOT NULL AS presence,
+       to_regclass('agent_bridge.credential_scope_sets') IS NOT NULL AS "scopeSets",
+       to_regclass('agent_bridge.security_events') IS NOT NULL AS "securityEvents",
+       to_regclass('agent_bridge.rate_limit_policies') IS NOT NULL AS "ratePolicies",
+       to_regclass('agent_bridge.rate_limit_buckets') IS NOT NULL AS "rateBuckets",
+       to_regclass('agent_bridge.credentials_replacement_lineage') IS NOT NULL AS replacement,
+       to_regclass('agent_bridge.rate_limit_buckets_cleanup') IS NOT NULL AS "rateCleanup",
+       EXISTS (
+         SELECT 1 FROM pg_trigger
+         WHERE tgrelid=to_regclass('agent_bridge.credentials')
+           AND tgname='credentials_validate_security' AND NOT tgisinternal
+       ) AS "credentialSecurity",
+       EXISTS (
+         SELECT 1 FROM pg_trigger
+         WHERE tgrelid=to_regclass('agent_bridge.security_events')
+           AND tgname='security_events_append_only' AND NOT tgisinternal
+       ) AS "eventAppendOnly",
+       to_regprocedure('agent_bridge.record_scope_denial(uuid,text,uuid)') IS NOT NULL AS "scopeAudit",
+       to_regprocedure('agent_bridge.consume_rate_limit(uuid,text,uuid)') IS NOT NULL AS "rateConsume",
+       to_regprocedure('agent_bridge.security_schema_ready()') IS NOT NULL AS "securityReady"`,
   );
   const row = objects.rows[0];
-  return Boolean(row?.immutable && row.deliveryAudit && row.idempotency && row.claim && row.publisher && row.terminal && row.source && row.thread && row.created && row.presence && row.project && row.targets);
+  if (!Boolean(
+    row?.immutable && row.deliveryAudit && row.idempotency && row.claim && row.publisher &&
+    row.terminal && row.source && row.thread && row.created && row.presence && row.project &&
+    row.targets && row.scopeSets && row.securityEvents && row.ratePolicies && row.rateBuckets &&
+    row.replacement && row.rateCleanup && row.credentialSecurity && row.eventAppendOnly &&
+    row.scopeAudit && row.rateConsume && row.securityReady
+  )) return false;
+  try {
+    const security = await db.query<{ ready: boolean }>(
+      "SELECT agent_bridge.security_schema_ready() AS ready",
+    );
+    return security.rows[0]?.ready === true;
+  } catch {
+    return false;
+  }
 }
 
 export async function runMigrations(

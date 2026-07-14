@@ -31,7 +31,7 @@ describe("canonical v2 contract registry", () => {
       "cancel_delivery", "requeue_delivery", "extend_delivery", "acknowledge_delivery",
       "negative_acknowledge_delivery", "heartbeat", "presence", "sync",
     ]);
-    expect(SCOPE_ENFORCEMENT).toBe(false);
+    expect(SCOPE_ENFORCEMENT).toBe(true);
     expect(operations.find((entry) => entry.id === "capabilities")?.scopes).toEqual([]);
     for (const operation of operations) {
       expect(operation.request).toBeTruthy();
@@ -98,8 +98,8 @@ describe("canonical v2 contract registry", () => {
     for (const surface of ["mcp", "http", "cli"] as const) {
       for (const provider of ["local", "gateway", "legacy-supabase"] as const) {
         const document = capabilityDocument({ surface, provider });
-        expect(document.scopeEnforcement).toBe(false);
-        expect(document.authorizationModel).toBe(provider === "gateway" ? "credential-wide" : provider === "local" ? "process-identity" : "legacy-key");
+        expect(document.scopeEnforcement).toBe(provider === "gateway");
+        expect(document.authorizationModel).toBe(provider === "gateway" ? "scoped-credential" : provider === "local" ? "process-identity" : "legacy-key");
         expect(document.operations.map((entry) => entry.id)).toEqual(
           availableOperations({ surface, provider }).map((entry) => entry.id),
         );
@@ -156,11 +156,21 @@ describe("canonical v2 contract registry", () => {
 describe("generated contract artifacts", () => {
   it("uses local references and complete OpenAPI operation metadata", () => {
     const schema = JSON.parse(readFileSync(resolve(root, "schemas/agent-bridge-v2.schema.json"), "utf8"));
+    const mcp = JSON.parse(readFileSync(resolve(root, "schemas/agent-bridge-v2.mcp.json"), "utf8"));
     const openapi = JSON.parse(readFileSync(resolve(root, "openapi/agent-bridge-v2.openapi.json"), "utf8"));
     const serialized = JSON.stringify({ schema, openapi });
     const refs = [...serialized.matchAll(/"\$ref":"([^"]+)"/g)].map((match) => match[1]);
     expect(refs.every((ref) => ref.startsWith("#/"))).toBe(true);
     expect(openapi.openapi).toBe("3.1.2");
+    expect(schema.scopeEnforcementByProvider).toEqual({
+      local: false,
+      gateway: true,
+      "legacy-supabase": false,
+    });
+    expect(mcp.scopeEnforcementByProvider).toEqual(schema.scopeEnforcementByProvider);
+    expect(schema).not.toHaveProperty("scopeEnforcement");
+    expect(mcp).not.toHaveProperty("scopeEnforcement");
+    expect(openapi["x-agent-bridge-scope-enforcement"]).toBe(true);
     expect(openapi["x-agent-bridge-openapi-protocol-version"]).toBe("2.1");
     expect(openapi["x-agent-bridge-schemas-2.0"].Message.properties).not.toHaveProperty("deliveryPolicy");
     expect(openapi.paths["/v2/messages"].post.parameters).toContainEqual(expect.objectContaining({ name: "x-agent-bridge-protocol-version", required: true, schema: { type: "string", enum: ["2.1"] } }));
@@ -186,7 +196,7 @@ describe("generated contract artifacts", () => {
   });
 
   it("includes every published contract artifact in the npm tarball", () => {
-    const packed = JSON.parse(execFileSync("npm", ["pack", "--json", "--dry-run", "--ignore-scripts"], { cwd: root, encoding: "utf8" }));
+    const packed = JSON.parse(execFileSync("npm", ["pack", "--json", "--dry-run", "--ignore-scripts"], { cwd: root, encoding: "utf8", timeout: 20_000 }));
     const files = new Set(packed[0].files.map((entry: { path: string }) => entry.path));
     for (const path of [
       "schemas/agent-bridge-v2.schema.json",
@@ -194,7 +204,7 @@ describe("generated contract artifacts", () => {
       "schemas/agent-bridge-v2.capabilities.json",
       "openapi/agent-bridge-v2.openapi.json",
     ]) expect(files.has(path)).toBe(true);
-  });
+  }, 30_000);
 });
 
 describe("MCP contract surfaces", () => {

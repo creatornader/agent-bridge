@@ -235,7 +235,7 @@
       "additionalProperties": true
     }
   },
-  "x-agent-bridge-scope-enforcement": false,
+  "x-agent-bridge-scope-enforcement": true,
   "paths": {
     "/v2/capabilities": {
       "get": {
@@ -247,7 +247,7 @@
           }
         ],
         "x-agent-bridge-required-scopes": [],
-        "x-agent-bridge-scope-enforcement": false,
+        "x-agent-bridge-scope-enforcement": true,
         "parameters": [
           {
             "name": "x-agent-bridge-protocol-version",
@@ -321,6 +321,7 @@
                     },
                     "authorizationModel": {
                       "enum": [
+                        "scoped-credential",
                         "credential-wide",
                         "process-identity",
                         "legacy-key"
@@ -780,7 +781,7 @@
         "x-agent-bridge-required-scopes": [
           "status:read"
         ],
-        "x-agent-bridge-scope-enforcement": false,
+        "x-agent-bridge-scope-enforcement": true,
         "parameters": [
           {
             "name": "x-agent-bridge-protocol-version",
@@ -1339,7 +1340,7 @@
         "x-agent-bridge-required-scopes": [
           "gateway:metrics"
         ],
-        "x-agent-bridge-scope-enforcement": false,
+        "x-agent-bridge-scope-enforcement": true,
         "parameters": [
           {
             "name": "x-agent-bridge-protocol-version",
@@ -1790,7 +1791,7 @@
         "x-agent-bridge-required-scopes": [
           "messages:write"
         ],
-        "x-agent-bridge-scope-enforcement": false,
+        "x-agent-bridge-scope-enforcement": true,
         "parameters": [
           {
             "name": "x-agent-bridge-protocol-version",
@@ -2502,7 +2503,7 @@
         "x-agent-bridge-required-scopes": [
           "messages:read"
         ],
-        "x-agent-bridge-scope-enforcement": false,
+        "x-agent-bridge-scope-enforcement": true,
         "parameters": [
           {
             "name": "x-agent-bridge-protocol-version",
@@ -3244,7 +3245,7 @@
         "x-agent-bridge-required-scopes": [
           "receipts:write"
         ],
-        "x-agent-bridge-scope-enforcement": false,
+        "x-agent-bridge-scope-enforcement": true,
         "parameters": [
           {
             "name": "x-agent-bridge-protocol-version",
@@ -3728,7 +3729,7 @@
         "x-agent-bridge-required-scopes": [
           "deliveries:claim"
         ],
-        "x-agent-bridge-scope-enforcement": false,
+        "x-agent-bridge-scope-enforcement": true,
         "parameters": [
           {
             "name": "x-agent-bridge-protocol-version",
@@ -4416,7 +4417,7 @@
         "x-agent-bridge-required-scopes": [
           "deliveries:read"
         ],
-        "x-agent-bridge-scope-enforcement": false,
+        "x-agent-bridge-scope-enforcement": true,
         "parameters": [
           {
             "name": "x-agent-bridge-protocol-version",
@@ -5032,7 +5033,7 @@
         "x-agent-bridge-required-scopes": [
           "deliveries:read"
         ],
-        "x-agent-bridge-scope-enforcement": false,
+        "x-agent-bridge-scope-enforcement": true,
         "parameters": [
           {
             "name": "x-agent-bridge-protocol-version",
@@ -5609,7 +5610,7 @@
         "x-agent-bridge-required-scopes": [
           "deliveries:manage"
         ],
-        "x-agent-bridge-scope-enforcement": false,
+        "x-agent-bridge-scope-enforcement": true,
         "parameters": [
           {
             "name": "x-agent-bridge-protocol-version",
@@ -6170,7 +6171,7 @@
         "x-agent-bridge-required-scopes": [
           "deliveries:manage"
         ],
-        "x-agent-bridge-scope-enforcement": false,
+        "x-agent-bridge-scope-enforcement": true,
         "parameters": [
           {
             "name": "x-agent-bridge-protocol-version",
@@ -6731,7 +6732,7 @@
         "x-agent-bridge-required-scopes": [
           "deliveries:settle"
         ],
-        "x-agent-bridge-scope-enforcement": false,
+        "x-agent-bridge-scope-enforcement": true,
         "parameters": [
           {
             "name": "x-agent-bridge-protocol-version",
@@ -7315,7 +7316,7 @@
         "x-agent-bridge-required-scopes": [
           "deliveries:settle"
         ],
-        "x-agent-bridge-scope-enforcement": false,
+        "x-agent-bridge-scope-enforcement": true,
         "parameters": [
           {
             "name": "x-agent-bridge-protocol-version",
@@ -7895,7 +7896,7 @@
         "x-agent-bridge-required-scopes": [
           "deliveries:settle"
         ],
-        "x-agent-bridge-scope-enforcement": false,
+        "x-agent-bridge-scope-enforcement": true,
         "parameters": [
           {
             "name": "x-agent-bridge-protocol-version",
@@ -8506,7 +8507,7 @@
         "x-agent-bridge-required-scopes": [
           "presence:write"
         ],
-        "x-agent-bridge-scope-enforcement": false,
+        "x-agent-bridge-scope-enforcement": true,
         "parameters": [
           {
             "name": "x-agent-bridge-protocol-version",
@@ -9019,7 +9020,7 @@
         "x-agent-bridge-required-scopes": [
           "presence:read"
         ],
-        "x-agent-bridge-scope-enforcement": false,
+        "x-agent-bridge-scope-enforcement": true,
         "parameters": [
           {
             "name": "x-agent-bridge-protocol-version",

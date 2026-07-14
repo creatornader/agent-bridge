@@ -10,7 +10,9 @@ import pg from "pg";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { BridgeService } from "../src/bridge-service.js";
 import { uuidv7 } from "../src/bridge-domain.js";
+import { AUTHORIZATION_SCOPES } from "../src/contracts/registry.js";
 import { hashCredential, PostgresCredentialResolver } from "../src/gateway-auth.js";
+import { PostgresGatewaySecurity } from "../src/gateway-security.js";
 import { legacyNumericMessageId } from "../src/legacy-compat.js";
 import { reconcileLegacyProjects } from "../src/legacy-project-reconciliation.js";
 import {
@@ -454,8 +456,10 @@ integration("PostgreSQL BridgeStore integration", () => {
     );
     const token = `test-token-${randomUUID()}`;
     const credential = await pool!.query<{ id: string }>(
-      `INSERT INTO agent_bridge.credentials (workspace_id, agent_id, token_hash)
-       VALUES ($1, $2, $3) RETURNING id`,
+      `INSERT INTO agent_bridge.credentials (workspace_id, agent_id, token_hash, scopes, scope_set_name)
+       VALUES ($1, $2, $3,
+         (SELECT scopes FROM agent_bridge.credential_scope_sets WHERE name='release-a-full'),
+         'release-a-full') RETURNING id`,
       [workspaceId, agent.rows[0]!.id, hashCredential(token)],
     );
     const resolver = new PostgresCredentialResolver(pool!);
@@ -463,12 +467,303 @@ integration("PostgreSQL BridgeStore integration", () => {
     expect(await resolver.resolve(token)).toEqual({
       id: credential.rows[0]!.id,
       principal: { workspace: workspaceId, agent: "worker" },
+      scopes: [
+        "deliveries:claim", "deliveries:manage", "deliveries:read", "deliveries:settle",
+        "gateway:metrics", "messages:read", "messages:write", "presence:read",
+        "presence:write", "receipts:write", "status:read",
+      ],
     });
-    await pool!.query("UPDATE agent_bridge.credentials SET revoked_at=now() WHERE id=$1", [credential.rows[0]!.id]);
-    expect(await resolver.resolve(token)).toBeNull();
-    await pool!.query("UPDATE agent_bridge.credentials SET revoked_at=NULL WHERE id=$1", [credential.rows[0]!.id]);
     await pool!.query("UPDATE agent_bridge.agents SET disabled_at=now() WHERE id=$1", [agent.rows[0]!.id]);
     expect(await resolver.resolve(token)).toBeNull();
+    await pool!.query("UPDATE agent_bridge.agents SET disabled_at=NULL WHERE id=$1", [agent.rows[0]!.id]);
+    await pool!.query(
+      "SELECT agent_bridge.revoke_credential($1,'test','operator_request',$2)",
+      [credential.rows[0]!.id, randomUUID()],
+    );
+    expect(await resolver.resolve(token)).toBeNull();
+  });
+
+  it("consumes token buckets atomically for a credential and operation", async () => {
+    const workspaceId = await workspace();
+    const agent = await pool!.query<{ id: string }>(
+      "INSERT INTO agent_bridge.agents(workspace_id,principal) VALUES ($1,'limited') RETURNING id",
+      [workspaceId],
+    );
+    const credential = await pool!.query<{ id: string }>(
+      `INSERT INTO agent_bridge.credentials(workspace_id,agent_id,token_hash)
+       VALUES ($1,$2,$3) RETURNING id`,
+      [workspaceId, agent.rows[0]!.id, hashCredential(`limited-${randomUUID()}`)],
+    );
+    await pool!.query("UPDATE agent_bridge.rate_limit_policies SET capacity=1,refill_per_second=0.01 WHERE operation_id='status'");
+    await pool!.query("DELETE FROM agent_bridge.rate_limit_buckets WHERE credential_id=$1", [credential.rows[0]!.id]);
+    try {
+      const security = new PostgresGatewaySecurity(pool!);
+      const decisions = await Promise.all([
+        security.consume(credential.rows[0]!.id, "status", randomUUID()),
+        security.consume(credential.rows[0]!.id, "status", randomUUID()),
+      ]);
+      expect(decisions.filter((decision) => decision.allowed)).toHaveLength(1);
+      expect(decisions.find((decision) => !decision.allowed)!.retryAfterSeconds).toBeGreaterThan(90);
+      expect((await pool!.query(
+        "SELECT event_type,reason_code,operation_id FROM agent_bridge.security_events WHERE credential_id=$1 ORDER BY sequence DESC LIMIT 1",
+        [credential.rows[0]!.id],
+      )).rows).toEqual([{
+        event_type: "rate_denied",
+        reason_code: "rate_limit_exceeded",
+        operation_id: "status",
+      }]);
+    } finally {
+      await pool!.query("UPDATE agent_bridge.rate_limit_policies SET capacity=30,refill_per_second=1 WHERE operation_id='status'");
+    }
+  });
+
+  it("applies a global bucket across operations and fails closed on missing policy", async () => {
+    const workspaceId = await workspace();
+    const agent = await pool!.query<{ id: string }>(
+      "INSERT INTO agent_bridge.agents(workspace_id,principal) VALUES ($1,'global-limited') RETURNING id",
+      [workspaceId],
+    );
+    const credential = await pool!.query<{ id: string }>(
+      "INSERT INTO agent_bridge.credentials(workspace_id,agent_id,token_hash) VALUES ($1,$2,$3) RETURNING id",
+      [workspaceId, agent.rows[0]!.id, hashCredential(`global-${randomUUID()}`)],
+    );
+    const security = new PostgresGatewaySecurity(pool!);
+    await pool!.query("UPDATE agent_bridge.rate_limit_policies SET capacity=1,refill_per_second=0.01 WHERE policy_id='global'");
+    await pool!.query("DELETE FROM agent_bridge.rate_limit_buckets WHERE credential_id=$1", [credential.rows[0]!.id]);
+    try {
+      expect((await security.consume(credential.rows[0]!.id, "status", randomUUID())).allowed).toBe(true);
+      const denied = await security.consume(credential.rows[0]!.id, "history", randomUUID());
+      expect(denied).toMatchObject({ allowed: false, policyId: "global", remaining: 0 });
+      await pool!.query("UPDATE agent_bridge.rate_limit_policies SET enabled=false WHERE operation_id='status'");
+      await expect(
+        security.consume(credential.rows[0]!.id, "status", randomUUID()),
+      ).rejects.toThrow(/unavailable/);
+    } finally {
+      await pool!.query("UPDATE agent_bridge.rate_limit_policies SET capacity=300,refill_per_second=50 WHERE policy_id='global'");
+      await pool!.query("UPDATE agent_bridge.rate_limit_policies SET enabled=true WHERE operation_id='status'");
+    }
+  });
+
+  it("clamps existing operation tokens after a capacity reduction", async () => {
+    const workspaceId = await workspace();
+    const agent = await pool!.query<{ id: string }>(
+      "INSERT INTO agent_bridge.agents(workspace_id,principal) VALUES ($1,'capacity-clamp') RETURNING id",
+      [workspaceId],
+    );
+    const credential = await pool!.query<{ id: string }>(
+      "INSERT INTO agent_bridge.credentials(workspace_id,agent_id,token_hash) VALUES ($1,$2,$3) RETURNING id",
+      [workspaceId, agent.rows[0]!.id, hashCredential(`capacity-${randomUUID()}`)],
+    );
+    const security = new PostgresGatewaySecurity(pool!);
+    await pool!.query("UPDATE agent_bridge.rate_limit_policies SET capacity=3,refill_per_second=0.01 WHERE operation_id='status'");
+    await pool!.query("DELETE FROM agent_bridge.rate_limit_buckets WHERE credential_id=$1", [credential.rows[0]!.id]);
+    try {
+      expect(await security.consume(credential.rows[0]!.id, "status", randomUUID()))
+        .toMatchObject({ allowed: true, remaining: 2 });
+      await pool!.query("UPDATE agent_bridge.rate_limit_policies SET capacity=1 WHERE operation_id='status'");
+      expect(await security.consume(credential.rows[0]!.id, "status", randomUUID()))
+        .toMatchObject({ allowed: true, limit: 1, remaining: 0 });
+      expect((await security.consume(credential.rows[0]!.id, "status", randomUUID())).allowed)
+        .toBe(false);
+    } finally {
+      await pool!.query("UPDATE agent_bridge.rate_limit_policies SET capacity=30,refill_per_second=1 WHERE operation_id='status'");
+    }
+  });
+
+  it("records scope denials through the narrow audited function", async () => {
+    const workspaceId = await workspace();
+    const agent = await pool!.query<{ id: string }>(
+      "INSERT INTO agent_bridge.agents(workspace_id,principal) VALUES ($1,'scope-audit') RETURNING id",
+      [workspaceId],
+    );
+    const credential = await pool!.query<{ id: string }>(
+      "INSERT INTO agent_bridge.credentials(workspace_id,agent_id,token_hash) VALUES ($1,$2,$3) RETURNING id",
+      [workspaceId, agent.rows[0]!.id, hashCredential(`scope-audit-${randomUUID()}`)],
+    );
+    const security = new PostgresGatewaySecurity(pool!);
+    const requestId = randomUUID();
+    await security.recordScopeDenial(credential.rows[0]!.id, "history", requestId);
+    expect((await pool!.query(
+      `SELECT event_type,outcome,reason_code,workspace_id,principal,actor_principal,
+         credential_id,operation_id,request_id,policy_id,retry_after_seconds
+       FROM agent_bridge.security_events WHERE request_id=$1`,
+      [requestId],
+    )).rows).toEqual([{
+      event_type: "scope_denied",
+      outcome: "denied",
+      reason_code: "missing_scope",
+      workspace_id: workspaceId,
+      principal: "scope-audit",
+      actor_principal: "scope-audit",
+      credential_id: credential.rows[0]!.id,
+      operation_id: "history",
+      request_id: requestId,
+      policy_id: null,
+      retry_after_seconds: null,
+    }]);
+    await expect(pool!.query(
+      "SELECT agent_bridge.record_scope_denial($1,'not-an-operation',$2)",
+      [credential.rows[0]!.id, randomUUID()],
+    )).rejects.toThrow(/unavailable/);
+  });
+
+  it("enforces canonical scopes and preserves the transitional full default", async () => {
+    const workspaceId = await workspace();
+    const agent = await pool!.query<{ id: string }>(
+      "INSERT INTO agent_bridge.agents(workspace_id,principal) VALUES ($1,'scope-test') RETURNING id",
+      [workspaceId],
+    );
+    const full = await pool!.query<{ scopes: string[] }>(
+      "INSERT INTO agent_bridge.credentials(workspace_id,agent_id,token_hash) VALUES ($1,$2,$3) RETURNING scopes",
+      [workspaceId, agent.rows[0]!.id, hashCredential(`full-${randomUUID()}`)],
+    );
+    expect(full.rows[0]!.scopes).toEqual(AUTHORIZATION_SCOPES);
+    await expect(pool!.query(
+      "INSERT INTO agent_bridge.credentials(workspace_id,agent_id,token_hash,scopes) VALUES ($1,$2,$3,$4)",
+      [workspaceId, agent.rows[0]!.id, hashCredential(`empty-${randomUUID()}`), []],
+    )).resolves.toBeTruthy();
+    for (const scopes of [
+      ["messages:write", "messages:read"],
+      ["messages:read", "messages:read"],
+      ["messages:delete"],
+    ]) {
+      await expect(pool!.query(
+        "INSERT INTO agent_bridge.credentials(workspace_id,agent_id,token_hash,scopes) VALUES ($1,$2,$3,$4)",
+        [workspaceId, agent.rows[0]!.id, hashCredential(`invalid-${randomUUID()}`), scopes],
+      )).rejects.toThrow();
+    }
+    await expect(pool!.query(
+      "UPDATE agent_bridge.credential_scope_sets SET scopes='{}'::text[] WHERE name='release-a-full'",
+    )).rejects.toThrow(/immutable/);
+  });
+
+  it("rotates and revokes credentials with immutable audit events", async () => {
+    const workspaceId = await workspace();
+    const agent = await pool!.query<{ id: string }>(
+      "INSERT INTO agent_bridge.agents(workspace_id,principal) VALUES ($1,'rotation-test') RETURNING id",
+      [workspaceId],
+    );
+    const predecessorToken = `predecessor-${randomUUID()}`;
+    const successorToken = `successor-${randomUUID()}`;
+    const predecessor = await pool!.query<{ id: string }>(
+      "INSERT INTO agent_bridge.credentials(workspace_id,agent_id,token_hash,expires_at) VALUES ($1,$2,$3,now()+interval '1 hour') RETURNING id",
+      [workspaceId, agent.rows[0]!.id, hashCredential(predecessorToken)],
+    );
+    const replacement = await pool!.query<{ succeeded: boolean; credential_id: string; failure_code: string | null }>(
+      `SELECT * FROM agent_bridge.replace_credential(
+        $1,$2::char(64),$3::text[],$4,$5,now()+interval '2 hours',
+        now()+interval '30 minutes',$6,$7
+      )`,
+      [
+        predecessor.rows[0]!.id,
+        hashCredential(successorToken),
+        [...AUTHORIZATION_SCOPES],
+        "release-a-full",
+        "rotated",
+        "operator",
+        randomUUID(),
+      ],
+    );
+    expect(replacement.rows[0]).toMatchObject({ succeeded: true, failure_code: null });
+    const resolver = new PostgresCredentialResolver(pool!);
+    expect(await resolver.resolve(predecessorToken)).not.toBeNull();
+    expect(await resolver.resolve(successorToken)).not.toBeNull();
+    await expect(pool!.query(
+      "UPDATE agent_bridge.credentials SET expiry_grace_until=now()-interval '1 second' WHERE id=$1",
+      [predecessor.rows[0]!.id],
+    )).rejects.toThrow(/lifecycle function/);
+    expect(await resolver.resolve(predecessorToken)).not.toBeNull();
+    expect(await pool!.query(
+      "SELECT agent_bridge.revoke_credential($1,'operator','rotation',$2) AS revoked",
+      [replacement.rows[0]!.credential_id, randomUUID()],
+    )).toMatchObject({ rows: [{ revoked: true }] });
+    expect(await resolver.resolve(successorToken)).toBeNull();
+    await expect(pool!.query(
+      "UPDATE agent_bridge.credentials SET replaces_credential_id=NULL WHERE id=$1",
+      [replacement.rows[0]!.credential_id],
+    )).rejects.toThrow(/lineage is immutable/);
+    await expect(pool!.query(
+      "UPDATE agent_bridge.credentials SET revoked_at=now(),revoked_by='direct',revocation_reason='operator_request' WHERE id=$1",
+      [predecessor.rows[0]!.id],
+    )).rejects.toThrow(/lifecycle function/);
+    await expect(pool!.query(
+      `INSERT INTO agent_bridge.credentials(workspace_id,agent_id,token_hash,replaces_credential_id)
+       VALUES ($1,$2,$3,$4)`,
+      [workspaceId, agent.rows[0]!.id, hashCredential(`second-${randomUUID()}`), predecessor.rows[0]!.id],
+    )).rejects.toThrow();
+    const otherAgent = await pool!.query<{ id: string }>(
+      "INSERT INTO agent_bridge.agents(workspace_id,principal) VALUES ($1,'rotation-other') RETURNING id",
+      [workspaceId],
+    );
+    await expect(pool!.query(
+      `INSERT INTO agent_bridge.credentials(workspace_id,agent_id,token_hash,replaces_credential_id)
+       VALUES ($1,$2,$3,$4)`,
+      [workspaceId, otherAgent.rows[0]!.id, hashCredential(`cross-${randomUUID()}`), predecessor.rows[0]!.id],
+    )).rejects.toThrow(/same workspace and agent/);
+
+    const failed = await pool!.query<{ succeeded: boolean; failure_code: string }>(
+      `SELECT * FROM agent_bridge.replace_credential(
+        $1,$2::char(64),$3::text[],$4,$5,NULL,now()+interval '2 hours',$6,$7
+      )`,
+      [
+        predecessor.rows[0]!.id,
+        hashCredential(`invalid-${randomUUID()}`),
+        [...AUTHORIZATION_SCOPES],
+        "release-a-full",
+        "invalid",
+        "operator",
+        randomUUID(),
+      ],
+    );
+    expect(failed.rows[0]).toMatchObject({ succeeded: false, failure_code: "invalid_grace" });
+    const immediateToken = `immediate-${randomUUID()}`;
+    const immediatePredecessorToken = `immediate-predecessor-${randomUUID()}`;
+    const immediatePredecessor = await pool!.query<{ id: string }>(
+      "INSERT INTO agent_bridge.credentials(workspace_id,agent_id,token_hash) VALUES ($1,$2,$3) RETURNING id",
+      [workspaceId, agent.rows[0]!.id, hashCredential(immediatePredecessorToken)],
+    );
+    const immediate = await pool!.query<{ succeeded: boolean }>(
+      `SELECT * FROM agent_bridge.replace_credential(
+        $1,$2::char(64),$3::text[],$4,$5,NULL,NULL,$6,$7
+      )`,
+      [
+        immediatePredecessor.rows[0]!.id,
+        hashCredential(immediateToken),
+        [...AUTHORIZATION_SCOPES],
+        "release-a-full",
+        "immediate",
+        "operator",
+        randomUUID(),
+      ],
+    );
+    expect(immediate.rows[0]!.succeeded).toBe(true);
+    expect(await resolver.resolve(immediatePredecessorToken)).toBeNull();
+    expect(await resolver.resolve(immediateToken)).not.toBeNull();
+    const expiredToken = `expired-${randomUUID()}`;
+    await pool!.query(
+      "INSERT INTO agent_bridge.credentials(workspace_id,agent_id,token_hash,expires_at) VALUES ($1,$2,$3,now()-interval '1 second')",
+      [workspaceId, agent.rows[0]!.id, hashCredential(expiredToken)],
+    );
+    expect(await resolver.resolve(expiredToken)).toBeNull();
+    const events = await pool!.query<{ event_type: string }>(
+      "SELECT event_type FROM agent_bridge.security_events WHERE workspace_id=$1 ORDER BY sequence",
+      [workspaceId],
+    );
+    expect(events.rows.map((row) => row.event_type)).toEqual([
+      "credential_replaced",
+      "credential_revoked",
+      "credential_replacement_failed",
+      "credential_replaced",
+    ]);
+    const eventColumns = (await pool!.query<{ column_name: string }>(
+      "SELECT column_name FROM information_schema.columns WHERE table_schema='agent_bridge' AND table_name='security_events'",
+    )).rows.map((row) => row.column_name);
+    for (const forbidden of ["token", "token_hash", "authorization", "metadata", "body", "content", "url", "ip"]) {
+      expect(eventColumns).not.toContain(forbidden);
+    }
+    await expect(pool!.query("UPDATE agent_bridge.security_events SET reason_code='missing_scope' WHERE workspace_id=$1", [workspaceId])).rejects.toThrow(/append-only/);
+    await expect(pool!.query("DELETE FROM agent_bridge.security_events WHERE workspace_id=$1", [workspaceId])).rejects.toThrow(/append-only/);
+    await expect(pool!.query("TRUNCATE agent_bridge.security_events")).rejects.toThrow(/append-only/);
   });
 
   it("keeps the private schema inaccessible to Supabase Data API roles", async () => {
@@ -499,8 +794,10 @@ integration("PostgreSQL BridgeStore integration", () => {
     );
     const token = `runtime-role-${randomUUID()}`;
     await pool!.query(
-      `INSERT INTO agent_bridge.credentials (workspace_id, agent_id, token_hash)
-       VALUES ($1, $2, $3)`,
+      `INSERT INTO agent_bridge.credentials (workspace_id, agent_id, token_hash, scopes, scope_set_name)
+       VALUES ($1, $2, $3,
+         (SELECT scopes FROM agent_bridge.credential_scope_sets WHERE name='release-a-full'),
+         'release-a-full')`,
       [workspaceId, agent.rows[0]!.id, hashCredential(token)],
     );
     const client = await pool!.connect();
@@ -510,6 +807,23 @@ integration("PostgreSQL BridgeStore integration", () => {
       expect(await new PostgresCredentialResolver(client).resolve(token)).toMatchObject({
         principal: { workspace: workspaceId, agent: "worker" },
       });
+      expect((await new PostgresGatewaySecurity(client).consume(
+        (await new PostgresCredentialResolver(client).resolve(token))!.id,
+        "status",
+        randomUUID(),
+      )).allowed).toBe(true);
+      await expect(
+        client.query("SELECT * FROM agent_bridge.rate_limit_policies"),
+      ).rejects.toThrow(/permission denied/);
+      await expect(
+        client.query("INSERT INTO agent_bridge.security_events(event_type) VALUES ('scope_denied')"),
+      ).rejects.toThrow(/permission denied/);
+      await expect(
+        client.query(
+          "SELECT agent_bridge.revoke_credential($1,'runtime','operator_request',$2)",
+          [(await new PostgresCredentialResolver(client).resolve(token))!.id, randomUUID()],
+        ),
+      ).rejects.toThrow(/permission denied/);
       const service = new BridgeService(new PostgresBridgeStore(client));
       const published = await service.publish(
         { workspace: workspaceId, agent: "worker", instance: "runtime-one" },
@@ -580,8 +894,10 @@ integration("PostgreSQL BridgeStore integration", () => {
     const codexToken = `codex-${randomUUID()}`;
     const claudeToken = `claude-${randomUUID()}`;
     await pool!.query(
-      `INSERT INTO agent_bridge.credentials (workspace_id, agent_id, token_hash, label)
-       VALUES ($1, $2, $3, 'codex test'), ($1, $4, $5, 'claude test')`,
+      `INSERT INTO agent_bridge.credentials (workspace_id, agent_id, token_hash, label, scopes, scope_set_name)
+       VALUES
+         ($1, $2, $3, 'codex test', (SELECT scopes FROM agent_bridge.credential_scope_sets WHERE name='release-a-full'), 'release-a-full'),
+         ($1, $4, $5, 'claude test', (SELECT scopes FROM agent_bridge.credential_scope_sets WHERE name='release-a-full'), 'release-a-full')`,
       [
         workspaceId,
         codexAgent.rows[0]!.id,
@@ -705,6 +1021,44 @@ integration("PostgreSQL BridgeStore integration", () => {
       "UPDATE agent_bridge.schema_migrations SET checksum=$1 WHERE version=3",
       [recorded.rows[0]!.checksum],
     );
+  });
+
+  it("upgrades v0.2 credentials with compatible canonical scopes and exact migration state", async () => {
+    await withTemporaryDatabase(async (upgrade) => {
+      const directory = fileURLToPath(new URL("../sql/migrations", import.meta.url));
+      const plan = await loadMigrationPlan(directory);
+      for (const migration of plan.slice(0, 10)) {
+        await upgrade.query(migration.source.split("__AGENT_BRIDGE_MIGRATION_CHECKSUM__").join(migration.checksum));
+      }
+      await upgrade.query("INSERT INTO agent_bridge.workspaces(id,name) VALUES ('upgrade-security','upgrade-security')");
+      const agent = await upgrade.query<{ id: string }>(
+        "INSERT INTO agent_bridge.agents(workspace_id,principal) VALUES ('upgrade-security','worker') RETURNING id",
+      );
+      await upgrade.query(
+        `INSERT INTO agent_bridge.credentials(workspace_id,agent_id,token_hash,revoked_at)
+         VALUES ('upgrade-security',$1,$2,NULL),('upgrade-security',$1,$3,now())`,
+        [agent.rows[0]!.id, "a".repeat(64), "b".repeat(64)],
+      );
+      const migration = plan[10]!;
+      await upgrade.query(migration.source.split("__AGENT_BRIDGE_MIGRATION_CHECKSUM__").join(migration.checksum));
+      const credentials = await upgrade.query<{ active: boolean; scopes: string[]; revoked_by: string | null; revocation_reason: string | null }>(
+        "SELECT revoked_at IS NULL active,scopes,revoked_by,revocation_reason FROM agent_bridge.credentials ORDER BY revoked_at NULLS FIRST",
+      );
+      expect(credentials.rows[0]!.scopes).toEqual(AUTHORIZATION_SCOPES);
+      expect(credentials.rows[1]).toMatchObject({
+        active: false,
+        scopes: AUTHORIZATION_SCOPES,
+        revoked_by: null,
+        revocation_reason: null,
+      });
+      const direct = await upgrade.query<{ scopes: string[] }>(
+        "INSERT INTO agent_bridge.credentials(workspace_id,agent_id,token_hash) VALUES ('upgrade-security',$1,$2) RETURNING scopes",
+        [agent.rows[0]!.id, "c".repeat(64)],
+      );
+      expect(direct.rows[0]!.scopes).toEqual(AUTHORIZATION_SCOPES);
+      expect((await upgrade.query("SELECT name,checksum FROM agent_bridge.schema_migrations WHERE version=11")).rows)
+        .toEqual([{ name: "credential_security", checksum: migration.checksum }]);
+    });
   });
 
   it("backfills v0.2 delivery history and preserves deterministic claim order", async () => {
@@ -844,6 +1198,29 @@ integration("PostgreSQL BridgeStore integration", () => {
       await client.query("ROLLBACK");
     } finally {
       client.release();
+    }
+    expect(await runtimeSchemaReady(pool!)).toBe(true);
+  });
+
+  it("reports security policy, trigger, and grant drift as not ready", async () => {
+    const runtime = await runtimeRole(pool!);
+    const cases = [
+      "UPDATE agent_bridge.rate_limit_policies SET capacity=31 WHERE operation_id='status'",
+      "ALTER TABLE agent_bridge.security_events DISABLE TRIGGER security_events_append_only",
+      `GRANT SELECT ON agent_bridge.rate_limit_policies TO ${runtime}`,
+      `GRANT EXECUTE ON FUNCTION agent_bridge.replace_credential(uuid,character,text[],text,text,timestamptz,timestamptz,text,uuid) TO ${runtime}`,
+      `GRANT EXECUTE ON FUNCTION agent_bridge.revoke_credential(uuid,text,text,uuid) TO ${runtime}`,
+    ];
+    for (const change of cases) {
+      const client = await pool!.connect();
+      try {
+        await client.query("BEGIN");
+        await client.query(change);
+        expect(await runtimeSchemaReady(client), change).toBe(false);
+      } finally {
+        await client.query("ROLLBACK").catch(() => {});
+        client.release();
+      }
     }
     expect(await runtimeSchemaReady(pool!)).toBe(true);
   });

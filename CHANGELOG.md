@@ -13,6 +13,8 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and 
 - Closed structural request validation before domain semantics, additive response parsing, artifact drift checks, and exact legacy MCP schema fixtures.
 - Object response envelopes for MCP and HTTP 2.1 delivery claims and controls. HTTP 2.0 and the unversioned CLI retain their released direct or null delivery results.
 - Optional client-generated message IDs across CLI, MCP, and HTTP, including exact idempotent replay.
+- Canonical gateway credential scopes, compatibility-safe migration 011, immutable replacement lineage, revocation helpers, and provider-specific capability truth.
+- Database-timed credential-wide and operation rate buckets with append-only scope, rate, replacement, and revocation security events.
 
 - Immutable publisher-owned delivery policies with mailbox and leased modes. Leased delivery adds priority claims, monotonic cycle counters, publisher cancel and requeue controls, and authorized audit pagination. PostgreSQL migration 010 and the SQLite initializer upgrade existing stores. Legacy mode rejects leased policy.
 
@@ -30,6 +32,12 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and 
 - New 2.1 clients require complete 2.1 negotiation before mutation and reject headerless or selected 2.0 gateways instead of downgrading. Gateways must be upgraded before 2.1 clients.
 - Capability output distinguishes current, selected, and supported protocol versions. Primary OpenAPI operations require 2.1. Embedded 2.0 vendor extensions contain limited compatibility schema metadata, not a second OpenAPI description.
 - Consumer-side `maxAttempts` on claim and `retryPolicy` on nack are validated but ignored for one compatibility release. Stored publisher policy now controls retry and exhaustion.
+- Gateway authorization now checks scopes and rate policy before reading request bodies. Scope and rate errors use structured details, and missing security state fails closed.
+
+### Security
+
+- Existing credentials retain full compatibility access without lifecycle metadata changes. New direct SQL inserts keep that default until owner provisioning commands land.
+- Credential grace can only shorten a predecessor after replacement. Ordinary expiry and revocation cannot be extended or bypassed.
 
 ## [0.2.0] - 2026-07-14
 

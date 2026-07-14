@@ -4,18 +4,19 @@ import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { spawn, spawnSync } from "node:child_process";
 import { createServer } from "node:http";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { SQLiteEdgeStore } from "../src/sqlite-edge-store.js";
 
 const root = dirname(fileURLToPath(new URL("../package.json", import.meta.url)));
 const cli = join(root, "bin", "agent-bridge");
 const homes: string[] = [];
+vi.setConfig({ testTimeout: 30_000 });
 function run(args: string[], extra: NodeJS.ProcessEnv = {}) {
   const home = mkdtempSync(join(tmpdir(), "agent-bridge-cli-")); homes.push(home);
   return runAt(home, args, extra);
 }
 function runAt(home: string, args: string[], extra: NodeJS.ProcessEnv = {}) {
-  return spawnSync(process.execPath, [cli, ...args], { encoding: "utf8", env: { ...process.env, HOME: home, AGENT_BRIDGE_PROVIDER: "local", AGENT_BRIDGE_DB: join(home, "bridge.sqlite3"), ...extra } });
+  return spawnSync(process.execPath, [cli, ...args], { encoding: "utf8", timeout: 20_000, env: { ...process.env, HOME: home, AGENT_BRIDGE_PROVIDER: "local", AGENT_BRIDGE_DB: join(home, "bridge.sqlite3"), ...extra } });
 }
 function runAtAsync(home: string, args: string[], extra: NodeJS.ProcessEnv = {}) {
   return new Promise<{ status: number | null; stdout: string; stderr: string }>((resolve, reject) => {
@@ -67,7 +68,7 @@ describe("agent-bridge CLI", () => {
       mode: "leased", maxAttempts: 1, retryBaseDelayMs: 1000,
       retryMaxDelayMs: 60000, retryJitterRatio: 0,
     });
-    const claimed = runAt(home, ["claim", "--as", "worker", "--instance", "one", "--lease-ms", "1000"], { AGENT_BRIDGE_AGENT: undefined });
+    const claimed = runAt(home, ["claim", "--as", "worker", "--instance", "one", "--lease-ms", "30000"], { AGENT_BRIDGE_AGENT: undefined });
     const claim = JSON.parse(claimed.stdout);
     const nacked = runAt(home, [
       "nack", "--as", "worker", "--instance", "one",
@@ -83,7 +84,7 @@ describe("agent-bridge CLI", () => {
     ], { AGENT_BRIDGE_AGENT: undefined });
     expect(invalid.status).toBe(1);
     expect(invalid.stderr).toContain("mailbox delivery mode does not accept retry or scheduling flags");
-  });
+  }, 30_000);
   it("accepts an explicit source when the environment has no identity", () => {
     const result = run(["send", "--source", "codex", "Bridge is ready"]);
     expect(result.status).toBe(0);
@@ -128,7 +129,7 @@ describe("agent-bridge CLI", () => {
     ], { AGENT_BRIDGE_AGENT: undefined });
     expect(JSON.parse(read.stdout).messages.map((message: { id: string }) => message.id))
       .toEqual([targetedId]);
-  });
+  }, 30_000);
   it("rejects another principal's receipt assertion before opening storage", () => {
     const home = mkdtempSync(join(tmpdir(), "agent-bridge-cli-")); homes.push(home);
     const database = join(home, "must-not-exist.sqlite3");

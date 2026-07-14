@@ -141,13 +141,17 @@ Legacy Supabase rows remain readable as broadcast messages. A migration command 
 
 ## Security boundary
 
-Shared mode uses a token-authenticated API. The service stores only token hashes. Credentials are scoped to a workspace and principal, can expire, and can be revoked.
+Shared mode uses a token-authenticated API. The service stores only token hashes. Credentials bind a workspace and principal, carry canonical operation scopes, can expire, and can be revoked. Capabilities requires an active credential but no named scope. Local and legacy providers do not claim gateway scope enforcement.
+
+Migration 011 grants every pre-migration credential the full compatibility scope set, including expired and revoked rows, without rewriting lifecycle metadata. Direct inserts keep that full default until owner provisioning commands replace raw SQL. Empty scopes remain valid for capabilities-only access. Database constraints reject unknown, duplicated, or unsorted scopes.
+
+A successor holds an immutable link to one predecessor in the same workspace and principal. Revocation and ordinary expiry always win. A grace cutoff applies only after a successor exists and can only shorten the predecessor's remaining lifetime. Narrow owner functions commit replacement or revocation with their security event. Expected replacement failures that identify a predecessor also produce a fixed failure event.
 
 Schema migration and provisioning use a database-owner connection. The running gateway uses a different login that inherits a database-specific runtime role. The role name includes a digest of the database name so permission does not bleed between Agent Bridge databases on one PostgreSQL cluster. That role can read runtime state, insert immutable messages and receipts, transition deliveries, append delivery events, and maintain leased presence. It cannot change workspaces, agents, credentials, message content, schema objects, or migration records. Gateway startup does not run migrations.
 
 The database denies direct message updates. Constrained operations handle insertion, receipts, claims, renewals, acknowledgments, and negative acknowledgments. Every query includes workspace scope, and recipient visibility is enforced in storage rather than by client-side filtering.
 
-Limits apply to content bytes, payload bytes, metadata depth, target count, batch size, lease duration, and page size. Network calls have connect and total deadlines. Errors have stable codes and do not return secrets or raw database messages.
+Limits apply to content bytes, payload bytes, metadata depth, target count, batch size, lease duration, and page size. Network calls have connect and total deadlines. Every authenticated operation consumes a database-timed credential-wide bucket and a separate operation bucket. Numeric bucket state, deterministic row locking, and atomic denial events keep concurrent decisions consistent. Missing or disabled policy state fails closed. Errors have stable codes and do not return secrets or raw database messages.
 
 ## Operations and observability
 
@@ -155,7 +159,7 @@ The CLI provides `init`, `doctor`, `status`, `demo`, `send`, `inbox`, `history`,
 
 `/readyz` reports storage and schema readiness. Authenticated HTTP status reports the bound principal, provider schema, delivery counts, and the oldest due delivery. CLI `doctor` and `status` use a separate client-status contract that also reports local edge state and remote gateway reachability.
 
-Gateway responses carry a request ID, including stable error envelopes. Authenticated Prometheus output counts requests, errors, timeouts, and authentication failures. Responses and metrics exclude bearer tokens, database URLs, payload bodies, and credential material.
+Gateway responses carry a request ID, including stable error envelopes. Scope failures return required scopes under `error.details`. Rate failures return a rounded retry delay in both the HTTP header and error details. Authenticated Prometheus output counts requests, errors, timeouts, and authentication failures. Responses, metrics, and append-only security events exclude bearer tokens, hashes, database URLs, payload bodies, arbitrary metadata, and credential material.
 
 ## Packaging and release
 
@@ -169,7 +173,7 @@ The TypeBox 1.x registry validates closed requests before domain semantics. Resp
 
 Compatibility is asymmetric. An upgraded gateway serves released headerless and explicit 2.0 clients. A new 2.1 client probes before mutation and accepts the gateway only when complete, consistent response headers select 2.1 and advertise 2.1 support. A headerless response, selected 2.0 response, or partial negotiation means the gateway must be upgraded. The client rejects mutation instead of using the d8184fe 2.0 contract. Deploy the gateway before 2.1 clients.
 
-The OpenAPI paths describe protocol 2.1. Embedded 2.0 vendor extensions carry only the frozen compatibility schemas and metadata needed to document released clients; they do not form a second OpenAPI description. `npm run contracts:check` proves that JSON Schema 2020-12, OpenAPI 3.1.2, MCP manifest, and capability artifacts match the registry. All schema references are local. Protocol, npm package, MCP implementation, and migration versions are independent. Reserved scope metadata is not enforced by current credential-wide gateway authorization.
+The OpenAPI paths describe protocol 2.1. Embedded 2.0 vendor extensions carry only the frozen compatibility schemas and metadata needed to document released clients; they do not form a second OpenAPI description. `npm run contracts:check` proves that JSON Schema 2020-12, OpenAPI 3.1.2, MCP manifest, and capability artifacts match the registry. All schema references are local. Protocol, npm package, MCP implementation, and migration versions are independent. Gateway scope enforcement comes from the registry. Provider-neutral artifacts report enforcement separately for gateway, local, and legacy modes.
 
 The v2 implementation is not accepted until all of these checks pass:
 
