@@ -12,7 +12,11 @@ import {
 } from "./bridge-domain.js";
 import type { MessagePage, MessageQuery } from "./bridge-store.js";
 
-const { DatabaseSync } = createRequire(import.meta.url)("node:sqlite") as typeof import("node:sqlite");
+const require = createRequire(import.meta.url);
+function openDatabase(path: string): Database {
+  const { DatabaseSync } = require("node:sqlite") as typeof import("node:sqlite");
+  return new DatabaseSync(path);
+}
 const MAX_SEQUENCE = 9_223_372_036_854_775_807n;
 
 const schema = `
@@ -174,7 +178,7 @@ export class SQLiteEdgeStore {
 
   constructor(private readonly path: string, private readonly scope: EdgeScope, private readonly busyTimeoutMs = 2_000) {
     if (path !== ":memory:") mkdirSync(dirname(path), { recursive: true, mode: 0o700 });
-    this.db = new DatabaseSync(path);
+    this.db = openDatabase(path);
     this.restrictFiles();
     this.key = edgeScopeKey(scope);
   }

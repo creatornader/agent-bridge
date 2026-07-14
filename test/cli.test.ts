@@ -18,6 +18,15 @@ function runAt(home: string, args: string[], extra: NodeJS.ProcessEnv = {}) {
 afterEach(() => { for (const home of homes.splice(0)) rmSync(home, { recursive: true, force: true }); });
 
 describe("agent-bridge CLI", () => {
+  it("does not load SQLite for a legacy provider command", () => {
+    const result = run(["help"], {
+      AGENT_BRIDGE_PROVIDER: "legacy-supabase",
+      AGENT_BRIDGE_URL: "https://supabase.test",
+      AGENT_BRIDGE_KEY: "publishable-key",
+    });
+    expect(result.status).toBe(0);
+    expect(result.stderr).not.toContain("ExperimentalWarning: SQLite");
+  });
   it("keeps post as an alias and defaults source from runtime identity", () => {
     const result = run(["post", "--category", "operational", "Bridge is ready"], { AGENT_BRIDGE_AGENT: "codex" });
     expect(result.status).toBe(0); expect(JSON.parse(result.stdout).message).toMatchObject({ source: "codex", type: "operational", content: "Bridge is ready" });

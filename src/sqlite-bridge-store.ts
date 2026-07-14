@@ -7,7 +7,11 @@ import type { BridgeDiagnostics, BridgeStore, ClaimOptions, InsertMessageResult,
 import { assertIdempotentReplay } from "./idempotency.js";
 
 type Row = Record<string, unknown>;
-const { DatabaseSync } = createRequire(import.meta.url)("node:sqlite") as typeof import("node:sqlite");
+const require = createRequire(import.meta.url);
+function openDatabase(path: string): Database {
+  const { DatabaseSync } = require("node:sqlite") as typeof import("node:sqlite");
+  return new DatabaseSync(path);
+}
 const schema = `
 PRAGMA journal_mode = WAL;
 PRAGMA synchronous = FULL;
@@ -77,7 +81,7 @@ function deliveryEvent(row: Row): BridgeDeliveryEvent { return { sequence: Strin
 export class SQLiteBridgeStore implements BridgeStore {
   private readonly db: Database;
   private initialized = false;
-  constructor(private readonly path = ":memory:", private readonly busyTimeoutMs = 2_000) { this.db = new DatabaseSync(path); this.restrictFiles(); }
+  constructor(private readonly path = ":memory:", private readonly busyTimeoutMs = 2_000) { this.db = openDatabase(path); this.restrictFiles(); }
   private restrictFiles(): void {
     if (this.path === ":memory:") return;
     for (const path of [this.path, `${this.path}-wal`, `${this.path}-shm`]) {
