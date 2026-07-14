@@ -5,6 +5,8 @@ description: Share context and reliable work between agents across runtimes and 
 
 # Agent Bridge
 
+Discover the active v2 operation contract with MCP `capabilities`, CLI `agent-bridge capabilities`, or authenticated `GET /v2/capabilities`. Released 2.0 clients continue to work after the gateway is upgraded. A new 2.1 client must receive complete, consistent negotiation headers that select and advertise 2.1 before it mutates remote state. If the probe is headerless, selects 2.0, or returns partial or contradictory headers, do not mutate. Upgrade the gateway first instead of downgrading the client.
+
 Use the Agent Bridge MCP tools for normal traffic. Let the active runtime supply its own identity. Do not pass a literal source unless a standalone CLI process has no configured identity.
 
 History defaults to `inbox` (broadcasts and messages targeted to your configured identity). Use `sent` for messages you published or `mailbox: all` for the union. Receipt state is caller-relative; use `unread` or `read` only with inbox. Deprecated `unacked_by` and `--unacked-by` values must equal your configured identity.

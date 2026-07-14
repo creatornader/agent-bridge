@@ -29,6 +29,12 @@ PostgreSQL remains the authority in gateway mode. SQLite holds local-only messag
 
 The accepted protocol and storage decisions live in [docs/architecture-v2.md](docs/architecture-v2.md).
 
+The canonical v2 operation registry generates [JSON Schema](schemas/agent-bridge-v2.schema.json), [OpenAPI 3.1.2](openapi/agent-bridge-v2.openapi.json), and the [MCP manifest](schemas/agent-bridge-v2.mcp.json). Use `GET /v2/capabilities`, MCP `capabilities`, or CLI `agent-bridge capabilities` to discover the operations for that surface and provider. Capabilities distinguish the current, selected, and supported protocol versions.
+
+Protocol 2.1 uses a gateway-first rollout. An upgraded gateway continues to serve released 2.0 clients, including headerless requests and their direct or null delivery results. A 2.1 client probes before mutation and proceeds only when complete, consistent response headers select 2.1 and advertise 2.1 support. It rejects mutation against a headerless or 2.0 gateway instead of downgrading. Upgrade the gateway before installing or starting 2.1 clients.
+
+The OpenAPI paths describe protocol 2.1. The embedded `x-agent-bridge-protocol-2.0` and `x-agent-bridge-schemas-2.0` vendor extensions contain frozen compatibility schema metadata for released 2.0 clients. They are not a second OpenAPI description. Scope names are reserved metadata. Gateway credentials currently authorize all operations for their bound principal. Local mode uses process identity, and legacy mode uses its configured key.
+
 ## Architecture
 
 ```text
@@ -358,6 +364,7 @@ Set `AGENT_BRIDGE_TEST_DATABASE_URL` to run the live PostgreSQL contract and mig
 ## Documentation
 
 - [ADR-0001](docs/decisions/0001-protocol-layers-and-acknowledgment-semantics.md): protocol layers and acknowledgment semantics.
+- [ADR-0002](docs/decisions/0002-canonical-operation-contract-registry.md): canonical contracts, generated artifacts, discovery, and version negotiation.
 - [docs/architecture-v2.md](docs/architecture-v2.md): protocol and storage decisions.
 - [SKILL.md](SKILL.md): runtime-neutral agent operating instructions.
 - [llms.txt](llms.txt): compact machine-readable project map.

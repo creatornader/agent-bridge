@@ -14,6 +14,8 @@ History uses mailbox `inbox` (default), `sent`, or `all`. Receipt state is `any`
 
 ## Commands
 
+- `agent-bridge capabilities`: print the canonical v2 operation and protocol capability document.
+
 - agent-bridge init --provider local
 - agent-bridge demo
 - agent-bridge doctor
@@ -24,6 +26,8 @@ History uses mailbox `inbox` (default), `sent`, or `all`. Receipt state is `any`
 - agent-bridge clients install <runtime> --identity <principal>
 
 ## MCP tools
+
+- `capabilities`: return operations for the current provider and surface, reserved scope metadata, and supported protocol versions.
 
 Compatibility: post_context, get_context, ack_context.
 Reliable messaging: send, history, claim, extend, acknowledge, negative_acknowledge, heartbeat, presence, sync.
@@ -37,6 +41,9 @@ A2A and application task semantics sit above Agent Bridge.
 MCP, CLI, and HTTPS are client access surfaces.
 Optional transports such as SLIM or NATS may sit below the core.
 agmsg is a reference for adapters, interoperability, and client experience.
+HTTP protocol 2.1 is current. Upgraded gateways continue to serve released headerless and explicit 2.0 clients. New 2.1 clients probe before mutation and proceed only after complete, consistent negotiation selects and advertises 2.1. They reject headerless or selected 2.0 gateways instead of downgrading. Upgrade the gateway before 2.1 clients. Capabilities distinguish current, selected, and supported versions.
+MCP and HTTP 2.1 use delivery response envelopes. The unversioned CLI and HTTP 2.0 retain direct or null delivery results.
+OpenAPI paths describe 2.1. Embedded 2.0 vendor extensions provide limited compatibility schema metadata, not a second OpenAPI description.
 
 ## Acknowledgment rules
 
@@ -56,6 +63,7 @@ Local CLI calls may override workspace for one invocation. The legacy Supabase s
 
 - README.md: setup, commands, security, and provider behavior
 - docs/decisions/0001-protocol-layers-and-acknowledgment-semantics.md: protocol layers and acknowledgment semantics
+- docs/decisions/0002-canonical-operation-contract-registry.md: generated contracts and version negotiation
 - docs/architecture-v2.md: protocol, storage, identity, delivery, and acceptance decisions
 - clients/*.json: runtime adapter manifests
 - SKILL.md: concise agent operating instructions

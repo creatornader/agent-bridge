@@ -89,7 +89,7 @@ export function isRetryableSyncError(error: unknown): boolean {
   const status = statusOf(error);
   const code = codeOf(error);
   if (["network_error", "request_timeout"].includes(code)) return true;
-  if (["invalid_input", "idempotency_conflict", "edge_idempotency_conflict", "principal_mismatch", "store_closed"].includes(code)) return false;
+  if (["invalid_input", "idempotency_conflict", "edge_idempotency_conflict", "principal_mismatch", "protocol_mismatch", "store_closed"].includes(code)) return false;
   return status === 0 || status === 408 || status === 425 ||
     status === 429 || (status !== undefined && status >= 500);
 }
@@ -250,6 +250,12 @@ export class SyncingBridgeStore implements BridgeStore {
     if (!record) return { state: "empty" };
     try {
       const result = await this.remote.insertMessage(record.draft, { signal });
+      if (result.message.id !== record.draft.id) {
+        const error = new Error("idempotency key resolved to a different message ID");
+        Object.assign(error, { status: 409, code: "idempotency_conflict" });
+        await this.edge.block(record, codeOf(error));
+        return { state: "blocked", error, messageId: record.draft.id };
+      }
       if (edgeMessageFingerprint(result.message) !== record.payloadHash) {
         const error = new Error("idempotency key resolved to different message content");
         Object.assign(error, { status: 409, code: "idempotency_conflict" });
@@ -284,8 +290,25 @@ export class SyncingBridgeStore implements BridgeStore {
   async insertMessage(message: PendingMessage): Promise<SyncInsertResult> {
     this.assertHealthy();
     this.assertPrincipal({ workspace: message.workspace, agent: message.source }, false);
+    let remoteError: unknown;
+    try {
+      await this.ensureRemote();
+    } catch (error) {
+      if (!isRetryableSyncError(error)) throw error;
+      remoteError = error;
+    }
     const queued = await this.edge.enqueue(message, this.now());
     const draft = queued.draft;
+    if (remoteError) {
+      await this.edge.noteError(codeOf(remoteError));
+      this.wakeTransport();
+      return {
+        message: provisional(draft, this.now().toISOString()),
+        created: queued.created,
+        disposition: "queued",
+        authoritative: false,
+      };
+    }
     const flushed = await this.flushOne();
     if (flushed.state === "fatal") throw flushed.error;
     if (flushed.state === "blocked" && flushed.messageId === draft.id) throw flushed.error;

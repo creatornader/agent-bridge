@@ -8,6 +8,12 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and 
 
 ### Added
 
+- Canonical TypeBox-backed v2 operation registry with deterministic JSON Schema 2020-12, OpenAPI 3.1.2, MCP manifest, and capability artifacts.
+- Surface-aware capability discovery over authenticated HTTP, MCP, and CLI. HTTP 2.1 is current, while upgraded gateways preserve the released headerless and explicit 2.0 response shapes.
+- Closed structural request validation before domain semantics, additive response parsing, artifact drift checks, and exact legacy MCP schema fixtures.
+- Object response envelopes for MCP and HTTP 2.1 delivery claims and controls. HTTP 2.0 and the unversioned CLI retain their released direct or null delivery results.
+- Optional client-generated message IDs across CLI, MCP, and HTTP, including exact idempotent replay.
+
 - Immutable publisher-owned delivery policies with mailbox and leased modes. Leased delivery adds priority claims, monotonic cycle counters, publisher cancel and requeue controls, and authorized audit pagination. PostgreSQL migration 010 and the SQLite initializer upgrade existing stores. Legacy mode rejects leased policy.
 
 - Caller-bound `inbox`, `sent`, and `all` mailbox history plus `any`, `unread`, and `read` receipt state across MCP, CLI, HTTP, PostgreSQL, SQLite, legacy, and offline gateway mode.
@@ -21,6 +27,8 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and 
 
 ### Changed
 
+- New 2.1 clients require complete 2.1 negotiation before mutation and reject headerless or selected 2.0 gateways instead of downgrading. Gateways must be upgraded before 2.1 clients.
+- Capability output distinguishes current, selected, and supported protocol versions. Primary OpenAPI operations require 2.1. Embedded 2.0 vendor extensions contain limited compatibility schema metadata, not a second OpenAPI description.
 - Consumer-side `maxAttempts` on claim and `retryPolicy` on nack are validated but ignored for one compatibility release. Stored publisher policy now controls retry and exhaustion.
 
 ## [0.2.0] - 2026-07-14

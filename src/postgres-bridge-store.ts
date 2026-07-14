@@ -130,7 +130,8 @@ function asDeliveryEvent(row: Row): BridgeDeliveryEvent {
   return {
     sequence: String(row.sequence), deliveryId: String(row.delivery_id),
     messageId: String(row.message_id), workspace: String(row.workspace),
-    recipient: String(row.recipient), fromState: row.from_state as BridgeDeliveryEvent["fromState"],
+    recipient: String(row.recipient),
+    fromState: row.from_state == null ? undefined : row.from_state as BridgeDeliveryEvent["fromState"],
     toState: row.to_state as BridgeDeliveryEvent["toState"], attempt: Number(row.attempt),
     cycleAttempt: Number(row.cycle_attempt), requeueCount: Number(row.requeue_count),
     leaseOwner: row.lease_owner ?? undefined, error: row.error ?? undefined,
