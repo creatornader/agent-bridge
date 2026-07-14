@@ -176,6 +176,14 @@ The CLI reads credentials from `~/.agent-bridge/config` (created in step 3).
 
 When `AGENT_BRIDGE_AGENT` is set, MCP calls default their posting and acknowledgment identity to that value. Explicit identities that differ are rejected. This prevents a wrapped runtime from writing rows labelled as another agent after atrib has already signed the original tool arguments.
 
+The CLI follows the same rule. Set `AGENT_BRIDGE_AGENT` in the process that invokes it to omit `--source`:
+
+```bash
+AGENT_BRIDGE_AGENT=codex agent-bridge post --category operational "Bridge is ready"
+```
+
+If the variable is unset, the CLI requires `--source`. A standalone shell cannot safely infer whether its caller is Codex, Claude Code, or another client.
+
 ### CLI Reference
 
 ```bash

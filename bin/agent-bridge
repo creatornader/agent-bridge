@@ -45,6 +45,7 @@ Commands:
   status  Health check
 
 Post:
+  AGENT_BRIDGE_AGENT=codex agent-bridge post --category operational "Morning briefing delivered"
   agent-bridge post --source sido --category operational "Morning briefing delivered"
   agent-bridge post --source sido --category bridge-meta "get_context should support multi-category filter"
   agent-bridge post --source claude-code --category config-change --project whop-app "Updated API route"
@@ -105,7 +106,7 @@ cmd_post() {
   fi
 
   if [[ -z "$source" || -z "$category" || -z "$content" ]]; then
-    echo "Error: --source, --category, and content are required" >&2
+    echo "Error: --category and content are required; --source is required only when AGENT_BRIDGE_AGENT is unset" >&2
     exit 1
   fi
 
