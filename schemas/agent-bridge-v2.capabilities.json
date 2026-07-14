@@ -7,6 +7,8 @@
     "2.1"
   ],
   "scopeEnforcement": true,
+  "requestAuthority": false,
+  "rowIsolation": false,
   "authorizationModel": "scoped-credential",
   "surface": "http",
   "provider": "gateway",
@@ -32,6 +34,8 @@
             "selectedProtocolVersion",
             "supportedProtocolVersions",
             "scopeEnforcement",
+            "requestAuthority",
+            "rowIsolation",
             "authorizationModel",
             "surface",
             "provider",
@@ -54,6 +58,12 @@
               }
             },
             "scopeEnforcement": {
+              "type": "boolean"
+            },
+            "requestAuthority": {
+              "type": "boolean"
+            },
+            "rowIsolation": {
               "type": "boolean"
             },
             "authorizationModel": {

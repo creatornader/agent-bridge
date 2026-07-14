@@ -15,6 +15,7 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and 
 - Optional client-generated message IDs across CLI, MCP, and HTTP, including exact idempotent replay.
 - Canonical gateway credential scopes, compatibility-safe migration 011, immutable replacement lineage, revocation helpers, and provider-specific capability truth.
 - Database-timed credential-wide and operation rate buckets with append-only scope, rate, replacement, and revocation security events.
+- Transaction-bound PostgreSQL request authority (migration 012). Node hashes credentials, PostgreSQL derives identity and scopes, and one client and transaction carry security accounting and request-local store operations. Domain savepoints preserve expected security effects when mutations fail. Ambiguous commits are never retried. Production gateway capabilities report request authority without claiming row isolation.
 
 - Immutable publisher-owned delivery policies with mailbox and leased modes. Leased delivery adds priority claims, monotonic cycle counters, publisher cancel and requeue controls, and authorized audit pagination. PostgreSQL migration 010 and the SQLite initializer upgrade existing stores. Legacy mode rejects leased policy.
 

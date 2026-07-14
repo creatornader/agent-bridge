@@ -375,7 +375,7 @@ const ReceiptCliResponseSchema = Type.Object({
 }, { additionalProperties: true });
 
 export const operations: readonly OperationContract[] = [
-  operation({ id: "capabilities", summary: "Discover operations available on the current surface.", request: Empty, response: Type.Object({ protocolVersion: Type.String(), currentProtocolVersion: Type.String(), selectedProtocolVersion: Type.String(), supportedProtocolVersions: StringArray, scopeEnforcement: Type.Boolean(), authorizationModel: Type.Enum(["scoped-credential", "credential-wide", "process-identity", "legacy-key"]), surface: Type.Enum(["mcp", "http", "cli"]), provider: Type.Enum(["local", "gateway", "legacy-supabase"]), operations: Type.Array(Type.Object({ id: Type.String(), summary: Type.String(), requiredScopes: StringArray, mcp: Type.Optional(Type.Any()), http: Type.Optional(Type.Any()), cli: Type.Optional(Type.Any()) }, { additionalProperties: true })) }, { additionalProperties: true }), scopes: [], providers: ALL_PROVIDERS, mcp: { name: "capabilities" }, http: { method: "GET", path: "/v2/capabilities" }, cli: { command: "capabilities", options: [] } }),
+  operation({ id: "capabilities", summary: "Discover operations available on the current surface.", request: Empty, response: Type.Object({ protocolVersion: Type.String(), currentProtocolVersion: Type.String(), selectedProtocolVersion: Type.String(), supportedProtocolVersions: StringArray, scopeEnforcement: Type.Boolean(), requestAuthority: Type.Boolean(), rowIsolation: Type.Boolean(), authorizationModel: Type.Enum(["scoped-credential", "credential-wide", "process-identity", "legacy-key"]), surface: Type.Enum(["mcp", "http", "cli"]), provider: Type.Enum(["local", "gateway", "legacy-supabase"]), operations: Type.Array(Type.Object({ id: Type.String(), summary: Type.String(), requiredScopes: StringArray, mcp: Type.Optional(Type.Any()), http: Type.Optional(Type.Any()), cli: Type.Optional(Type.Any()) }, { additionalProperties: true })) }, { additionalProperties: true }), scopes: [], providers: ALL_PROVIDERS, mcp: { name: "capabilities" }, http: { method: "GET", path: "/v2/capabilities" }, cli: { command: "capabilities", options: [] } }),
   operation({ id: "status", summary: "Read gateway delivery diagnostics.", request: Empty, response: DiagnosticsSchema, scopes: ["status:read"], providers: ALL_PROVIDERS, http: { method: "GET", path: "/v2/status" } }),
   operation({ id: "client_status", summary: "Read client connectivity and provider diagnostics.", request: Empty, response: ClientStatusSchema, scopes: ["status:read"], providers: ALL_PROVIDERS, cli: { command: "status", aliases: ["doctor"], options: [] } }),
   operation({ id: "gateway_metrics", summary: "Read Prometheus gateway counters.", request: Empty, response: Type.String(), scopes: ["gateway:metrics"], providers: GATEWAY_PROVIDER, http: { method: "GET", path: "/metrics", responseContentType: "text/plain" } }),
@@ -526,7 +526,7 @@ export function operationForCli(
       variant.command === command && cliVariantMatches(variant, selectedOptions)));
 }
 
-export function capabilityDocument(context: { surface: ContractSurface; provider: ContractProvider; selectedProtocolVersion?: string } = { surface: "http", provider: "gateway" }) {
+export function capabilityDocument(context: { surface: ContractSurface; provider: ContractProvider; selectedProtocolVersion?: string; requestAuthority?: boolean } = { surface: "http", provider: "gateway" }) {
   const selectedProtocolVersion = context.selectedProtocolVersion ?? PROTOCOL_VERSION;
   return {
     protocolVersion: selectedProtocolVersion,
@@ -534,6 +534,8 @@ export function capabilityDocument(context: { surface: ContractSurface; provider
     selectedProtocolVersion,
     supportedProtocolVersions: [...SUPPORTED_PROTOCOL_VERSIONS],
     scopeEnforcement: context.provider === "gateway" ? SCOPE_ENFORCEMENT : false,
+    requestAuthority: context.provider === "gateway" && context.requestAuthority === true,
+    rowIsolation: false,
     authorizationModel: context.provider === "gateway"
       ? "scoped-credential"
       : context.provider === "local"

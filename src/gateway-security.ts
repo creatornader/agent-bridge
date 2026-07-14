@@ -27,6 +27,10 @@ export interface GatewaySecurity {
 export class PostgresGatewaySecurity implements GatewaySecurity {
   constructor(private readonly db: PgQueryable) {}
 
+  private functionName(bound: string, unbound: string): string {
+    return this.db.inTransaction ? bound : unbound;
+  }
+
   async recordScopeDenial(
     credentialId: string,
     operationId: OperationId,
@@ -35,7 +39,7 @@ export class PostgresGatewaySecurity implements GatewaySecurity {
   ): Promise<void> {
     if (signal?.aborted) throw signal.reason;
     await this.db.query(
-      "SELECT agent_bridge.record_scope_denial($1::uuid, $2::text, $3::uuid)",
+      `SELECT agent_bridge.${this.functionName("record_scope_denial", "record_scope_denial_unbound_011")}($1::uuid, $2::text, $3::uuid)`,
       [credentialId, operationId, requestId],
     );
     if (signal?.aborted) throw signal.reason;
@@ -56,7 +60,7 @@ export class PostgresGatewaySecurity implements GatewaySecurity {
       denied_policy_id: string | null;
     }>(
       `SELECT allowed, limit_value, remaining_value, retry_after_seconds, denied_policy_id
-       FROM agent_bridge.consume_rate_limit($1::uuid, $2::text, $3::uuid)`,
+       FROM agent_bridge.${this.functionName("consume_rate_limit", "consume_rate_limit_unbound_011")}($1::uuid, $2::text, $3::uuid)`,
       [credentialId, operationId, requestId],
     );
     if (signal?.aborted) throw signal.reason;

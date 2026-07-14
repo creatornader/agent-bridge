@@ -23,6 +23,8 @@
           "selectedProtocolVersion",
           "supportedProtocolVersions",
           "scopeEnforcement",
+          "requestAuthority",
+          "rowIsolation",
           "authorizationModel",
           "surface",
           "provider",
@@ -45,6 +47,12 @@
             }
           },
           "scopeEnforcement": {
+            "type": "boolean"
+          },
+          "requestAuthority": {
+            "type": "boolean"
+          },
+          "rowIsolation": {
             "type": "boolean"
           },
           "authorizationModel": {
