@@ -1,7 +1,11 @@
 {
   "schemaVersion": "agent-bridge-mcp-manifest-v1",
   "protocolVersion": "2.1",
-  "scopeEnforcement": false,
+  "scopeEnforcementByProvider": {
+    "local": false,
+    "gateway": true,
+    "legacy-supabase": false
+  },
   "tools": [
     {
       "name": "capabilities",
@@ -45,6 +49,7 @@
           },
           "authorizationModel": {
             "enum": [
+              "scoped-credential",
               "credential-wide",
               "process-identity",
               "legacy-key"

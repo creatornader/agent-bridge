@@ -12,6 +12,7 @@ import type { CredentialResolver } from "../src/gateway-auth.js";
 import { BridgeHttpError, HttpBridgeStore } from "../src/http-bridge-store.js";
 import { installClient } from "../src/client-installer.js";
 import { resolveClientConfig } from "../src/client-config.js";
+import { AUTHORIZATION_SCOPES } from "../src/contracts/registry.js";
 
 const servers: Array<ReturnType<typeof createGateway>> = [];
 const stores: SQLiteBridgeStore[] = [];
@@ -34,8 +35,19 @@ async function gateway(
   await store.initialize(); stores.push(store);
   const credentials = resolver ?? { resolve: async (token: string) => token === "good" ? {
     id: "credential", principal: { workspace: "workspace-a", agent: "agent-a" },
+    scopes: AUTHORIZATION_SCOPES,
   } : null };
-  const server = createGateway({ store, credentials, ...options });
+  const security = {
+    recordScopeDenial: async () => {},
+    consume: async () => ({
+      allowed: true,
+      policyId: null,
+      limit: 100,
+      remaining: 99,
+      retryAfterSeconds: 0,
+    }),
+  };
+  const server = createGateway({ store, credentials, security, ...options });
   servers.push(server); server.listen(0, "127.0.0.1"); await once(server, "listening");
   const { port } = server.address() as AddressInfo;
   return `http://127.0.0.1:${port}`;
@@ -205,7 +217,7 @@ describe("authenticated v2 gateway", () => {
     expect(capabilities.status).toBe(200);
     expect(capabilities.headers.get("x-agent-bridge-protocol-version")).toBe("2.1");
     expect(capabilities.headers.get("x-agent-bridge-supported-protocol-versions")).toBe("2.0,2.1");
-    expect(await capabilities.json()).toMatchObject({ protocolVersion: "2.1", supportedProtocolVersions: ["2.0", "2.1"], scopeEnforcement: false });
+    expect(await capabilities.json()).toMatchObject({ protocolVersion: "2.1", supportedProtocolVersions: ["2.0", "2.1"], scopeEnforcement: true, authorizationModel: "scoped-credential" });
 
     const legacy = await fetch(`${base}/v2/capabilities`, { headers: { authorization: "Bearer good" } });
     expect(legacy.status).toBe(404);
@@ -307,7 +319,7 @@ describe("authenticated v2 gateway", () => {
     const base = await gateway({
       resolve: async (token) => {
         const principal = principals.get(token);
-        return principal ? { id: `${principal.agent}-credential`, principal } : null;
+        return principal ? { id: `${principal.agent}-credential`, principal, scopes: AUTHORIZATION_SCOPES } : null;
       },
     }, {}, store);
 
@@ -494,7 +506,7 @@ describe("authenticated v2 gateway", () => {
     const base = await gateway({
       resolve: async (token) => {
         const principal = principals.get(token);
-        return principal ? { id: `${principal.agent}-credential`, principal } : null;
+        return principal ? { id: `${principal.agent}-credential`, principal, scopes: AUTHORIZATION_SCOPES } : null;
       },
     });
     const sent = await fetch(`${base}/v2/messages`, {
@@ -539,9 +551,9 @@ describe("authenticated v2 gateway", () => {
   it("serves released delivery operations to a headerless 2.0 client", async () => {
     const base = await gateway({
       resolve: async (token) => token === "sender-token"
-        ? { id: "sender", principal: { workspace: "workspace-a", agent: "sender" } }
+        ? { id: "sender", principal: { workspace: "workspace-a", agent: "sender" }, scopes: AUTHORIZATION_SCOPES }
         : token === "worker-token"
-          ? { id: "worker", principal: { workspace: "workspace-a", agent: "worker" } }
+          ? { id: "worker", principal: { workspace: "workspace-a", agent: "worker" }, scopes: AUTHORIZATION_SCOPES }
           : null,
     });
     await fetch(`${base}/v2/messages`, {
@@ -628,6 +640,7 @@ describe("authenticated v2 gateway", () => {
         const credential = {
           id: "late",
           principal: { workspace: "workspace-a", agent: "agent-a" },
+          scopes: AUTHORIZATION_SCOPES,
         };
         return calls === 1
           ? new Promise((resolve) => setTimeout(() => resolve(credential), 40))
@@ -731,10 +744,10 @@ describe("authenticated v2 gateway", () => {
     const base = await gateway({
       resolve: async (token) => {
         if (token === "sender") {
-          return { id: "sender", principal: { workspace: "workspace-a", agent: "sender" } };
+          return { id: "sender", principal: { workspace: "workspace-a", agent: "sender" }, scopes: AUTHORIZATION_SCOPES };
         }
         if (token === "worker") {
-          return { id: "worker", principal: { workspace: "workspace-a", agent: "worker" } };
+          return { id: "worker", principal: { workspace: "workspace-a", agent: "worker" }, scopes: AUTHORIZATION_SCOPES };
         }
         return null;
       },
@@ -792,10 +805,10 @@ describe("authenticated v2 gateway", () => {
     const base = await gateway({
       resolve: async (token) => {
         if (token === "codex-token") {
-          return { id: "codex", principal: { workspace: "workspace-a", agent: "codex" } };
+          return { id: "codex", principal: { workspace: "workspace-a", agent: "codex" }, scopes: AUTHORIZATION_SCOPES };
         }
         if (token === "claude-token") {
-          return { id: "claude", principal: { workspace: "workspace-a", agent: "claude-code" } };
+          return { id: "claude", principal: { workspace: "workspace-a", agent: "claude-code" }, scopes: AUTHORIZATION_SCOPES };
         }
         return null;
       },

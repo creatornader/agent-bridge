@@ -7,7 +7,7 @@ export const SUPPORTED_PROTOCOL_VERSIONS = [LEGACY_PROTOCOL_VERSION, PROTOCOL_VE
 export const SUPPORTED_PROTOCOL_RANGE = SUPPORTED_PROTOCOL_VERSIONS.join(",");
 export const PROTOCOL_HEADER = "x-agent-bridge-protocol-version";
 export const SUPPORTED_PROTOCOL_HEADER = "x-agent-bridge-supported-protocol-versions";
-export const SCOPE_ENFORCEMENT = false;
+export const SCOPE_ENFORCEMENT = true;
 
 const StringArray = Type.Array(Type.String());
 const Empty = Type.Object({}, { additionalProperties: false });
@@ -294,18 +294,21 @@ const ClaimResponseSchema = Type.Object({
   ],
 });
 
-export type AuthorizationScope =
-  | "status:read"
-  | "messages:read"
-  | "messages:write"
-  | "receipts:write"
-  | "deliveries:read"
-  | "deliveries:claim"
-  | "deliveries:settle"
-  | "deliveries:manage"
-  | "presence:read"
-  | "presence:write"
-  | "gateway:metrics";
+export const AUTHORIZATION_SCOPES = [
+  "deliveries:claim",
+  "deliveries:manage",
+  "deliveries:read",
+  "deliveries:settle",
+  "gateway:metrics",
+  "messages:read",
+  "messages:write",
+  "presence:read",
+  "presence:write",
+  "receipts:write",
+  "status:read",
+] as const;
+
+export type AuthorizationScope = typeof AUTHORIZATION_SCOPES[number];
 
 export type ContractProvider = "local" | "gateway" | "legacy-supabase";
 export type ContractSurface = "mcp" | "http" | "cli";
@@ -372,7 +375,7 @@ const ReceiptCliResponseSchema = Type.Object({
 }, { additionalProperties: true });
 
 export const operations: readonly OperationContract[] = [
-  operation({ id: "capabilities", summary: "Discover operations available on the current surface.", request: Empty, response: Type.Object({ protocolVersion: Type.String(), currentProtocolVersion: Type.String(), selectedProtocolVersion: Type.String(), supportedProtocolVersions: StringArray, scopeEnforcement: Type.Boolean(), authorizationModel: Type.Enum(["credential-wide", "process-identity", "legacy-key"]), surface: Type.Enum(["mcp", "http", "cli"]), provider: Type.Enum(["local", "gateway", "legacy-supabase"]), operations: Type.Array(Type.Object({ id: Type.String(), summary: Type.String(), requiredScopes: StringArray, mcp: Type.Optional(Type.Any()), http: Type.Optional(Type.Any()), cli: Type.Optional(Type.Any()) }, { additionalProperties: true })) }, { additionalProperties: true }), scopes: [], providers: ALL_PROVIDERS, mcp: { name: "capabilities" }, http: { method: "GET", path: "/v2/capabilities" }, cli: { command: "capabilities", options: [] } }),
+  operation({ id: "capabilities", summary: "Discover operations available on the current surface.", request: Empty, response: Type.Object({ protocolVersion: Type.String(), currentProtocolVersion: Type.String(), selectedProtocolVersion: Type.String(), supportedProtocolVersions: StringArray, scopeEnforcement: Type.Boolean(), authorizationModel: Type.Enum(["scoped-credential", "credential-wide", "process-identity", "legacy-key"]), surface: Type.Enum(["mcp", "http", "cli"]), provider: Type.Enum(["local", "gateway", "legacy-supabase"]), operations: Type.Array(Type.Object({ id: Type.String(), summary: Type.String(), requiredScopes: StringArray, mcp: Type.Optional(Type.Any()), http: Type.Optional(Type.Any()), cli: Type.Optional(Type.Any()) }, { additionalProperties: true })) }, { additionalProperties: true }), scopes: [], providers: ALL_PROVIDERS, mcp: { name: "capabilities" }, http: { method: "GET", path: "/v2/capabilities" }, cli: { command: "capabilities", options: [] } }),
   operation({ id: "status", summary: "Read gateway delivery diagnostics.", request: Empty, response: DiagnosticsSchema, scopes: ["status:read"], providers: ALL_PROVIDERS, http: { method: "GET", path: "/v2/status" } }),
   operation({ id: "client_status", summary: "Read client connectivity and provider diagnostics.", request: Empty, response: ClientStatusSchema, scopes: ["status:read"], providers: ALL_PROVIDERS, cli: { command: "status", aliases: ["doctor"], options: [] } }),
   operation({ id: "gateway_metrics", summary: "Read Prometheus gateway counters.", request: Empty, response: Type.String(), scopes: ["gateway:metrics"], providers: GATEWAY_PROVIDER, http: { method: "GET", path: "/metrics", responseContentType: "text/plain" } }),
@@ -530,9 +533,9 @@ export function capabilityDocument(context: { surface: ContractSurface; provider
     currentProtocolVersion: PROTOCOL_VERSION,
     selectedProtocolVersion,
     supportedProtocolVersions: [...SUPPORTED_PROTOCOL_VERSIONS],
-    scopeEnforcement: SCOPE_ENFORCEMENT,
+    scopeEnforcement: context.provider === "gateway" ? SCOPE_ENFORCEMENT : false,
     authorizationModel: context.provider === "gateway"
-      ? "credential-wide"
+      ? "scoped-credential"
       : context.provider === "local"
         ? "process-identity"
         : "legacy-key",

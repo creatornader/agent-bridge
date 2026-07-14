@@ -35,12 +35,18 @@ function objectWithout(schema: Record<string, any>, excluded: ReadonlySet<string
   return result;
 }
 
+const scopeEnforcementByProvider = {
+  local: false,
+  gateway: SCOPE_ENFORCEMENT,
+  "legacy-supabase": false,
+};
+
 const schemas = {
   $schema: "https://json-schema.org/draft/2020-12/schema",
   $id: "https://agent-bridge.dev/schemas/v2/operations.json",
   title: "Agent Bridge v2 operation contracts",
   protocolVersion: PROTOCOL_VERSION,
-  scopeEnforcement: SCOPE_ENFORCEMENT,
+  scopeEnforcementByProvider,
   $defs: {
     ErrorEnvelope: ErrorEnvelopeSchema,
     legacy20MessageDraft: LegacyMessageDraftSchema,
@@ -198,7 +204,7 @@ const openapi = {
 const mcp = {
   schemaVersion: "agent-bridge-mcp-manifest-v1",
   protocolVersion: PROTOCOL_VERSION,
-  scopeEnforcement: SCOPE_ENFORCEMENT,
+  scopeEnforcementByProvider,
   tools: operations.filter((entry) => entry.mcp).map((entry) => ({
     name: entry.mcp!.name,
     description: entry.summary,

@@ -1,6 +1,7 @@
 import { fileURLToPath } from "node:url";
 import pg from "pg";
 import { PostgresCredentialResolver } from "./gateway-auth.js";
+import { PostgresGatewaySecurity } from "./gateway-security.js";
 import { createGateway } from "./gateway.js";
 import {
   loadMigrationPlan,
@@ -73,6 +74,7 @@ async function main(): Promise<void> {
   const gateway = createGateway({
     store,
     credentials: new PostgresCredentialResolver(pool),
+    security: new PostgresGatewaySecurity(pool),
     allowedOrigins,
     bodyLimitBytes,
     requestDeadlineMs: deadline,

@@ -79,7 +79,9 @@ Sync triggers:
 - HTTP protocol 2.1 is current. The gateway accepts exactly 2.0 and 2.1; a missing request header selects the 2.0 compatibility shape, and every other version returns 426. Package, MCP implementation, protocol, and migration versions are independent.
 - Upgraded gateways preserve released 2.0 clients. New 2.1 clients require complete, consistent 2.1 negotiation before mutation and reject headerless or selected 2.0 gateways instead of downgrading. Upgrade the gateway before 2.1 clients.
 - OpenAPI paths describe protocol 2.1. The embedded 2.0 vendor extensions contain limited compatibility schema metadata, not a second OpenAPI description.
-- Capability scope names are reserved metadata until a later security migration. Current credentials remain credential-wide and generated documents set scope enforcement to false.
+- Gateway credentials enforce the canonical operation scopes. Capabilities requires an active credential but no named scope. Local and legacy providers report scope enforcement as false.
+- Every gateway request consumes a credential-wide rate bucket and an operation bucket through narrow security-definer functions. Scope and rate denials append secret-free security events before the gateway reads a request body.
+- Credential replacement links are immutable and principal-bound. Revocation and ordinary expiry always win; a successor grace cutoff may only shorten predecessor access.
 
 ### Providers
 

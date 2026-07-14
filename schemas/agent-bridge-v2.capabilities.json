@@ -6,8 +6,8 @@
     "2.0",
     "2.1"
   ],
-  "scopeEnforcement": false,
-  "authorizationModel": "credential-wide",
+  "scopeEnforcement": true,
+  "authorizationModel": "scoped-credential",
   "surface": "http",
   "provider": "gateway",
   "operations": [
@@ -58,6 +58,7 @@
             },
             "authorizationModel": {
               "enum": [
+                "scoped-credential",
                 "credential-wide",
                 "process-identity",
                 "legacy-key"
