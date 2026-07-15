@@ -46,6 +46,30 @@ If a crash leaves the adjacent enrollment lock, wait at least 60 seconds and pas
 `--recover-lock` with the resume or install command. Recovery must prove that the
 same-host process recorded in the lock has stopped. Never remove the lock manually.
 
+Portable archive work is an offline operator task, not normal MCP traffic. Use
+`agent-bridge archive export --provider local|postgres --workspace <workspace>
+--output <file>` to create an archive, then run `agent-bridge archive verify --file
+<file>` before moving or importing it. Archive files and their directories must satisfy
+the current user's private-path policy. Import replays three bounded passes through one
+open descriptor. It is a dry run unless `--apply` is explicit; `--dry-run` and
+`--apply` cannot be combined. Provide `--workspace` on import when the destination must
+match an expected tenant. PostgreSQL archive commands accept only
+`AGENT_BRIDGE_ARCHIVE_DATABASE_URL`.
+Portable v1 requires current-domain records, lowercase UUIDs, and six-digit UTC
+timestamps. It does not repair legacy or direct database rows. Use native database
+recovery for rows that fail export validation.
+Set and retain `--request-id` for export. The archive header records it as
+`exportRequestId`; verification and import return that provenance. An import
+`--request-id` identifies the destination operation and is independent. Retry an
+export ID only with the same private output file. The CLI verifies completed exports
+and reconciles matching started exports without streaming a new snapshot. Temporary
+and backup files have deterministic adjacent names derived from the export ID. Follow
+returned recovery paths and audit status exactly when replacement, cleanup, or audit
+completion is uncertain.
+Do not treat the archive digest as encryption or authentication. Archives contain
+messages and read receipts but exclude deliveries, events, presence, credentials,
+control records, and security state.
+
 Use `project` only as an optional message label. Workspace remains the tenant and credential boundary. Omit a project filter to read labeled and unlabeled messages, or provide one for an exact match. Reusing a workspace/source idempotency key with a different project is a conflict.
 
 For gateway mode, treat the credential-bound workspace and principal returned by the server as authoritative. Instance identifies one runtime of that same principal; it cannot select a workspace, agent, or scopes. A production gateway reports row isolation only when transaction-bound request authority and every database readiness check pass. RLS isolates workspace and principal rows. The service still enforces lease transitions and target-to-delivery membership.

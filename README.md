@@ -25,6 +25,7 @@ PostgreSQL remains the authority in gateway mode. SQLite holds local-only messag
 - SQLite outbox and inbox cache for gateway clients.
 - Leased runtime presence with instance IDs and capabilities.
 - MCP, CLI, Codex, Claude Code, and Claude Desktop integration paths.
+- Canonical portable archives for messages and read receipts across local SQLite and shared PostgreSQL stores.
 - Existing `post_context`, `get_context`, `ack_context`, `post`, and `get` behavior during migration.
 
 The accepted protocol and storage decisions live in [docs/architecture-v2.md](docs/architecture-v2.md).
@@ -112,6 +113,76 @@ Run a two-principal local proof:
 ```bash
 agent-bridge demo
 ```
+
+## Portable archives
+
+Portable archives move one workspace's immutable messages and read receipts between
+canonical local SQLite and PostgreSQL stores. Export writes a private file through a
+same-directory temporary file, file fsync, atomic publication, and directory fsync.
+The export audit completes only after durable publication. A failed export records a
+bounded abandonment code. Export and import paths must satisfy the current user's
+private-path policy. Export refuses to replace an existing file unless `--force` is
+present. Export accepts `--request-id`, embeds it as `exportRequestId` in the archive
+header, and returns it on success. Verification and import also return that export
+provenance. An import request ID is a separate destination operation identifier.
+Reusing an export request ID verifies a completed file or reconciles a matching file
+whose audit response was lost. A missing or mismatched file stays started and requires
+a new export request ID or owner reconciliation. Recovery artifacts use deterministic
+same-directory names derived from the export request ID, so a retry can report and
+clean only its own private temporary file or backup. Force replacement keeps that
+backup until the new file is durable. Errors report whether publication, backup
+cleanup, or audit state is known.
+
+Portable v1 accepts only records in the current Agent Bridge domain. New API writes
+use lowercase UUIDs. Archives require lowercase UUIDs and UTC timestamps with six
+fractional digits. They do not trim strings, remove duplicates, apply defaults, or
+rewrite message content. Export rejects legacy or direct database rows outside these
+rules. Recover those rows through native database backup and restore tools.
+
+```bash
+install -d -m 700 "$HOME/.agent-bridge/archives"
+
+agent-bridge archive export \
+  --provider local \
+  --workspace team \
+  --request-id 00000000-0000-4000-8000-000000000001 \
+  --db "$HOME/.agent-bridge/bridge.sqlite3" \
+  --output "$HOME/.agent-bridge/archives/team.ndjson"
+
+agent-bridge archive verify --file "$HOME/.agent-bridge/archives/team.ndjson"
+
+# Import is a rollback-backed dry run unless --apply is explicit.
+agent-bridge archive import \
+  --provider local \
+  --db /path/to/target.sqlite3 \
+  --file "$HOME/.agent-bridge/archives/team.ndjson" \
+  --workspace team \
+  --dry-run
+
+agent-bridge archive import \
+  --provider local \
+  --db /path/to/target.sqlite3 \
+  --file "$HOME/.agent-bridge/archives/team.ndjson" \
+  --workspace team \
+  --request-id 00000000-0000-4000-8000-000000000001 \
+  --apply
+```
+
+Local commands use `--db`, `AGENT_BRIDGE_DB`, the selected shared config, or the
+canonical local database path, in that order. PostgreSQL commands accept database
+authority only from `AGENT_BRIDGE_ARCHIVE_DATABASE_URL` and require a login registered
+for the archive boundary created by the current migrations. They do not fall back to
+the schema-owner, gateway runtime, owner-control, or client database settings.
+
+The archive digest detects accidental changes to the canonical bytes. It is neither
+encryption nor authentication. Archives contain message content and routing metadata,
+so protect them as private data. They exclude deliveries, delivery events, presence,
+credentials, owner-control records, security events, and other control or security
+state. The library API is available from `@creatornader/agent-bridge/archive`.
+Import opens the archive once without following links. It verifies the file, replays
+messages, then replays receipts through the same descriptor. Every pass checks framing,
+order, counts, and the client-computed digest. Batches are limited by row count and a
+4 MiB byte budget. `--dry-run` and `--apply` are mutually exclusive.
 
 ## Install client integrations
 

@@ -338,8 +338,7 @@ export function validateDeliveryPolicy(
 export function validateMessageDraft(
   input: MessageDraft,
 ): Omit<BridgeMessage, "workspace" | "source" | "sequence" | "createdAt"> {
-  const id = input.id ?? uuidv7();
-  if (!UUID_RE.test(id)) throw new BridgeValidationError("id must be a UUID");
+  const id = validateUuid(input.id ?? uuidv7(), "id").toLowerCase();
 
   const priority = input.priority ?? "info";
   if (!["info", "high", "urgent"].includes(priority)) {

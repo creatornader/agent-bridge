@@ -3,6 +3,8 @@ import { spawnSync, type SpawnSyncReturns } from "node:child_process";
 
 export type PrivatePathKind = "file" | "directory";
 
+export class PrivatePathError extends Error {}
+
 interface PrivatePathDependencies {
   platform: NodeJS.Platform;
   execute(command: string, args: string[], env: NodeJS.ProcessEnv): SpawnSyncReturns<string>;
@@ -67,13 +69,13 @@ function windowsPrivatePath(
   const before = dependencies.inspect(path);
   if (before.isSymbolicLink()
     || (kind === "file" ? !before.isFile() : !before.isDirectory())) {
-    throw new Error("private Windows paths cannot be symlinks, junctions, or reparse objects");
+    throw new PrivatePathError("private Windows paths cannot be symlinks, junctions, or reparse objects");
   }
   const result = dependencies.execute("powershell.exe", [
     "-NoProfile", "-NonInteractive", "-Command", windowsScript(kind, apply),
   ], { ...process.env, AGENT_BRIDGE_PRIVATE_PATH: path });
   if (result.status !== 0) {
-    throw new Error(apply
+    throw new PrivatePathError(apply
       ? "cannot apply the current-user private path policy"
       : "path does not satisfy the current-user private path policy");
   }
@@ -81,7 +83,7 @@ function windowsPrivatePath(
   if (after.isSymbolicLink()
     || (kind === "file" ? !after.isFile() : !after.isDirectory())
     || after.dev !== before.dev || after.ino !== before.ino) {
-    throw new Error("private Windows path identity changed during policy validation");
+    throw new PrivatePathError("private Windows path identity changed during policy validation");
   }
 }
 
@@ -89,16 +91,16 @@ function posixPrivatePath(path: string, kind: PrivatePathKind, apply: boolean): 
   const details = lstatSync(path);
   if (details.isSymbolicLink()
     || (kind === "file" ? !details.isFile() : !details.isDirectory())) {
-    throw new Error("private path has the wrong file type");
+    throw new PrivatePathError("private path has the wrong file type");
   }
   if (typeof process.getuid === "function" && details.uid !== process.getuid()) {
-    throw new Error("private path must be owned by the current user");
+    throw new PrivatePathError("private path must be owned by the current user");
   }
   const mode = kind === "file" ? 0o600 : 0o700;
   if (apply) chmodSync(path, mode);
   const secured = lstatSync(path);
   if ((secured.mode & 0o777) !== mode) {
-    throw new Error("private path permissions are not owner-only");
+    throw new PrivatePathError("private path permissions are not owner-only");
   }
 }
 

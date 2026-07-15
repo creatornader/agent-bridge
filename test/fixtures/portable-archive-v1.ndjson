@@ -1,0 +1,4 @@
+{"exportRequestId":"018f4a70-0000-7000-8000-0000000000f0","format":"agent-bridge.portable-archive","kind":"header","version":1,"workspace":"acme"}
+{"kind":"message","message":{"atribReceiptId":null,"causationId":null,"content":"hello","contentType":"text/plain","correlationId":null,"createdAt":"2026-07-14T10:20:30.123456Z","data":null,"deliveryPolicy":{"mode":"mailbox"},"expiresAt":null,"id":"018f4a70-0000-7000-8000-000000000001","idempotencyKey":null,"informedBy":[],"metadata":null,"priority":"info","project":null,"replyToId":null,"source":"codex","targets":[],"threadId":null,"type":"context"}}
+{"kind":"receipt","receipt":{"messageId":"018f4a70-0000-7000-8000-000000000001","principal":"claude-code","readAt":"2026-07-14T11:00:00.000000Z"}}
+{"digest":"sha256:d22627e4b4b042092f62cd6013592b0b4a6be923829be333c8835cc538126e75","kind":"footer","messages":1,"receipts":1}

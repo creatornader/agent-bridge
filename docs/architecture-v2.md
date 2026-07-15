@@ -39,6 +39,56 @@ Long-lived gateway MCP clients own a cancellable transport loop that replays pub
 
 Local initialization must be idempotent. Every connection uses a bounded busy timeout. The minimum supported SQLite build must include the WAL-reset corruption fix. Node 22.23.1 on the current development machine embeds SQLite 3.51.3, which includes that fix.
 
+### Portable archives cross storage engines without copying runtime state
+
+A portable archive is a canonical NDJSON snapshot of one workspace's immutable
+messages and read receipts. Export takes a consistent store snapshot. Verification
+checks strict framing, canonical JSON, record order, counts, and the SHA-256 digest.
+Import opens one private, regular archive file without following links. It performs a
+format pass, a message pass, and a receipt pass through the same descriptor. Each pass
+recomputes framing, order, counts, and the client-computed digest. Message and receipt
+batches have row limits and a 4 MiB byte budget. Import runs as a rollback-backed dry
+run unless the operator passes `--apply`; `--dry-run` and `--apply` are mutually
+exclusive. Replaying identical records is idempotent. Conflicting message or receipt
+content fails the import.
+
+The portable format excludes deliveries, delivery events, presence, credentials,
+owner-control state, security events, migration records, and edge synchronization
+state. Those records have different authority and recovery semantics. The digest
+detects changed bytes. It provides neither encryption nor authentication, so operators
+must protect the archive as message data and use a separate trusted transfer channel.
+
+Archive administration stays outside MCP, HTTPS, and the canonical operation registry.
+Local commands open only a canonical local Agent Bridge database. PostgreSQL commands
+use a separate restricted archive login supplied only through
+`AGENT_BRIDGE_ARCHIVE_DATABASE_URL`. Export holds one store snapshot while it streams
+canonical records and an incremental digest to a private temporary file. It fsyncs the
+file, publishes without replacement unless `--force` is explicit, verifies the private
+path, and fsyncs the directory. Only then does it complete the database audit. A
+publication failure abandons the operation with a bounded code. The footer digest is
+client-verified and caller-attested. It is not independent server proof.
+
+Every export has a caller-visible request ID. The canonical header stores it as
+`exportRequestId`, and the digest binds that header to the archive. Verification and
+import return the same provenance. The request ID for an import operation remains a
+separate destination-side identifier. An exact completed export retry verifies the
+private file against the terminal export request ID, workspace, digest, and counts. A
+retry of a started export never streams a new snapshot or force-replaces the file. It
+verifies the retained file and uses the separate reconciliation operation, or leaves
+the request started when the file is missing or mismatched. Temporary and backup paths
+are deterministic same-directory names derived from `exportRequestId`. Force
+replacement first makes a durable private hard-link backup. A pre-durable failure
+restores and fsyncs the original before abandonment. An unproved restore, retained
+artifact, or lost audit response returns its path and state without claiming a clean
+failure. Reconciliation proves durability through the file descriptor that performed
+verification and checks pathname identity around file and directory synchronization.
+
+Portable v1 carries only records that satisfy the current message domain. New API
+writes use lowercase UUIDs. Archive UUIDs must be lowercase, and archive timestamps
+use UTC with six fractional digits. The archive path does not trim, deduplicate,
+default, or rewrite message content. A legacy or direct database row outside this
+domain fails export and requires native database recovery.
+
 ### Messages are immutable
 
 The protocol stores message content and routing fields in an immutable message record. Read and execution state live in separate tables.
@@ -209,7 +259,7 @@ Limits apply to content bytes, payload bytes, metadata depth, target count, batc
 
 ## Operations and observability
 
-The CLI provides `init`, `doctor`, `status`, `demo`, `send`, `inbox`, `history`, `claim`, `ack`, `nack`, `watch`, `sync`, and migration commands. Existing `post` and `get` aliases remain available.
+The CLI provides `init`, `doctor`, `status`, `demo`, `send`, `inbox`, `history`, `claim`, `ack`, `nack`, `watch`, `sync`, portable archive, and migration commands. Existing `post` and `get` aliases remain available.
 
 `/readyz` reports storage and schema readiness. Authenticated HTTP status reports the bound principal, provider schema, delivery counts, and the oldest due delivery. CLI `doctor` and `status` use a separate client-status contract that also reports local edge state and remote gateway reachability.
 
@@ -219,7 +269,7 @@ Gateway responses carry a request ID, including stable error envelopes. Scope fa
 
 The unscoped npm name `agent-bridge` belongs to another project. This repository uses `@creatornader/agent-bridge`. Tagged builds always produce a package artifact. Publishing stays gated by the protected `npm` environment, npm's OIDC trusted-publisher binding to `release.yml`, and the `NPM_PUBLISH_ENABLED` repository variable.
 
-The package must contain built runtime files, migrations, client manifests, license, README, and changelog. A clean tarball install runs in CI. Releases use one version source, a tag-to-version check, npm provenance, and a human approval gate.
+The package must contain built runtime files, migrations, client manifests, license, README, and changelog. It exports the portable archive API from `@creatornader/agent-bridge/archive`. A clean tarball install runs archive and CLI smoke checks in CI. Releases use one version source, a tag-to-version check, npm provenance, and a human approval gate.
 
 ## Acceptance checks
 

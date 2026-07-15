@@ -88,10 +88,17 @@ jobs:
       - name: Install and run the packed CLI
         working-directory: ${{ runner.temp }}
         run: |
-          mkdir package-smoke
+          mkdir -m 700 package-smoke
           cd package-smoke
           npm init -y
           npm install ../creatornader-agent-bridge-*.tgz
-          node --input-type=module -e "import { BridgeService, SQLiteBridgeStore } from '@creatornader/agent-bridge'; if (typeof BridgeService !== 'function' || typeof SQLiteBridgeStore !== 'function') process.exit(1)"
-          ./node_modules/.bin/agent-bridge demo
-          ./node_modules/.bin/agent-bridge owner help
+          mkdir -m 700 smoke-home
+          env -i HOME="$PWD/smoke-home" PATH="$PATH" TMPDIR="$RUNNER_TEMP" node --input-type=module -e "import { BridgeService, SQLiteBridgeStore } from '@creatornader/agent-bridge'; import { decodePortableArchive } from '@creatornader/agent-bridge/archive'; if (typeof BridgeService !== 'function' || typeof SQLiteBridgeStore !== 'function' || typeof decodePortableArchive !== 'function') process.exit(1)"
+          env -i HOME="$PWD/smoke-home" PATH="$PATH" TMPDIR="$RUNNER_TEMP" ./node_modules/.bin/agent-bridge demo
+          env -i HOME="$PWD/smoke-home" PATH="$PATH" TMPDIR="$RUNNER_TEMP" ./node_modules/.bin/agent-bridge owner help
+          env -i HOME="$PWD/smoke-home" PATH="$PATH" TMPDIR="$RUNNER_TEMP" AGENT_BRIDGE_PROVIDER=local AGENT_BRIDGE_DB="$PWD/archive-source.sqlite3" ./node_modules/.bin/agent-bridge send --source pack-smoke portable
+          env -i HOME="$PWD/smoke-home" PATH="$PATH" TMPDIR="$RUNNER_TEMP" ./node_modules/.bin/agent-bridge archive export --provider local --workspace default --db "$PWD/archive-source.sqlite3" --output "$PWD/archive.ndjson"
+          env -i HOME="$PWD/smoke-home" PATH="$PATH" TMPDIR="$RUNNER_TEMP" ./node_modules/.bin/agent-bridge archive verify --file "$PWD/archive.ndjson"
+          env -i HOME="$PWD/smoke-home" PATH="$PATH" TMPDIR="$RUNNER_TEMP" AGENT_BRIDGE_PROVIDER=local AGENT_BRIDGE_DB="$PWD/archive-target.sqlite3" ./node_modules/.bin/agent-bridge status --as bootstrap
+          env -i HOME="$PWD/smoke-home" PATH="$PATH" TMPDIR="$RUNNER_TEMP" ./node_modules/.bin/agent-bridge archive import --provider local --db "$PWD/archive-target.sqlite3" --file "$PWD/archive.ndjson"
+          env -i HOME="$PWD/smoke-home" PATH="$PATH" TMPDIR="$RUNNER_TEMP" ./node_modules/.bin/agent-bridge archive import --provider local --db "$PWD/archive-target.sqlite3" --file "$PWD/archive.ndjson" --apply

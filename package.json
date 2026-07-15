@@ -64,6 +64,10 @@
     "./config": {
       "types": "./dist/client-config.d.ts",
       "import": "./dist/client-config.js"
+    },
+    "./archive": {
+      "types": "./dist/archive.d.ts",
+      "import": "./dist/archive.js"
     }
   },
   "scripts": {

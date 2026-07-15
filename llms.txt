@@ -27,6 +27,26 @@ History uses mailbox `inbox` (default), `sent`, or `all`. Receipt state is `any`
 - agent-bridge clients install <runtime> --identity <principal>
 - agent-bridge owner provision|inventory|rotate|revoke
 - agent-bridge clients install <runtime> --enrollment-file <private path>
+- agent-bridge archive export|verify|import
+
+Archive export moves one workspace's immutable messages and read receipts between
+canonical local SQLite and PostgreSQL stores. Import defaults to a rollback-backed dry
+run and requires `--apply` to commit. PostgreSQL archive authority comes only from
+`AGENT_BRIDGE_ARCHIVE_DATABASE_URL`. The digest detects changed bytes; it is neither
+encryption nor authentication. Archives exclude delivery, event, presence, credential,
+control, and security state. Import uses one private file descriptor for format,
+message, and receipt passes with a 4 MiB batch budget. Export completes its audit only
+after durable publication. `--dry-run` and `--apply` are exclusive. Library import:
+`@creatornader/agent-bridge/archive`.
+Portable v1 requires current-domain records, lowercase UUIDs, and six-digit UTC
+timestamps. It does not trim, deduplicate, default, or rewrite message content.
+Legacy or direct rows that fail validation require native database recovery.
+Export accepts a request ID, stores it as header `exportRequestId`, and returns it.
+Verify and import return the same provenance; an import request ID is independent.
+Same-ID export retries verify completed files or reconcile matching started files
+without streaming again. Deterministic adjacent recovery files are derived from the
+export ID. Force replacement keeps a private backup until the new file is durable and
+reports recovery paths plus backup, durability, and audit uncertainty.
 
 ## MCP tools
 

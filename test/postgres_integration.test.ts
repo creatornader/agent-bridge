@@ -27,6 +27,11 @@ import { installClient } from "../src/client-installer.js";
 import { resolveClientConfig } from "../src/client-config.js";
 import { createClientRuntime } from "../src/client-runtime.js";
 import { enrollmentTokenHash, readEnrollment } from "../src/enrollment-file.js";
+import { exportPortableArchive, importPortableArchive, streamPortableArchive } from "../src/portable-archive.js";
+import { canonicalJson, decodePortableArchive, encodePortableArchive } from "../src/portable-archive-format.js";
+import { PostgresPortableArchiveStore } from "../src/postgres-portable-archive-store.js";
+import { SQLitePortableArchiveStore } from "../src/sqlite-portable-archive-store.js";
+import { SQLiteBridgeStore } from "../src/sqlite-bridge-store.js";
 
 const databaseUrl = process.env.AGENT_BRIDGE_TEST_DATABASE_URL;
 const integration = databaseUrl ? describe : describe.skip;
@@ -37,7 +42,7 @@ async function withTemporaryDatabase(
 ): Promise<void> {
   const name = `bridge_upgrade_${randomUUID().replaceAll("-", "")}`;
   const suffix = createHash("md5").update(name).digest("hex").slice(0, 16);
-  const roleNames = ["runtime", "data_owner", "context_reader", "event_writer", "control_owner", "control_operator", "control_auditor", "acl_intruder"]
+  const roleNames = ["runtime", "data_owner", "context_reader", "event_writer", "control_owner", "control_operator", "control_auditor", "archive_operator", "acl_intruder"]
     .map((kind) => `agent_bridge_${kind}_${suffix}`);
   const adminUrl = new URL(databaseUrl!);
   adminUrl.pathname = "/postgres";
@@ -201,6 +206,594 @@ integration("PostgreSQL BridgeStore integration", () => {
     });
     expect(databaseErrorDiagnostic(diagnostic)).toContain('"internalQuery":"SELECT internal diagnostic"');
   });
+
+  it("round-trips portable archives byte-identically across SQLite and PostgreSQL", async () => {
+    const directory = mkdtempSync(join(tmpdir(), "agent-bridge-cross-engine-"));
+    const sourcePath = join(directory, "source.sqlite3");
+    const targetPath = join(directory, "target.sqlite3");
+    const workspaceId = `archive-${randomUUID()}`;
+    const exportRequestId = randomUUID();
+    try {
+      const sourceBridge = new SQLiteBridgeStore(sourcePath);
+      await sourceBridge.initialize();
+      const sourceService = new BridgeService(sourceBridge);
+      const principal = { workspace: workspaceId, agent: "codex" };
+      const published = await sourceService.publish(principal, {
+        id: uuidv7(), type: "context", content: "cross-engine archive", idempotencyKey: "cross-engine",
+      });
+      await sourceBridge.recordReceipt(principal, [published.message.id], new Date("2026-07-14T12:00:00.123Z"));
+      await sourceBridge.close();
+      const sourceArchive = new SQLitePortableArchiveStore(sourcePath);
+      const sqliteBytes = await exportPortableArchive(sourceArchive, workspaceId, exportRequestId);
+      sourceArchive.close();
+
+      await pool!.query("INSERT INTO agent_bridge.workspaces(id,name) VALUES($1,$1)", [workspaceId]);
+      const postgresArchive = new PostgresPortableArchiveStore(pool!);
+      await importPortableArchive(postgresArchive, sqliteBytes, { requestId: randomUUID(), apply: true });
+      const postgresBytes = await exportPortableArchive(postgresArchive, workspaceId, exportRequestId);
+      expect(postgresBytes).toEqual(sqliteBytes);
+      const sideEffects = await pool!.query<{ deliveries: string; events: string }>(
+        `SELECT (SELECT count(*)::text FROM agent_bridge.deliveries WHERE workspace=$1) deliveries,
+          (SELECT count(*)::text FROM agent_bridge.delivery_events WHERE workspace=$1) events`, [workspaceId],
+      );
+      expect(sideEffects.rows[0]).toEqual({ deliveries: "0", events: "0" });
+
+      const targetBridge = new SQLiteBridgeStore(targetPath);
+      await targetBridge.initialize();
+      await new BridgeService(targetBridge).publish({ workspace: "noise", agent: "codex" }, { type: "noise", content: "consume sequence" });
+      await targetBridge.close();
+      const targetArchive = new SQLitePortableArchiveStore(targetPath);
+      await importPortableArchive(targetArchive, postgresBytes, { requestId: randomUUID(), apply: true });
+      expect(await exportPortableArchive(targetArchive, workspaceId, exportRequestId)).toEqual(sqliteBytes);
+      targetArchive.close();
+    } finally {
+      rmSync(directory, { recursive: true, force: true });
+    }
+  });
+
+  it("enforces the restricted archive login and final operation contract", async () => {
+    const directory = mkdtempSync(join(tmpdir(), "agent-bridge-archive-authority-"));
+    const sourcePath = join(directory, "source.sqlite3");
+    const workspaceId = `archive-authority-${randomUUID()}`;
+    const login = `bridge_archive_login_${randomUUID().replaceAll("-", "")}`;
+    const intruder = `bridge_archive_intruder_${randomUUID().replaceAll("-", "")}`;
+    const password = randomUUID();
+    const importRequest = randomUUID();
+    const sourceExportRequest = randomUUID();
+    const priorArchiveUrl = process.env.AGENT_BRIDGE_ARCHIVE_DATABASE_URL;
+    let archivePool: pg.Pool | undefined;
+    try {
+      const sourceBridge = new SQLiteBridgeStore(sourcePath);
+      await sourceBridge.initialize();
+      const sourceService = new BridgeService(sourceBridge);
+      const published = await sourceService.publish({ workspace: workspaceId, agent: "publisher" }, {
+        id: uuidv7(), type: "context", content: "restricted archive authority", targets: ["worker"],
+      });
+      await sourceBridge.recordReceipt(
+        { workspace: workspaceId, agent: "worker" }, [published.message.id],
+        new Date("2026-07-14T12:00:00.123Z"),
+      );
+      await sourceBridge.close();
+      const sourceArchive = new SQLitePortableArchiveStore(sourcePath);
+      const bytes = await exportPortableArchive(sourceArchive, workspaceId, sourceExportRequest);
+      sourceArchive.close();
+      const decoded = decodePortableArchive(bytes);
+
+      await pool!.query("INSERT INTO agent_bridge.workspaces(id,name) VALUES($1,$1)", [workspaceId]);
+      await pool!.query(`CREATE ROLE ${login} LOGIN PASSWORD '${password}'`);
+      await pool!.query(`CREATE ROLE ${intruder} LOGIN PASSWORD '${randomUUID()}'`);
+      await pool!.query(
+        "SELECT * FROM agent_bridge.register_archive_member($1,$2::name)", [randomUUID(), login],
+      );
+      const archiveUrl = new URL(databaseUrl!);
+      archiveUrl.username = login;
+      archiveUrl.password = password;
+      process.env.AGENT_BRIDGE_ARCHIVE_DATABASE_URL = archiveUrl.toString();
+      archivePool = new pg.Pool({
+        connectionString: process.env.AGENT_BRIDGE_ARCHIVE_DATABASE_URL,
+        max: 2,
+      });
+      const roleProof = await archivePool.query<{ member: boolean; ready: boolean }>(`SELECT
+        pg_has_role(session_user,'agent_bridge_archive_operator_'||substr(md5(current_database()),1,16),'MEMBER') AS member,
+        agent_bridge.portable_archive_ready() AS ready`);
+      expect(roleProof.rows[0]).toEqual({ member: true, ready: true });
+
+      const store = new PostgresPortableArchiveStore(archivePool);
+      const completedExportRequest = randomUUID();
+      const completedExport = await store.beginExport(completedExportRequest, workspaceId);
+      if (completedExport.status !== "active") throw new Error("expected a fresh active export");
+      expect(completedExport.replayed).toBe(false);
+      const completedMetadata = await streamPortableArchive(
+        completedExport.session, workspaceId, completedExportRequest, () => {},
+      );
+      const publishedAt = "2026-07-14T12:01:00.123456Z";
+      await completedExport.session.complete({ ...completedMetadata, publishedAt });
+      await completedExport.session.close();
+      expect(await store.beginExport(completedExportRequest, workspaceId)).toEqual({
+        status: "completed", metadata: { ...completedMetadata, publishedAt },
+      });
+      expect((await pool!.query<{ authorizations: string }>(
+        "SELECT count(*)::text AS authorizations FROM agent_bridge.archive_transaction_authorizations WHERE request_id=$1",
+        [completedExportRequest],
+      )).rows[0]!.authorizations).toBe("0");
+
+      const interruptedExportRequest = randomUUID();
+      const interrupted = await store.beginExport(interruptedExportRequest, workspaceId);
+      if (interrupted.status !== "active") throw new Error("expected an interrupted active export");
+      await interrupted.session.close();
+      const resumed = await store.beginExport(interruptedExportRequest, workspaceId);
+      if (resumed.status !== "active") throw new Error("expected a replayed active export");
+      expect(resumed.replayed).toBe(true);
+      await expect(resumed.session.reconcile({ ...completedMetadata, publishedAt }))
+        .rejects.toThrow(/cannot be reconciled/);
+      expect((await pool!.query<{ terminal: string }>(
+        "SELECT count(*)::text AS terminal FROM agent_bridge.archive_operations WHERE request_id=$1 AND phase='complete'",
+        [interruptedExportRequest],
+      )).rows[0]!.terminal).toBe("0");
+      await resumed.session.abandon("audit_failed");
+      await resumed.session.close();
+
+      const imported = await importPortableArchive(store, bytes, { requestId: importRequest, apply: true });
+      expect(imported).toMatchObject({
+        apply: true, messages: { created: 1, replayed: 0 }, receipts: { created: 1, replayed: 0 },
+      });
+      expect(await importPortableArchive(store, bytes, { requestId: importRequest, apply: true }))
+        .toEqual(imported);
+      expect(await exportPortableArchive(store, workspaceId, sourceExportRequest)).toEqual(bytes);
+
+      for (let index = 0; index < 70; index += 1) {
+        await pool!.query(`INSERT INTO agent_bridge.messages(
+          id,workspace,source,type,content,targets,delivery_mode,created_at
+        ) VALUES($1,$2,'publisher','context',$3,'[]'::jsonb,'mailbox',$4::timestamptz)`, [
+          uuidv7(), workspaceId, `${index}:${"x".repeat(60_000)}`,
+          new Date(Date.UTC(2030, 0, 1) + index).toISOString().replace("Z", "000Z"),
+        ]);
+      }
+      const pageRequest = randomUUID();
+      await archivePool.query(
+        "SELECT * FROM agent_bridge.archive_begin_operation($1,'export',$2,NULL,NULL,NULL)",
+        [pageRequest, workspaceId],
+      );
+      const pageClient = await archivePool.connect();
+      let firstPage: pg.QueryResult<{ content: string }>;
+      try {
+        await pageClient.query("BEGIN ISOLATION LEVEL REPEATABLE READ");
+        await pageClient.query(
+          "SELECT agent_bridge.archive_authorize_transaction($1,'export',$2,NULL)",
+          [pageRequest, workspaceId],
+        );
+        firstPage = await pageClient.query<{ content: string }>(
+          "SELECT content FROM agent_bridge.archive_export_messages($1,$2,NULL,NULL,200)",
+          [pageRequest, workspaceId],
+        );
+      } finally {
+        await pageClient.query("ROLLBACK").catch(() => {});
+        pageClient.release();
+      }
+      expect(firstPage.rows.length).toBeGreaterThan(1);
+      expect(firstPage.rows.length).toBeLessThan(71);
+      expect(firstPage.rows.reduce((total, row) => total + Buffer.byteLength(row.content), 0))
+        .toBeLessThanOrEqual(4_194_304);
+      await archivePool.query(
+        "SELECT * FROM agent_bridge.archive_abandon_operation($1,$2,'not_published')",
+        [pageRequest, workspaceId],
+      );
+      const largeBytes = await exportPortableArchive(store, workspaceId, randomUUID());
+      const largeDecoded = decodePortableArchive(largeBytes);
+      expect(largeDecoded.messages).toHaveLength(71);
+      expect(encodePortableArchive(largeDecoded)).toEqual(largeBytes);
+      const boundaryRequest = randomUUID();
+      const boundaryReplay = await importPortableArchive(store, largeBytes, {
+        requestId: boundaryRequest, apply: true,
+      });
+      expect(boundaryReplay.messages).toEqual({ created: 0, replayed: 71 });
+      expect((await pool!.query<{ batches: string; largest: string }>(`SELECT
+        count(*)::text AS batches,max(record_count)::text AS largest
+        FROM agent_bridge.archive_operation_batches
+        WHERE request_id=$1 AND record_kind='message'`, [boundaryRequest])).rows[0])
+        .toEqual({ batches: "2", largest: "70" });
+      expect((await pool!.query<{ authorizations: string }>(
+        "SELECT count(*)::text AS authorizations FROM agent_bridge.archive_transaction_authorizations WHERE request_id IN ($1,$2)",
+        [importRequest, boundaryRequest],
+      )).rows[0]!.authorizations).toBe("0");
+
+      const expansionWorkspace = `archive-expansion-${randomUUID()}`;
+      const expansionExportRequest = randomUUID();
+      const expansionData = Array.from({ length: 9_000 }, () => 1e308);
+      expect(Buffer.byteLength(canonicalJson(expansionData))).toBeLessThanOrEqual(65_536);
+      const expansionBytes = encodePortableArchive({
+        exportRequestId: expansionExportRequest,
+        workspace: expansionWorkspace,
+        messages: [{
+          ...decoded.messages[0]!, id: uuidv7(), data: expansionData,
+          targets: [], deliveryPolicy: { mode: "mailbox" },
+          createdAt: "2032-01-01T00:00:00.000000Z",
+        }],
+        receipts: [],
+      });
+      await pool!.query("INSERT INTO agent_bridge.workspaces(id,name) VALUES($1,$1)", [expansionWorkspace]);
+      const expansionImport = await importPortableArchive(store, expansionBytes, {
+        requestId: randomUUID(), apply: true,
+      });
+      expect(expansionImport.messages).toEqual({ created: 1, replayed: 0 });
+      const expansionProof = (await pool!.query<{ expanded_bytes: string }>(`SELECT
+        octet_length(data::text)::text AS expanded_bytes FROM agent_bridge.messages
+        WHERE workspace=$1`, [expansionWorkspace])).rows[0]!;
+      expect(Number(expansionProof.expanded_bytes)).toBeGreaterThan(65_536);
+      expect(Number(expansionProof.expanded_bytes)).toBeLessThanOrEqual(3_670_016);
+      expect(await exportPortableArchive(store, expansionWorkspace, expansionExportRequest))
+        .toEqual(expansionBytes);
+
+      for (const [field, payload] of [
+        ["content", "c".repeat(4_300_000)],
+        ["metadata", { blob: "m".repeat(4_300_000) }],
+      ] as const) {
+        const oversizedWorkspace = `archive-oversized-${field}-${randomUUID()}`;
+        const oversizedRequest = randomUUID();
+        await pool!.query("INSERT INTO agent_bridge.workspaces(id,name) VALUES($1,$1)", [oversizedWorkspace]);
+        await pool!.query(`INSERT INTO agent_bridge.messages(
+          id,workspace,source,type,content,metadata,targets,delivery_mode,created_at
+        ) VALUES($1,$2,'publisher','context',$3,$4::jsonb,'[]'::jsonb,'mailbox',
+          '2030-02-01T00:00:00.000000Z')`, [
+          uuidv7(), oversizedWorkspace,
+          field === "content" ? payload : "small",
+          JSON.stringify(field === "metadata" ? payload : null),
+        ]);
+        await archivePool.query(
+          "SELECT * FROM agent_bridge.archive_begin_operation($1,'export',$2,NULL,NULL,NULL)",
+          [oversizedRequest, oversizedWorkspace],
+        );
+        const oversizedExportClient = await archivePool.connect();
+        try {
+          await oversizedExportClient.query("BEGIN ISOLATION LEVEL REPEATABLE READ");
+          await oversizedExportClient.query(
+            "SELECT agent_bridge.archive_authorize_transaction($1,'export',$2,NULL)",
+            [oversizedRequest, oversizedWorkspace],
+          );
+          await expect(oversizedExportClient.query(
+            "SELECT * FROM agent_bridge.archive_export_messages($1,$2,NULL,NULL,200)",
+            [oversizedRequest, oversizedWorkspace],
+          )).rejects.toThrow(/record byte budget/);
+        } finally {
+          await oversizedExportClient.query("ROLLBACK").catch(() => {});
+          oversizedExportClient.release();
+        }
+        await archivePool.query(
+          "SELECT * FROM agent_bridge.archive_abandon_operation($1,$2,'stream_failed')",
+          [oversizedRequest, oversizedWorkspace],
+        );
+      }
+
+      const timezoneRequest = randomUUID();
+      const timezoneDigest = "e".repeat(64);
+      const chicago = await archivePool.connect();
+      const tokyo = await archivePool.connect();
+      try {
+        await chicago.query("SET TIME ZONE 'America/Chicago'");
+        await chicago.query(
+          "SELECT * FROM agent_bridge.archive_begin_operation($1,'export',$2,NULL,NULL,NULL)",
+          [timezoneRequest, workspaceId],
+        );
+        expect((await chicago.query<{ replayed: boolean }>(
+          "SELECT * FROM agent_bridge.archive_reconcile_export($1,$2,$3,7,1,$4::timestamptz)",
+          [timezoneRequest, workspaceId, timezoneDigest, "2026-07-14T12:34:56.123456Z"],
+        )).rows[0]!.replayed).toBe(false);
+        await tokyo.query("SET TIME ZONE 'Asia/Tokyo'");
+        expect((await tokyo.query<{ replayed: boolean }>(
+          "SELECT * FROM agent_bridge.archive_reconcile_export($1,$2,$3,7,1,$4::timestamptz)",
+          [timezoneRequest, workspaceId, timezoneDigest, "2026-07-14T12:34:56.123456Z"],
+        )).rows[0]!.replayed).toBe(true);
+        await expect(tokyo.query(
+          "SELECT agent_bridge.archive_authorize_transaction($1,'export',$2,NULL)",
+          [timezoneRequest, workspaceId],
+        )).rejects.toThrow(/final/);
+      } finally {
+        chicago.release();
+        tokyo.release();
+      }
+
+      await expect(archivePool.query("SELECT token_hash FROM agent_bridge.credentials"))
+        .rejects.toThrow(/permission denied/);
+      await expect(archivePool.query("SELECT * FROM agent_bridge.archive_operations"))
+        .rejects.toThrow(/permission denied/);
+      await expect(archivePool.query(
+        "SELECT * FROM agent_bridge.register_archive_member($1,$2::name)", [randomUUID(), login],
+      )).rejects.toThrow(/permission denied/);
+      await expect(archivePool.query(
+        "SELECT agent_bridge.archive_authorize_transaction($1,'import',$2,$3)",
+        [importRequest, workspaceId, decoded.digest.slice("sha256:".length)],
+      )).rejects.toThrow(/final/);
+
+      const hostileReceiptRequest = randomUUID();
+      await expect(store.importWorkspace(hostileReceiptRequest, {
+        exportRequestId: randomUUID(), workspace: workspaceId, digest: `sha256:${"b".repeat(64)}`,
+        messageCount: 1, receiptCount: 1,
+      }, {
+        async *messageBatches() { yield [decoded.messages[0]!]; },
+        async *receiptBatches() {
+          yield [{ messageId: decoded.messages[0]!.id, principal: "stranger", readAt: "2026-07-14T12:00:00.123000Z" }];
+        },
+      }, { apply: true })).rejects.toThrow(/not eligible/);
+
+      let deepData: unknown = "leaf";
+      for (let depth = 0; depth < 17; depth += 1) deepData = { next: deepData };
+      const leasedPolicy = decoded.messages[0]!.deliveryPolicy.mode === "leased"
+        ? decoded.messages[0]!.deliveryPolicy
+        : { mode: "leased" as const, maxAttempts: 5, retryBaseDelayMs: 1_000, retryMaxDelayMs: 60_000, retryJitterRatio: 0.2 };
+      const invalidMessageCases: Array<[string, typeof decoded.messages[number]]> = [
+        ["uppercase UUID", { ...decoded.messages[0]!, id: decoded.messages[0]!.id.toUpperCase() }],
+        ["whitespace source", { ...decoded.messages[0]!, source: ` ${decoded.messages[0]!.source}` }],
+        ["oversized content", { ...decoded.messages[0]!, content: "x".repeat(65_537) }],
+        ["deep data", { ...decoded.messages[0]!, data: deepData as never }],
+        ["raw oversized data", { ...decoded.messages[0]!, data: "x".repeat(3_700_000) }],
+        ["duplicate targets", { ...decoded.messages[0]!, targets: ["worker", "worker"] }],
+        ["invalid informedBy", { ...decoded.messages[0]!, informedBy: ["sha256:ABC"] }],
+        ["invalid atrib receipt", { ...decoded.messages[0]!, atribReceiptId: "invalid" }],
+        ["fractional attempts", {
+          ...decoded.messages[0]!, deliveryPolicy: { ...leasedPolicy, maxAttempts: 1.5 },
+        }],
+        ["noncanonical delivery window", {
+          ...decoded.messages[0]!, expiresAt: "2026-07-14T13:00:00.000000Z",
+          deliveryPolicy: { ...leasedPolicy, notBefore: "2026-07-14T13:00:00.000000Z" },
+        }],
+      ];
+      for (const [label, invalidMessage] of invalidMessageCases) {
+        const invalidClient = await archivePool.connect();
+        try {
+          await invalidClient.query("BEGIN");
+          const requestId = randomUUID();
+          const digest = "9".repeat(64);
+          await invalidClient.query(
+            "SELECT * FROM agent_bridge.archive_begin_operation($1,'import',$2,$3,1,0)",
+            [requestId, workspaceId, digest],
+          );
+          await invalidClient.query(
+            "SELECT agent_bridge.archive_authorize_transaction($1,'import',$2,$3)",
+            [requestId, workspaceId, digest],
+          );
+          await expectStatementRejected(
+            invalidClient,
+            "SELECT * FROM agent_bridge.archive_import_messages($1,$2,$3,0,$4::jsonb)",
+            [requestId, workspaceId, digest, JSON.stringify([invalidMessage])],
+            /invalid|contract|canonical|policy/,
+          );
+        } catch (error) {
+          throw new Error(`${label}: ${databaseErrorDiagnostic(error)}`);
+        } finally {
+          await invalidClient.query("ROLLBACK").catch(() => {});
+          invalidClient.release();
+        }
+      }
+
+      const invalidReceiptCases = [
+        { ...decoded.receipts[0]!, messageId: decoded.receipts[0]!.messageId.toUpperCase() },
+        { ...decoded.receipts[0]!, principal: "p".repeat(129) },
+        { ...decoded.receipts[0]!, readAt: "2026-07-14T12:00:60.000000Z" },
+      ];
+      for (const invalidReceipt of invalidReceiptCases) {
+        const invalidClient = await archivePool.connect();
+        try {
+          await invalidClient.query("BEGIN");
+          const requestId = randomUUID();
+          const digest = "8".repeat(64);
+          await invalidClient.query(
+            "SELECT * FROM agent_bridge.archive_begin_operation($1,'import',$2,$3,1,1)",
+            [requestId, workspaceId, digest],
+          );
+          await invalidClient.query(
+            "SELECT agent_bridge.archive_authorize_transaction($1,'import',$2,$3)",
+            [requestId, workspaceId, digest],
+          );
+          await invalidClient.query(
+            "SELECT * FROM agent_bridge.archive_import_messages($1,$2,$3,0,$4::jsonb)",
+            [requestId, workspaceId, digest, JSON.stringify([decoded.messages[0]!])],
+          );
+          await expectStatementRejected(
+            invalidClient,
+            "SELECT * FROM agent_bridge.archive_import_receipts($1,$2,$3,0,$4::jsonb)",
+            [requestId, workspaceId, digest, JSON.stringify([invalidReceipt])],
+            /invalid|canonical/,
+          );
+        } finally {
+          await invalidClient.query("ROLLBACK").catch(() => {});
+          invalidClient.release();
+        }
+      }
+
+      const duplicateClient = await archivePool.connect();
+      try {
+        await duplicateClient.query("BEGIN");
+        const requestId = randomUUID();
+        const digest = "d".repeat(64);
+        await duplicateClient.query(
+          "SELECT * FROM agent_bridge.archive_begin_operation($1,'import',$2,$3,1,0)",
+          [requestId, workspaceId, digest],
+        );
+        await duplicateClient.query(
+          "SELECT agent_bridge.archive_authorize_transaction($1,'import',$2,$3)",
+          [requestId, workspaceId, digest],
+        );
+        const exactBatch = JSON.stringify([decoded.messages[0]!]);
+        expect((await duplicateClient.query<{ processed: string; inserted: string }>(
+          "SELECT * FROM agent_bridge.archive_import_messages($1,$2,$3,0,$4::jsonb)",
+          [requestId, workspaceId, digest, exactBatch],
+        )).rows[0]).toEqual({ processed: "1", inserted: "0" });
+        await expectStatementRejected(duplicateClient,
+          "SELECT * FROM agent_bridge.archive_import_messages($1,$2,$3,1,$4::jsonb)",
+          [requestId, workspaceId, digest, exactBatch],
+          /repeated across batches/,
+        );
+        await expectStatementRejected(duplicateClient,
+          "SELECT * FROM agent_bridge.archive_import_messages($1,$2,$3,1,$4::jsonb)",
+          [requestId, workspaceId, digest, JSON.stringify([{ ...decoded.messages[0]!, content: "changed" }])],
+          /repeated with different content/,
+        );
+        expect((await duplicateClient.query<{ message_count: string }>(
+          "SELECT * FROM agent_bridge.archive_complete_import($1,$2,false)",
+          [requestId, workspaceId],
+        )).rows[0]!.message_count).toBe("1");
+      } finally {
+        await duplicateClient.query("ROLLBACK").catch(() => {});
+        duplicateClient.release();
+      }
+
+      const oversized = await archivePool.connect();
+      try {
+        await oversized.query("BEGIN");
+        const requestId = randomUUID();
+        await oversized.query(
+          "SELECT * FROM agent_bridge.archive_begin_operation($1,'import',$2,$3,1,0)",
+          [requestId, workspaceId, "c".repeat(64)],
+        );
+        await oversized.query(
+          "SELECT agent_bridge.archive_authorize_transaction($1,'import',$2,$3)",
+          [requestId, workspaceId, "c".repeat(64)],
+        );
+        await expect(oversized.query(
+          "SELECT * FROM agent_bridge.archive_import_messages($1,$2,$3,0,$4::jsonb)",
+          [requestId, workspaceId, "c".repeat(64), JSON.stringify([{ content: "x".repeat(4_300_000) }])],
+        )).rejects.toThrow(/batch is invalid/);
+      } finally {
+        await oversized.query("ROLLBACK").catch(() => {});
+        oversized.release();
+      }
+
+      const manyWorkspace = `archive-many-${randomUUID()}`;
+      const manyRequest = randomUUID();
+      const manyMessages = Array.from({ length: 250 }, (_, index) => ({
+        ...decoded.messages[0]!, id: uuidv7(), content: `many-${index}`,
+        createdAt: new Date(Date.UTC(2031, 0, 1) + index).toISOString().replace("Z", "000Z"),
+      }));
+      await pool!.query("INSERT INTO agent_bridge.workspaces(id,name) VALUES($1,$1)", [manyWorkspace]);
+      const manyResult = await store.importWorkspace(manyRequest, {
+        exportRequestId: randomUUID(), workspace: manyWorkspace, digest: `sha256:${"f".repeat(64)}`,
+        messageCount: manyMessages.length, receiptCount: 0,
+      }, {
+        async *messageBatches() {
+          for (let offset = 0; offset < manyMessages.length; offset += 100) {
+            yield manyMessages.slice(offset, offset + 100);
+          }
+        },
+        async *receiptBatches() {},
+      }, { apply: true });
+      expect(manyResult.messages).toEqual({ created: 250, replayed: 0 });
+      expect((await pool!.query<{ batches: string; valid_chains: boolean }>(`SELECT
+        count(*)::text AS batches,bool_and(chain_binding~'^[0-9a-f]{64}$') AS valid_chains
+        FROM agent_bridge.archive_operation_batches WHERE request_id=$1`, [manyRequest])).rows[0])
+        .toEqual({ batches: "3", valid_chains: true });
+      expect((await pool!.query<{ definition: string }>(`SELECT
+        pg_get_functiondef('agent_bridge.archive_complete_import(uuid,text,boolean)'::regprocedure)
+          AS definition`)).rows[0]!.definition).not.toContain("string_agg");
+
+      const rowCapWorkspace = `archive-row-cap-${randomUUID()}`;
+      const rowCapRequest = randomUUID();
+      const rowCapMessages = Array.from({ length: 1_000 }, (_, index) => ({
+        ...decoded.messages[0]!, id: uuidv7(), content: `row-cap-${index}`,
+        createdAt: new Date(Date.UTC(2033, 0, 1) + index).toISOString().replace("Z", "000Z"),
+      }));
+      await pool!.query("INSERT INTO agent_bridge.workspaces(id,name) VALUES($1,$1)", [rowCapWorkspace]);
+      expect((await store.importWorkspace(rowCapRequest, {
+        exportRequestId: randomUUID(), workspace: rowCapWorkspace,
+        digest: `sha256:${"7".repeat(64)}`, messageCount: 1_000, receiptCount: 0,
+      }, {
+        async *messageBatches() { yield rowCapMessages; },
+        async *receiptBatches() {},
+      }, { apply: true })).messages).toEqual({ created: 1_000, replayed: 0 });
+      expect((await pool!.query<{ record_count: string }>(`SELECT record_count::text
+        FROM agent_bridge.archive_operation_batches
+        WHERE request_id=$1 AND record_kind='message'`, [rowCapRequest])).rows[0]!.record_count)
+        .toBe("1000");
+      const overCapClient = await archivePool.connect();
+      try {
+        await overCapClient.query("BEGIN");
+        const requestId = randomUUID();
+        const digest = "6".repeat(64);
+        await overCapClient.query(
+          "SELECT * FROM agent_bridge.archive_begin_operation($1,'import',$2,$3,1001,0)",
+          [requestId, rowCapWorkspace, digest],
+        );
+        await overCapClient.query(
+          "SELECT agent_bridge.archive_authorize_transaction($1,'import',$2,$3)",
+          [requestId, rowCapWorkspace, digest],
+        );
+        await expectStatementRejected(
+          overCapClient,
+          "SELECT * FROM agent_bridge.archive_import_messages($1,$2,$3,0,$4::jsonb)",
+          [requestId, rowCapWorkspace, digest, JSON.stringify(Array.from({ length: 1_001 }, () => decoded.messages[0]!))],
+          /batch is invalid/,
+        );
+      } finally {
+        await overCapClient.query("ROLLBACK").catch(() => {});
+        overCapClient.release();
+      }
+
+      await pool!.query(`GRANT INSERT ON agent_bridge.archive_operations TO ${intruder}`);
+      expect((await pool!.query<{ ready: boolean }>(
+        "SELECT agent_bridge.portable_archive_ready() AS ready",
+      )).rows[0]!.ready).toBe(false);
+      await expect(archivePool.query(
+        "SELECT * FROM agent_bridge.archive_begin_operation($1,'export',$2,NULL,NULL,NULL)",
+        [randomUUID(), workspaceId],
+      )).rejects.toThrow(/readiness/);
+      await pool!.query(`REVOKE INSERT ON agent_bridge.archive_operations FROM ${intruder}`);
+      expect((await pool!.query<{ ready: boolean }>(
+        "SELECT agent_bridge.portable_archive_ready() AS ready",
+      )).rows[0]!.ready).toBe(true);
+
+      const driftCases = [
+        `GRANT SELECT(actor) ON agent_bridge.archive_operations TO ${intruder}`,
+        `ALTER DEFAULT PRIVILEGES IN SCHEMA agent_bridge GRANT INSERT ON TABLES TO ${intruder}`,
+        "ALTER TABLE agent_bridge.archive_operations DROP CONSTRAINT archive_operations_counts",
+        "DROP INDEX agent_bridge.archive_operations_workspace_sequence",
+        `ALTER TABLE agent_bridge.archive_operations OWNER TO ${intruder}`,
+        "ALTER TABLE agent_bridge.archive_operations DISABLE TRIGGER archive_operations_append_only",
+        "ALTER TABLE agent_bridge.archive_operations ALTER COLUMN actor DROP NOT NULL",
+        `ALTER FUNCTION agent_bridge.archive_complete_import(uuid,text,boolean) OWNER TO ${intruder}`,
+        "ALTER FUNCTION agent_bridge.archive_complete_import(uuid,text,boolean) SECURITY INVOKER",
+        `GRANT EXECUTE ON FUNCTION agent_bridge.archive_complete_import(uuid,text,boolean) TO ${intruder}`,
+        `DROP INDEX agent_bridge.archive_operations_workspace_sequence;
+         CREATE VIEW agent_bridge.archive_operations_workspace_sequence AS SELECT 1 AS replacement`,
+      ];
+      for (const drift of driftCases) {
+        const driftClient = await pool!.connect();
+        try {
+          await driftClient.query("BEGIN");
+          await driftClient.query(drift);
+          expect((await driftClient.query<{ ready: boolean }>(
+            "SELECT agent_bridge.portable_archive_ready() AS ready",
+          )).rows[0]!.ready, drift).toBe(false);
+        } finally {
+          await driftClient.query("ROLLBACK").catch(() => {});
+          driftClient.release();
+        }
+      }
+
+      const crashedRequest = randomUUID();
+      await archivePool.query(
+        "SELECT * FROM agent_bridge.archive_begin_operation($1,'export',$2,NULL,NULL,NULL)",
+        [crashedRequest, workspaceId],
+      );
+      await pool!.query(
+        "SELECT * FROM agent_bridge.revoke_archive_member($1,$2::name)", [randomUUID(), login],
+      );
+      expect((await pool!.query<{ replayed: boolean }>(
+        "SELECT * FROM agent_bridge.archive_abandon_operation($1,$2,'owner_reconciled')",
+        [crashedRequest, workspaceId],
+      )).rows[0]!.replayed).toBe(false);
+      expect((await pool!.query<{ outcome: string }>(
+        "SELECT outcome FROM agent_bridge.archive_operations WHERE request_id=$1 AND phase='complete'",
+        [crashedRequest],
+      )).rows[0]!.outcome).toBe("abandoned");
+    } finally {
+      await archivePool?.end().catch(() => {});
+      if (priorArchiveUrl === undefined) delete process.env.AGENT_BRIDGE_ARCHIVE_DATABASE_URL;
+      else process.env.AGENT_BRIDGE_ARCHIVE_DATABASE_URL = priorArchiveUrl;
+      await pool!.query(`REVOKE ALL ON agent_bridge.archive_operations FROM ${intruder}`).catch(() => {});
+      await pool!.query(`DROP ROLE IF EXISTS ${login}`).catch(() => {});
+      await pool!.query(`DROP ROLE IF EXISTS ${intruder}`).catch(() => {});
+      rmSync(directory, { recursive: true, force: true });
+    }
+  }, 30_000);
 
   afterAll(async () => {
     await pool?.end();
@@ -1754,8 +2347,10 @@ integration("PostgreSQL BridgeStore integration", () => {
       }
       const rowIsolationMigration = plan[12]!;
       const ownerControlPlaneMigration = plan[13]!;
+      const portableArchiveMigration = plan[14]!;
       expect(rowIsolationMigration).toMatchObject({ version: 13, name: "row_isolation" });
       expect(ownerControlPlaneMigration).toMatchObject({ version: 14, name: "owner_control_plane" });
+      expect(portableArchiveMigration).toMatchObject({ version: 15, name: "portable_archives" });
 
       const workspaceId = "upgrade-row-isolation";
       const messageId = "018f4a70-0000-7000-8000-000000000201";
@@ -1851,6 +2446,11 @@ integration("PostgreSQL BridgeStore integration", () => {
         ownerControlPlaneMigration.source
           .split("__AGENT_BRIDGE_MIGRATION_CHECKSUM__")
           .join(ownerControlPlaneMigration.checksum),
+      );
+      await upgrade.query(
+        portableArchiveMigration.source
+          .split("__AGENT_BRIDGE_MIGRATION_CHECKSUM__")
+          .join(portableArchiveMigration.checksum),
       );
       expect(await migrationsReady(upgrade, plan)).toBe(true);
       expect(await runtimeSchemaReady(upgrade, { allowPrivilegedCaller: true })).toBe(true);
