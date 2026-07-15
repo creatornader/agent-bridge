@@ -5,6 +5,11 @@ on:
     tags:
       - "v*"
   workflow_dispatch:
+    inputs:
+      tag:
+        description: Existing release tag to verify and publish
+        required: true
+        type: string
 
 permissions:
   contents: read
@@ -18,6 +23,7 @@ jobs:
       - uses: actions/checkout@v7
         with:
           fetch-depth: 0
+          ref: ${{ github.event_name == 'workflow_dispatch' && inputs.tag || github.ref }}
       - uses: actions/setup-node@v7
         with:
           node-version: "24"
@@ -26,17 +32,17 @@ jobs:
       - run: npm ci
       - run: npm run check
       - name: Check tag and package versions
-        if: github.ref_type == 'tag'
         shell: bash
+        env:
+          RELEASE_TAG: ${{ github.event_name == 'workflow_dispatch' && inputs.tag || github.ref_name }}
         run: |
           package_version=$(node -p "require('./package.json').version")
-          test "${GITHUB_REF_NAME}" = "v${package_version}"
+          test "${RELEASE_TAG}" = "v${package_version}"
       - name: Check release commit is on main
-        if: github.ref_type == 'tag'
         shell: bash
         run: |
           git fetch --no-tags origin main:refs/remotes/origin/main
-          git merge-base --is-ancestor "${GITHUB_SHA}" "origin/main"
+          git merge-base --is-ancestor "$(git rev-parse HEAD)" "origin/main"
       - name: Build and pack
         run: npm pack --pack-destination "$RUNNER_TEMP"
       - uses: actions/upload-artifact@v7
@@ -48,7 +54,7 @@ jobs:
   publish:
     name: publish npm package
     needs: package
-    if: github.ref_type == 'tag' && vars.NPM_PUBLISH_ENABLED == 'true'
+    if: (github.ref_type == 'tag' || github.event_name == 'workflow_dispatch') && vars.NPM_PUBLISH_ENABLED == 'true'
     runs-on: ubuntu-latest
     environment: npm
     permissions:
@@ -67,4 +73,9 @@ jobs:
       - name: Install OIDC-capable npm
         run: npm install --global npm@latest
       - name: Publish with provenance
-        run: npm publish package/*.tgz --access public
+        shell: bash
+        run: |
+          shopt -s nullglob
+          tarballs=(./package/*.tgz)
+          test "${#tarballs[@]}" -eq 1
+          npm publish "${tarballs[0]}" --access public --provenance
