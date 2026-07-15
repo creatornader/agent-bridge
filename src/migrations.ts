@@ -57,6 +57,34 @@ const REQUIRED_COLUMNS = new Map([
   ["row_isolation_attestations.name", "text"],
   ["row_isolation_attestations.catalog_definition", "text"],
   ["row_isolation_attestations.attested_at", "timestamptz"],
+  ["control_requests.request_id", "uuid"],
+  ["control_requests.operation", "text"],
+  ["control_requests.fingerprint", "bpchar"],
+  ["control_requests.actor", "name"],
+  ["control_requests.result", "jsonb"],
+  ["control_requests.created_at", "timestamptz"],
+  ["control_events.sequence", "int8"],
+  ["control_events.event_id", "uuid"],
+  ["control_events.request_id", "uuid"],
+  ["control_events.operation", "text"],
+  ["control_events.outcome", "text"],
+  ["control_events.actor", "name"],
+  ["control_events.workspace_id", "text"],
+  ["control_events.principal", "text"],
+  ["control_events.credential_id", "uuid"],
+  ["control_events.related_credential_id", "uuid"],
+  ["control_events.reason_code", "text"],
+  ["control_events.created_at", "timestamptz"],
+  ["owner_control_attestations.name", "text"],
+  ["owner_control_attestations.catalog_definition", "text"],
+  ["owner_control_attestations.attested_at", "timestamptz"],
+  ["control_membership_events.sequence", "int8"],
+  ["control_membership_events.request_id", "uuid"],
+  ["control_membership_events.action", "text"],
+  ["control_membership_events.member_role", "name"],
+  ["control_membership_events.control_role", "text"],
+  ["control_membership_events.actor", "name"],
+  ["control_membership_events.created_at", "timestamptz"],
   ["messages.sequence", "int8"],
   ["messages.id", "uuid"],
   ["messages.workspace", "text"],
@@ -121,6 +149,7 @@ export const REQUIRED_MIGRATIONS = [
   { version: 11, name: "credential_security" },
   { version: 12, name: "request_authority" },
   { version: 13, name: "row_isolation" },
+  { version: 14, name: "owner_control_plane" },
 ] as const;
 
 function checksum(source: string): string {
@@ -612,7 +641,10 @@ export async function runtimeSchemaReady(
     const security = await db.query<{ ready: boolean }>(
       "SELECT agent_bridge.security_schema_ready() AS ready",
     );
-    return security.rows[0]?.ready === true && await rowIsolationReady(
+    const ownerControl = await db.query<{ ready: boolean }>(
+      "SELECT agent_bridge.owner_control_plane_ready() AS ready",
+    );
+    return security.rows[0]?.ready === true && ownerControl.rows[0]?.ready === true && await rowIsolationReady(
       db,
       options.allowPrivilegedCaller === true,
     );

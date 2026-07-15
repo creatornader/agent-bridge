@@ -66,7 +66,9 @@ A2A and application task semantics sit above Agent Bridge. MCP, CLI, and HTTPS a
 
 - Node.js 22.23.1 or newer.
 - SQLite 3.51.3 or newer for local and edge storage. The supported Node version includes it.
-- PostgreSQL 15 or newer for gateway mode.
+- PostgreSQL 15, 16, 17, or 18 for gateway mode. New PostgreSQL majors fail the
+  migration prerequisite and live readiness checks until their catalog digest is
+  certified.
 
 ## Install from source
 
@@ -165,21 +167,125 @@ $grant$;
 
 The database-derived suffix prevents a gateway login for one database from inheriting access to another Agent Bridge database on the same PostgreSQL cluster. Do not grant the login another database's runtime role.
 
-Create a workspace, agent, and credential with the migration or provisioning connection. Store only a SHA-256 token hash:
+Migration 014 provides the database owner control plane. The schema-owner connection
+registers provisioning and inventory logins with `register_control_member`. It can
+remove them with `revoke_control_member`. Do not grant the database-specific operator,
+auditor, or owner roles directly. Operators call the narrow
+`control_provision`, `control_rotate_credential`, and `control_revoke_credential`
+functions with a fresh request UUID. Operators and auditors can call
+`control_credential_inventory`; it never exposes credential digest material. Inventory
+accepts an optional workspace, an optional `(created_at, credential_id)` cursor, and
+a row limit. The default is 100 rows and the maximum is 1,000.
 
-```sql
-insert into agent_bridge.workspaces (id, name)
-values ('team', 'Team');
+Each mutation takes a transaction lock for its request UUID before checking the
+request ledger. An identical concurrent call returns the stored result. Reusing the
+UUID with changed content fails. Provisioning reuses an existing workspace only when
+its name matches, so one workspace can contain several principals. Rotation supports
+credentials without an expiry and a null grace cutoff for immediate replacement.
+The database derives the audit actor from `session_user`.
 
-insert into agent_bridge.agents (workspace_id, principal, runtime_type)
-values ('team', 'codex', 'codex')
-returning id;
+This temporary operator workflow creates an eligible login, registers it through
+the protected SQL boundary, and provisions a token-bound `codex` principal. Node
+generates the raw token and its hash locally. PostgreSQL receives only the hash.
 
-insert into agent_bridge.credentials (workspace_id, agent_id, token_hash, label)
-values ('team', '<agent uuid>', '<sha256 token hash>', 'codex laptop');
+```bash
+OPERATOR_LOGIN="agent_bridge_operator_$(date +%s)"
+OPERATOR_PASSWORD="$(node -e "process.stdout.write(require('node:crypto').randomBytes(32).toString('hex'))")"
+RAW_TOKEN="$(node -e "process.stdout.write(require('node:crypto').randomBytes(32).toString('hex'))")"
+TOKEN_HASH="$(RAW_TOKEN="$RAW_TOKEN" node -e "process.stdout.write(require('node:crypto').createHash('sha256').update(process.env.RAW_TOKEN).digest('hex'))")"
+MEMBERSHIP_REQUEST="$(node -e "process.stdout.write(require('node:crypto').randomUUID())")"
+PROVISION_REQUEST="$(node -e "process.stdout.write(require('node:crypto').randomUUID())")"
+export AGENT_BRIDGE_OPERATOR_LOGIN="$OPERATOR_LOGIN"
+export AGENT_BRIDGE_OPERATOR_PASSWORD="$OPERATOR_PASSWORD"
+export AGENT_BRIDGE_MEMBERSHIP_REQUEST="$MEMBERSHIP_REQUEST"
+export AGENT_BRIDGE_PROVISION_REQUEST="$PROVISION_REQUEST"
+export AGENT_BRIDGE_TOKEN_HASH="$TOKEN_HASH"
+
+psql -v ON_ERROR_STOP=1 "$AGENT_BRIDGE_DATABASE_URL" <<'SQL'
+\getenv operator_login AGENT_BRIDGE_OPERATOR_LOGIN
+\getenv operator_password AGENT_BRIDGE_OPERATOR_PASSWORD
+\getenv membership_request AGENT_BRIDGE_MEMBERSHIP_REQUEST
+SELECT format(
+  'CREATE ROLE %I LOGIN PASSWORD %L',
+  :'operator_login',
+  :'operator_password'
+) \gexec
+SELECT * FROM agent_bridge.register_control_member(
+  :'membership_request'::uuid,
+  :'operator_login'::name,
+  'operator'
+);
+SQL
+
+PGPASSWORD="$OPERATOR_PASSWORD" psql -v ON_ERROR_STOP=1 "$AGENT_BRIDGE_DATABASE_URL" \
+  --username="$OPERATOR_LOGIN" <<'SQL'
+\getenv provision_request AGENT_BRIDGE_PROVISION_REQUEST
+\getenv token_hash AGENT_BRIDGE_TOKEN_HASH
+SELECT * FROM agent_bridge.control_provision(
+  :'provision_request'::uuid,
+  'team',
+  'Team',
+  'codex',
+  'Codex',
+  'codex',
+  :'token_hash'::char(64),
+  'codex',
+  'release-a-full',
+  NULL
+);
+SQL
+
+AGENT_BRIDGE_CLIENT_TOKEN="$RAW_TOKEN" \
+  agent-bridge clients install codex --identity codex
+unset RAW_TOKEN TOKEN_HASH AGENT_BRIDGE_TOKEN_HASH
+
+REVOKE_REQUEST="$(node -e "process.stdout.write(require('node:crypto').randomUUID())")"
+export AGENT_BRIDGE_REVOKE_REQUEST="$REVOKE_REQUEST"
+psql -v ON_ERROR_STOP=1 "$AGENT_BRIDGE_DATABASE_URL" <<'SQL'
+\getenv operator_login AGENT_BRIDGE_OPERATOR_LOGIN
+\getenv revoke_request AGENT_BRIDGE_REVOKE_REQUEST
+SELECT * FROM agent_bridge.revoke_control_member(
+  :'revoke_request'::uuid,
+  :'operator_login'::name,
+  'operator'
+);
+SELECT format('DROP ROLE %I', :'operator_login') \gexec
+SQL
+unset OPERATOR_PASSWORD AGENT_BRIDGE_OPERATOR_PASSWORD
+unset AGENT_BRIDGE_OPERATOR_LOGIN AGENT_BRIDGE_MEMBERSHIP_REQUEST
+unset AGENT_BRIDGE_PROVISION_REQUEST AGENT_BRIDGE_REVOKE_REQUEST
 ```
 
-Migration 011 gives direct inserts the full compatibility scope set. This keeps the released provisioning command working until owner commands replace raw SQL. A capabilities-only credential may use an empty `scopes` array. Custom arrays must use only the declared scopes, without duplicates, in lexical order. Repeat the agent and credential inserts for Claude Code, Claude Desktop, or any other principal. Each plaintext token should be random, unique, and shown only to the matching client installer.
+The installer does not provision the credential. It stores the already-provisioned
+raw token in the client's owner-only backend file. Configure the shared gateway URL
+and workspace before the install, and use the same principal for `control_provision`
+and `--identity`. The final SQL block revokes and drops the temporary operator after
+the client installation has stored the credential.
+
+Control membership is an offline SQL administration boundary. The gateway and MCP
+server do not expose it. Runtime readiness compares PostgreSQL membership with the
+append-only registry. It fails for an unregistered operator or auditor, an external
+owner holder, a missing registered grant, any extra role inherited by a registered
+member, or any role that inherits a registered member. Protected operations recheck
+the live registry and direct membership after taking a member-global transaction lock,
+followed by capability locks in operator-before-auditor order. Registration and
+revocation use the same order. A stale session that remains in a revoked role cannot
+continue operating. The schema owner is the only bootstrap holder of all three control
+roles and the only role with ordinary execution authority on the registration
+functions. PostgreSQL superusers remain inside this trusted database-administration
+boundary. Readiness checks the running PostgreSQL major on every call, so upgrading an
+already-migrated database to an uncertified major disables the runtime.
+
+Direct credential inserts default to empty scopes rather than full access. Issued
+identity, scope, label, expiry, and lineage fields cannot be edited directly. Existing
+migration-013 rows retain their values and remain revocable during upgrade. Runtime
+readiness compares the live owner-control catalog with the protected migration-014
+attestation. Migration 014 refuses to create that baseline if critical workspace,
+agent, credential, index, trigger, function, ownership, or row-isolation dependencies
+have already drifted. Unrelated additive schema objects do not change readiness.
+The migration also blocks unsafe direct and default privileges on protected objects.
+Global and workspace inventory use fixed-origin expression indexes for their keyset
+ordering.
 
 Start the gateway:
 
