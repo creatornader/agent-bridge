@@ -4,6 +4,9 @@ import { join } from "node:path";
 import type { PgQueryable } from "./postgres-bridge-store.js";
 
 const MIGRATION_NAME = /^(\d+)_([a-z0-9_]+)\.sql$/;
+// Native DR holds this database-local key with pg_advisory_lock. Migration and
+// Agent Bridge membership mutations take the shared transaction form.
+export const NATIVE_DR_ADVISORY_LOCK_KEY = 1646705664;
 const REQUIRED_COLUMNS = new Map([
   ["workspaces.id", "text"],
   ["agents.id", "uuid"],
@@ -205,7 +208,18 @@ export const REQUIRED_MIGRATIONS = [
   { version: 13, name: "row_isolation" },
   { version: 14, name: "owner_control_plane" },
   { version: 15, name: "portable_archives" },
+  { version: 16, name: "native_dr_fence" },
 ] as const;
+
+function withNativeDrSharedLock(source: string): string {
+  if (!/^begin;\s/i.test(source)) {
+    throw new Error("migration must begin with an explicit transaction");
+  }
+  return source.replace(
+    /^begin;\s/i,
+    `begin;\n\nselect pg_advisory_xact_lock_shared(${NATIVE_DR_ADVISORY_LOCK_KEY});\n\n`,
+  );
+}
 
 function checksum(source: string): string {
   return createHash("sha256").update(source, "utf8").digest("hex");
@@ -262,7 +276,7 @@ export async function migrationsReady(
   ) && applied.length === expected.length;
 }
 
-async function rowIsolationReady(db: PgQueryable, allowPrivilegedCaller: boolean): Promise<boolean> {
+export async function rowIsolationReady(db: PgQueryable, allowPrivilegedCaller: boolean): Promise<boolean> {
   const result = await db.query<{
     rolesReady: boolean;
     callerReady: boolean;
@@ -727,9 +741,9 @@ export async function runMigrations(
       }
       continue;
     }
-    await db.query(
+    await db.query(withNativeDrSharedLock(
       migration.source.split("__AGENT_BRIDGE_MIGRATION_CHECKSUM__").join(migration.checksum),
-    );
+    ));
     const verified = (await recordedMigrations(db)).find(
       (entry) => entry.version === migration.version,
     );

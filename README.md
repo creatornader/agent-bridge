@@ -184,6 +184,91 @@ messages, then replays receipts through the same descriptor. Every pass checks f
 order, counts, and the client-computed digest. Batches are limited by row count and a
 4 MiB byte budget. `--dry-run` and `--apply` are mutually exclusive.
 
+## Native disaster recovery
+
+Native DR preserves one complete local authority or shared PostgreSQL deployment. Use
+it for recovery, not for moving a workspace between providers. The framed `.abdr`
+bundle records its provider, schema contract, and entry hashes. Commands calculate and
+return a separate whole-file SHA-256 digest. The hashes detect changed bytes. The bundle
+is not encrypted or authenticated, and it may contain credentials and message content.
+Store and transfer it as private database material.
+
+Local backup uses SQLite's online backup API, so the source may remain open. It accepts
+only the local authority database. Gateway edge caches and outboxes are rejected because
+PostgreSQL remains their authority. Restore requires a new target path and verifies the
+exact local schema contract before publication.
+
+```bash
+agent-bridge dr backup \
+  --provider local \
+  --source "$HOME/.agent-bridge/bridge.sqlite3" \
+  --output "$HOME/.agent-bridge/archives/local.abdr" \
+  --backup-id 00000000-0000-4000-8000-000000000010
+
+agent-bridge dr verify \
+  --provider local \
+  --bundle "$HOME/.agent-bridge/archives/local.abdr"
+
+agent-bridge dr restore \
+  --provider local \
+  --bundle "$HOME/.agent-bridge/archives/local.abdr" \
+  --target /path/to/new-bridge.sqlite3 \
+  --request-id 00000000-0000-4000-8000-000000000011
+```
+
+PostgreSQL backup takes a repeatable-read snapshot while holding the native DR fence.
+It stores the `agent_bridge` schema dump plus a canonical inventory of required roles,
+memberships, and default privileges. The backup excludes transient data from agent
+instances, rate-limit buckets, request authority, and archive transaction authority.
+Restore turns claimed deliveries into immediately retryable work because a database
+restore cannot preserve a live lease.
+
+PostgreSQL authority comes only from the process environment. Backup reads
+`AGENT_BRIDGE_DR_SOURCE_DATABASE_URL`; restore reads
+`AGENT_BRIDGE_DR_TARGET_DATABASE_URL`. URLs are not accepted as command arguments.
+`pg_dump` and `pg_restore` must match the database major exactly. Native DR supports
+PostgreSQL 15 through 18. If matching tools are not on `PATH`, pass their directory to
+PostgreSQL backup, verify, or restore with `--tool-directory`. Local verification does
+not use PostgreSQL tools and rejects that option.
+
+```bash
+AGENT_BRIDGE_DR_SOURCE_DATABASE_URL='postgresql://backup-admin@db/agent_bridge' \
+  agent-bridge dr backup \
+    --provider postgres \
+    --output "$HOME/.agent-bridge/archives/postgres.abdr" \
+    --backup-id 00000000-0000-4000-8000-000000000020
+
+agent-bridge dr verify \
+  --provider postgres \
+  --bundle "$HOME/.agent-bridge/archives/postgres.abdr"
+
+AGENT_BRIDGE_DR_TARGET_DATABASE_URL='postgresql://restore-admin@new-db/agent_bridge' \
+  agent-bridge dr restore \
+    --provider postgres \
+    --bundle "$HOME/.agent-bridge/archives/postgres.abdr" \
+    --request-id 00000000-0000-4000-8000-000000000021 \
+    --accept-source-sql-risk
+```
+
+PostgreSQL restore executes SQL from the dump, so use `--accept-source-sql-risk` only
+for a bundle from a source you trust. The target must be a dedicated fresh database
+with the same database name and PostgreSQL major as the backup. Restore requires a
+superuser because it recreates object owners, role shells, memberships, and default
+privileges. It never enables login on restored external principals. If a restore fails
+after mutation begins, Agent Bridge disables new target connections and reports any
+residual roles or recovery paths. Inspect and clean those artifacts before retrying.
+Never run the source and restored target as active authorities at the same time.
+
+Backup publication never replaces an existing output. Deterministic adjacent staging
+paths use the backup or request UUID. A retry with the same UUID reports retained
+recovery paths instead of overwriting them. File and directory synchronization is
+strongest on platforms that support directory fsync; Windows cannot provide the same
+directory durability proof. Successful Windows commands report
+`directoryDurability: "unavailable"` or
+`cleanupDirectoryDurability: "unavailable"` instead of claiming that proof. The
+library API is available from
+`@creatornader/agent-bridge/dr`.
+
 ## Install client integrations
 
 Agent identity and gateway credentials belong to each client process, not the shared `~/.agent-bridge/config` file.

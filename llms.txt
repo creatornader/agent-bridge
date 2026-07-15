@@ -28,6 +28,7 @@ History uses mailbox `inbox` (default), `sent`, or `all`. Receipt state is `any`
 - agent-bridge owner provision|inventory|rotate|revoke
 - agent-bridge clients install <runtime> --enrollment-file <private path>
 - agent-bridge archive export|verify|import
+- agent-bridge dr backup|verify|restore
 
 Archive export moves one workspace's immutable messages and read receipts between
 canonical local SQLite and PostgreSQL stores. Import defaults to a rollback-backed dry
@@ -47,6 +48,17 @@ Same-ID export retries verify completed files or reconcile matching started file
 without streaming again. Deterministic adjacent recovery files are derived from the
 export ID. Force replacement keeps a private backup until the new file is durable and
 reports recovery paths plus backup, durability, and audit uncertainty.
+
+Native DR preserves a complete local SQLite authority or shared PostgreSQL authority;
+it does not translate between providers. Local DR rejects gateway edge stores.
+PostgreSQL source and target URLs come only from AGENT_BRIDGE_DR_SOURCE_DATABASE_URL
+and AGENT_BRIDGE_DR_TARGET_DATABASE_URL. Restore requires a dedicated fresh database
+with the same name and PostgreSQL major, superuser authority, an explicit request ID,
+and --accept-source-sql-risk. The backup includes role membership and default ACL state,
+excludes transient request, rate-limit, instance, and archive-authorization rows, and
+normalizes claimed deliveries on restore. Never run source and restored target at the
+same time. The package API is @creatornader/agent-bridge/dr. Bundle hashes detect
+changed bytes but do not encrypt or authenticate the source.
 
 ## MCP tools
 

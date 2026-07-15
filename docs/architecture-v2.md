@@ -89,6 +89,59 @@ use UTC with six fractional digits. The archive path does not trim, deduplicate,
 default, or rewrite message content. A legacy or direct database row outside this
 domain fails export and requires native database recovery.
 
+### Native DR preserves one storage authority
+
+Native disaster recovery is separate from portable workspace archives. A native DR
+bundle preserves one full local SQLite authority or the shared PostgreSQL authority in
+its native schema. It does not translate between providers. Gateway edge SQLite files
+are excluded because they contain a replayable outbox and cache, not the shared source
+of truth.
+
+The common framed format has a canonical manifest, provider-specific entries, and
+per-entry SHA-256 hashes. Commands calculate and return a separate whole-bundle hash.
+Readers validate strict framing, size bounds, entry order, provider kind, and exact
+schema metadata. The hashes detect changed bytes but do not authenticate or encrypt
+the backup. Paths must pass the private-path
+policy. Publication uses an exclusive adjacent file, file synchronization, a no-replace
+hard link, post-publication verification, and directory synchronization where the
+platform supports it. Deterministic stage names include the operation UUID. Existing
+stages fail closed and are returned as recovery paths. Node cannot prove parent-directory
+entry synchronization on Windows. Successful Windows results report that directory
+durability as unavailable while still requiring file-content synchronization and
+post-publication verification.
+
+Local backup accepts only a current or upgradeable local-authority SQLite database. It
+uses the online backup API in a worker with a hard deadline, then verifies health and
+the exact schema contract before framing the snapshot. Restore extracts through one
+exclusive descriptor, verifies the contract, and publishes only to a new target. Edge
+cache and legacy edge files are rejected. Worker termination that cannot be proved is
+reported with the possible residue instead of being treated as a clean timeout.
+
+PostgreSQL backup takes a repeatable-read exported snapshot while holding the native DR
+advisory fence. `pg_dump` captures only the `agent_bridge` schema. A separate canonical
+role inventory records the bounded role shells, membership options, and global or
+schema-scoped default ACLs that a schema-only dump omits. The dump excludes data for
+agent instances, rate-limit buckets, request authorities, and archive transaction
+authorizations. The manifest binds migration inventory, table counts, claimed-delivery
+count, tool major, role inventory, and the security, row-isolation, owner-control, and
+portable-archive readiness definitions.
+
+PostgreSQL restore requires a dedicated fresh database, the same database name and
+server major, an exact-major `pg_restore`, and superuser authority. It restores role
+shells as `NOLOGIN`, then schema objects, memberships, and default privileges. Claimed
+deliveries become retrying deliveries with cleared leases. The restore checks migrations,
+counts, role inventory, and every readiness attestation before success. External
+principals remain `NOLOGIN`. A failure after target mutation begins disables new target
+connections. If that offlining step fails, the command reports the target as unsafe and
+lists residual role shells.
+
+PostgreSQL source and target URLs come only from
+`AGENT_BRIDGE_DR_SOURCE_DATABASE_URL` and
+`AGENT_BRIDGE_DR_TARGET_DATABASE_URL`. Restore requires explicit acceptance that a
+trusted PostgreSQL dump contains executable SQL. Source and restored target must never
+run concurrently as authorities. Native DR supports PostgreSQL 15 through 18
+and rejects a tool or server major mismatch.
+
 ### Messages are immutable
 
 The protocol stores message content and routing fields in an immutable message record. Read and execution state live in separate tables.

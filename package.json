@@ -68,6 +68,10 @@
     "./archive": {
       "types": "./dist/archive.d.ts",
       "import": "./dist/archive.js"
+    },
+    "./dr": {
+      "types": "./dist/dr.d.ts",
+      "import": "./dist/dr.js"
     }
   },
   "scripts": {

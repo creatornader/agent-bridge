@@ -242,6 +242,7 @@ begin
   ) or exists (
     select 1 from pg_catalog.pg_roles candidate
     where candidate.rolname not in (session_user,schema_owner)
+      and not candidate.rolsuper
       and pg_catalog.pg_has_role(candidate.rolname,session_user,'MEMBER')
   ) or exists (
     select 1 from pg_catalog.pg_roles actor where actor.rolname=session_user and (
@@ -306,6 +307,7 @@ begin
   ) or exists (
     select 1 from pg_catalog.pg_roles candidate
     where candidate.rolname not in (requested_member_role,current_user)
+      and not candidate.rolsuper
       and pg_catalog.pg_has_role(candidate.rolname,requested_member_role,'MEMBER')
   ) then
     raise exception 'archive membership target has an unsafe membership graph';
@@ -1583,6 +1585,7 @@ returns boolean language sql stable security definer set search_path = '' as $$
         and inherited.rolname<>names.archive_role)
     and not exists(select 1 from active_registry registry cross join pg_catalog.pg_roles candidate,names
       where candidate.rolname not in (registry.member_role,names.schema_owner)
+        and not candidate.rolsuper
         and pg_catalog.pg_has_role(candidate.rolname,registry.member_role,'MEMBER'))
     and has_schema_privilege((select archive_role from names),'agent_bridge','USAGE')
     and not has_schema_privilege((select archive_role from names),'agent_bridge','CREATE')
@@ -1732,6 +1735,7 @@ returns boolean language sql stable security definer set search_path = '' as $$
     ) control_role(granted_role)
     cross join pg_catalog.pg_roles candidate
     where candidate.rolname not in (names.owner_role,names.operator_role,names.auditor_role)
+      and (not candidate.rolsuper or candidate.rolname=names.schema_owner)
       and pg_catalog.pg_has_role(candidate.rolname,control_role.granted_role,'MEMBER')
   )
   select
@@ -1783,6 +1787,7 @@ returns boolean language sql stable security definer set search_path = '' as $$
       cross join pg_catalog.pg_roles candidate
       cross join names
       where candidate.rolname not in (registry.member_role,names.schema_owner)
+        and not candidate.rolsuper
         and pg_catalog.pg_has_role(candidate.rolname,registry.member_role,'MEMBER')
     )
 $$;

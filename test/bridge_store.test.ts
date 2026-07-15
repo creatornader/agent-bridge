@@ -1,22 +1,39 @@
 import { execFile } from "node:child_process";
-import { mkdtempSync, rmSync } from "node:fs";
+import { rmSync } from "node:fs";
 import { createRequire } from "node:module";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { pathToFileURL } from "node:url";
 import { promisify } from "node:util";
+import type { DatabaseSync as Database } from "node:sqlite";
 import { afterEach, describe, expect, it } from "vitest";
 import { BridgeService } from "../src/bridge-service.js";
 import { encodeCursor } from "../src/bridge-domain.js";
 import { SQLiteBridgeStore } from "../src/sqlite-bridge-store.js";
+import { LOCAL_SQLITE_SCHEMA_CONTRACTS, sqliteSchemaContractHash } from "../src/sqlite-database-contract.js";
+import { privateTestDirectory, secureTestFile } from "./private-test-path.js";
 
 const temporaryDirectories: string[] = [];
 const stores: SQLiteBridgeStore[] = [];
 const require = createRequire(import.meta.url);
 const execFileAsync = promisify(execFile);
 
+function expectUpgradedMessageInsertContract(db: Database, contractId: string): void {
+  const expected = LOCAL_SQLITE_SCHEMA_CONTRACTS.find((contract) => contract.id === contractId);
+  expect(expected).toBeDefined();
+  expect(sqliteSchemaContractHash(db)).toBe(expected!.sha256);
+  const insert = db.prepare(`INSERT INTO bridge_messages
+    (id,workspace,source,type,content,content_type,targets,priority,delivery_policy,created_at)
+    VALUES (?,'acme','contract-test','note','contract','text/plain',?,?,?,'2026-07-15T00:00:00.000Z')`);
+  expect(() => insert.run(`${contractId}-targets`, "not-json", "info", '{"mode":"mailbox"}')).toThrow(/invalid message domain|malformed JSON|CHECK constraint/);
+  expect(() => insert.run(`${contractId}-priority`, "[]", "invalid", '{"mode":"mailbox"}')).toThrow(/invalid message domain|CHECK constraint/);
+  expect(() => insert.run(`${contractId}-policy`, "[]", "info", '{"mode":"mailbox","maxAttempts":2}')).toThrow(/invalid delivery policy|CHECK constraint/);
+  expect(() => insert.run(`${contractId}-mailbox`, "[]", "info", '{"mode":"mailbox"}')).not.toThrow();
+  expect(() => insert.run(`${contractId}-leased`, '["worker"]', "urgent", '{"mode":"leased","maxAttempts":2,"retryBaseDelayMs":1,"retryMaxDelayMs":2,"retryJitterRatio":0}')).not.toThrow();
+}
+
 function createStore() {
-  const directory = mkdtempSync(join(tmpdir(), "agent-bridge-v2-"));
+  const directory = privateTestDirectory("agent-bridge-v2-");
   temporaryDirectories.push(directory);
   const store = new SQLiteBridgeStore(join(directory, "bridge.sqlite"));
   stores.push(store);
@@ -585,7 +602,7 @@ bridgeStoreContract("SQLite", createStore);
 
 describe("SQLite project schema upgrade", () => {
   it("claims exact same-time work by urgent, high, info, then delivery ID", async () => {
-    const directory = mkdtempSync(join(tmpdir(), "agent-bridge-priority-")); temporaryDirectories.push(directory);
+    const directory = privateTestDirectory("agent-bridge-priority-"); temporaryDirectories.push(directory);
     const path = join(directory, "bridge.sqlite"); const store = new SQLiteBridgeStore(path); stores.push(store);
     const service = new BridgeService(store); const publisher = { workspace: "acme", agent: "publisher" };
     const worker = { workspace: "acme", agent: "worker", instance: "one" };
@@ -619,7 +636,7 @@ describe("SQLite project schema upgrade", () => {
   });
 
   it("adds the project column without losing messages from the prior schema", async () => {
-    const directory = mkdtempSync(join(tmpdir(), "agent-bridge-v2-upgrade-"));
+    const directory = privateTestDirectory("agent-bridge-v2-upgrade-");
     temporaryDirectories.push(directory);
     const path = join(directory, "bridge.sqlite");
     const { DatabaseSync } = require("node:sqlite") as typeof import("node:sqlite");
@@ -641,7 +658,7 @@ describe("SQLite project schema upgrade", () => {
         ('018f4a70-0000-7000-8000-000000000099', 'acme', 'codex', 'note',
          'before project labels', 'text/plain', '[]', 'info', '2026-07-14T00:00:00.000Z');
     `);
-    legacy.close();
+    legacy.close(); secureTestFile(path);
 
     const store = new SQLiteBridgeStore(path);
     stores.push(store);
@@ -653,10 +670,13 @@ describe("SQLite project schema upgrade", () => {
       content: "before project labels",
     });
     expect(page.messages[0]?.project).toBeUndefined();
+    const upgraded = new DatabaseSync(path);
+    expectUpgradedMessageInsertContract(upgraded, "current-upgraded-project-column");
+    upgraded.close();
   });
 
   it("preserves modern policies across restart and rejects invalid direct SQL", async () => {
-    const directory = mkdtempSync(join(tmpdir(), "agent-bridge-policy-restart-"));
+    const directory = privateTestDirectory("agent-bridge-policy-restart-");
     temporaryDirectories.push(directory);
     const path = join(directory, "bridge.sqlite");
     const firstStore = new SQLiteBridgeStore(path);
@@ -723,7 +743,7 @@ describe("SQLite project schema upgrade", () => {
   });
 
   it("rewrites only legacy policy rows and preserves unknown policy fields", async () => {
-    const directory = mkdtempSync(join(tmpdir(), "agent-bridge-policy-upgrade-"));
+    const directory = privateTestDirectory("agent-bridge-policy-upgrade-");
     temporaryDirectories.push(directory);
     const path = join(directory, "bridge.sqlite");
     const { DatabaseSync } = require("node:sqlite") as typeof import("node:sqlite");
@@ -744,7 +764,7 @@ describe("SQLite project schema upgrade", () => {
     insert.run("modern-mailbox", "targeted mailbox", '["worker"]', modernMailbox);
     insert.run("legacy-mailbox", "legacy mailbox", '["worker"]', '{"mode":"mailbox","publisherOwned":true,"maxAttempts":7,"futureMailbox":"keep"}');
     insert.run("legacy-leased", "legacy leased", '["worker"]', '{"mode":"leased","publisherOwned":true,"maxAttempts":4,"baseDelayMs":2000,"maxDelayMs":70000,"jitterRatio":0.3,"futureLeased":"keep"}');
-    legacy.close();
+    legacy.close(); secureTestFile(path);
 
     const store = new SQLiteBridgeStore(path);
     await store.initialize();
@@ -760,11 +780,12 @@ describe("SQLite project schema upgrade", () => {
       mode: "leased", maxAttempts: 4, retryBaseDelayMs: 2_000,
       retryMaxDelayMs: 70_000, retryJitterRatio: 0.3, futureLeased: "keep",
     });
+    expectUpgradedMessageInsertContract(upgraded, "current-upgraded-delivery-policy");
     upgraded.close();
   });
 
   it("allows concurrent processes to upgrade legacy messages, deliveries, and events", async () => {
-    const directory = mkdtempSync(join(tmpdir(), "agent-bridge-v2-concurrent-upgrade-"));
+    const directory = privateTestDirectory("agent-bridge-v2-concurrent-upgrade-");
     temporaryDirectories.push(directory);
     const path = join(directory, "bridge.sqlite");
     const { DatabaseSync } = require("node:sqlite") as typeof import("node:sqlite");
@@ -812,7 +833,7 @@ describe("SQLite project schema upgrade", () => {
         ('018f4a70-0000-7000-8000-000000000097','018f4a70-0000-7000-8000-000000000098','acme','worker','claimed','dead',2,NULL,'legacy failure','2026-07-13T23:59:59.000Z'),
         ('018f4a70-0000-7000-8000-000000000097','018f4a70-0000-7000-8000-000000000098','acme','worker','claimed','dead',2,NULL,'maximum attempts reached','2026-07-14T00:00:00.000Z');
     `);
-    legacy.close();
+    legacy.close(); secureTestFile(path);
 
     const sqliteModule = pathToFileURL(join(process.cwd(), "dist/sqlite.js")).href;
     const script = `
@@ -845,6 +866,7 @@ describe("SQLite project schema upgrade", () => {
       { action: "nack_dead", actor: "worker-instance" },
       { action: "attempts_exhausted", actor: "agent-bridge" },
     ]);
+    expectUpgradedMessageInsertContract(upgraded, "current-upgraded-delivery-events");
     upgraded.close();
   }, 15_000);
 });
