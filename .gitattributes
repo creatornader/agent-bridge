@@ -1,0 +1,2 @@
+schemas/*.json text eol=lf
+openapi/*.json text eol=lf
