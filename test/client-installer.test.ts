@@ -1,7 +1,10 @@
-import { existsSync, mkdtempSync, readFileSync, rmSync, statSync } from "node:fs";
+import {
+  chmodSync, existsSync, mkdtempSync, mkdirSync, readFileSync, rmSync, statSync,
+  writeFileSync,
+} from "node:fs";
 import { randomUUID } from "node:crypto";
 import { tmpdir } from "node:os";
-import { dirname, join } from "node:path";
+import { dirname, join, resolve } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import { installClient } from "../src/client-installer.js";
 import {
@@ -138,12 +141,73 @@ describe("client installer", () => {
     });
     const config = JSON.parse(readFileSync(result.configPath!, "utf8"));
     expect(config.mcpServers["agent-bridge"]).toEqual({
-      command: "agent-bridge-mcp",
+      command: process.execPath,
+      args: [resolve("dist/index.js")],
       env: {
         AGENT_BRIDGE_AGENT: "claude-desktop",
         AGENT_BRIDGE_INSTANCE: "desktop-machine-a",
         AGENT_BRIDGE_CONFIG: result.backendConfigPath,
       },
+    });
+  });
+
+  it("rejects a missing explicit Claude Desktop executable", () => {
+    const home = mkdtempSync(join(tmpdir(), "agent-bridge-desktop-"));
+    directories.push(home);
+    const missing = join(home, "missing", "agent-bridge-mcp");
+    expect(() => installClient("claude-desktop", "claude-desktop", {
+      command: missing,
+      env: { HOME: home, APPDATA: join(home, "AppData", "Roaming") },
+      instance: "desktop-machine-a",
+    })).toThrow(`Claude Desktop MCP executable does not exist: ${missing}`);
+  });
+
+  it("resolves an explicit Claude Desktop executable before persisting it", () => {
+    const home = mkdtempSync(join(tmpdir(), "agent-bridge-desktop-"));
+    directories.push(home);
+    const bin = join(home, "bin");
+    mkdirSync(bin);
+    const name = process.platform === "win32" ? "custom-bridge.CMD" : "custom-bridge";
+    const executable = join(bin, name);
+    writeFileSync(executable, process.platform === "win32" ? "@echo off\r\n" : "#!/bin/sh\n");
+    if (process.platform !== "win32") chmodSync(executable, 0o755);
+
+    const result = installClient("claude-desktop", "claude-desktop", {
+      command: "custom-bridge",
+      env: {
+        HOME: home,
+        APPDATA: join(home, "AppData", "Roaming"),
+        PATH: bin,
+        PATHEXT: ".CMD",
+      },
+      instance: "desktop-machine-a",
+    });
+    const server = JSON.parse(readFileSync(result.configPath!, "utf8"))
+      .mcpServers["agent-bridge"];
+    expect(server.command).toBe(executable);
+    expect(server.args).toEqual([]);
+  });
+
+  it("repairs a legacy Claude Desktop registration without losing other servers", () => {
+    const home = mkdtempSync(join(tmpdir(), "agent-bridge-desktop-"));
+    directories.push(home);
+    const options = {
+      env: { HOME: home, APPDATA: join(home, "AppData", "Roaming") },
+      instance: "desktop-machine-a",
+    };
+    const first = installClient("claude-desktop", "claude-desktop", options);
+    const config = JSON.parse(readFileSync(first.configPath!, "utf8"));
+    config.mcpServers["other-server"] = { command: "/absolute/other-server" };
+    config.mcpServers["agent-bridge"].command = "agent-bridge-mcp";
+    delete config.mcpServers["agent-bridge"].args;
+    writeFileSync(first.configPath!, `${JSON.stringify(config, null, 2)}\n`);
+
+    const repaired = installClient("claude-desktop", "claude-desktop", options);
+    const next = JSON.parse(readFileSync(repaired.configPath!, "utf8"));
+    expect(next.mcpServers["other-server"]).toEqual({ command: "/absolute/other-server" });
+    expect(next.mcpServers["agent-bridge"]).toMatchObject({
+      command: process.execPath,
+      args: [resolve("dist/index.js")],
     });
   });
 
@@ -434,6 +498,48 @@ describe("client installer", () => {
       pid: 1, output: [], stdout: "", stderr: "", status: 0, signal: null,
     }))).toThrow(/exactly bound predecessor or successor backend/);
     expect(readEnrollment(path, { HOME: home }).state).toBe("ready");
+  });
+
+  it("repairs a legacy Claude Desktop registration during credential rotation", () => {
+    const home = mkdtempSync(join(tmpdir(), "agent-bridge-installer-"));
+    directories.push(home);
+    const desktopEnv = { HOME: home, APPDATA: join(home, "AppData", "Roaming") };
+    const { path, enrollment: ready } = readyEnrollment(
+      home, "rotate", "rotated-token", "claude-desktop",
+    );
+    const seeded = installClient("claude-desktop", ready.input.principal, {
+      instance: ready.input.instance,
+      token: "old-token",
+      backendBinding: {
+        credentialId: ready.input.credentialId!,
+        principal: ready.input.principal,
+        instance: ready.input.instance,
+      },
+      env: {
+        ...desktopEnv,
+        AGENT_BRIDGE_PROVIDER: "gateway",
+        AGENT_BRIDGE_URL: ready.input.gatewayUrl,
+        AGENT_BRIDGE_WORKSPACE: ready.input.workspaceId,
+      },
+    });
+    const legacy = JSON.parse(readFileSync(seeded.configPath!, "utf8"));
+    legacy.mcpServers["agent-bridge"].command = "agent-bridge-mcp";
+    delete legacy.mcpServers["agent-bridge"].args;
+    writeFileSync(seeded.configPath!, `${JSON.stringify(legacy, null, 2)}\n`);
+
+    const result = installClient("claude-desktop", "", {
+      enrollmentFile: path,
+      env: desktopEnv,
+    });
+    const repaired = JSON.parse(readFileSync(seeded.configPath!, "utf8"));
+    expect(repaired.mcpServers["agent-bridge"]).toMatchObject({
+      command: process.execPath,
+      args: [resolve("dist/index.js")],
+    });
+    expect(readFileSync(seeded.backendConfigPath, "utf8")).toContain(
+      "AGENT_BRIDGE_TOKEN=rotated-token",
+    );
+    expect(result.enrollmentStatus).toBe("consumed");
   });
 
   it("revalidates consumed enrollment state before deleting the file", () => {
