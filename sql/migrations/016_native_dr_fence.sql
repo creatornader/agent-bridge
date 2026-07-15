@@ -560,7 +560,16 @@ returns text language sql stable set search_path = '' as $$
     ))
   ), protected_relations(oid) as (
     select distinct pg_catalog.to_regclass(split_part(record,E'\x1f',2))
-    from raw_records where split_part(record,E'\x1f',1)='relation'
+    from raw_records where split_part(record,E'\x1f',1) in ('relation','relation_acl')
+    union
+    select distinct relation.oid
+    from raw_records
+    join pg_catalog.pg_attribute attribute
+      on not attribute.attisdropped and attribute.attnum>0
+    join pg_catalog.pg_class relation on relation.oid=attribute.attrelid
+      and relation.oid::regclass::text||'.'||attribute.attname=
+        split_part(record,E'\x1f',2)
+    where split_part(record,E'\x1f',1)='column_acl'
   ), default_acl_keys(owner_oid,namespace_oid,object_type) as (
     select role.oid,0::oid,object_type
     from pg_catalog.pg_roles role
