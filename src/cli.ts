@@ -15,6 +15,7 @@ import { BridgeHttpError } from "./http-bridge-store.js";
 import { LegacySupabaseError } from "./legacy-supabase-store.js";
 import { installClient, type InstallableRuntime } from "./client-installer.js";
 import { capabilityDocument, operationForCli, parseCliResponse, validateRequest } from "./contracts/registry.js";
+import { runOwnerCommand, type OwnerOptions } from "./owner-control.js";
 
 type Options = Record<string, string | boolean | string[]>;
 const SUPPORTED_OPTIONS = new Set([
@@ -33,8 +34,12 @@ const SUPPORTED_OPTIONS = new Set([
   "max-pages", "max-push",
   "latest",
   "apply",
+  "display-name", "enrollment-file",
+  "credential-id", "gateway-url", "grace-until", "invalidate-immediately", "label",
+  "reason", "request-id", "resume", "runtime-type", "recover-lock",
+  "scope-set", "workspace-name",
 ]);
-const BOOLEAN_OPTIONS = new Set(["apply", "dead", "force", "json", "latest"]);
+const BOOLEAN_OPTIONS = new Set(["apply", "dead", "force", "invalidate-immediately", "json", "latest", "recover-lock"]);
 function parse(argv: string[]): { command: string; options: Options; positionals: string[] } {
   const command = argv[0] ?? "help"; const options: Options = {}; const positionals: string[] = [];
   for (let i = 1; i < argv.length; i++) {
@@ -118,10 +123,14 @@ function watchCursorPath(path: string, project: string | undefined): string {
   const scope = createHash("sha256").update(project).digest("hex").slice(0, 16);
   return `${path}.project-${scope}`;
 }
-function help(): void { process.stdout.write(`agent-bridge: provider-neutral agent messaging\n\nCommands:\n  init, doctor, status, capabilities, pending, migrate, reconcile-legacy-projects, sync, demo, join, presence\n  send (post), inbox (get), sent, history, acknowledge, claim, extend, ack, nack, watch\n  deliveries, dead-letters, delivery-events, cancel, requeue\n  clients install <codex|claude-code|claude-desktop> --identity <name>\n`); }
+function help(): void { process.stdout.write(`agent-bridge: provider-neutral agent messaging\n\nCommands:\n  init, doctor, status, capabilities, pending, migrate, reconcile-legacy-projects, sync, demo, join, presence\n  send (post), inbox (get), sent, history, acknowledge, claim, extend, ack, nack, watch\n  deliveries, dead-letters, delivery-events, cancel, requeue\n  owner <provision|inventory|rotate|revoke>\n  clients install <codex|claude-code|claude-desktop> --identity <name>\n`); }
 function rejectUnknownOptions(options: Options): void {
   const unknown = Object.keys(options).filter((key) => !SUPPORTED_OPTIONS.has(key));
   if (unknown.length) throw new Error(`unknown option: --${unknown[0]}`);
+}
+function rejectOptionsOutside(options: Options, allowed: ReadonlySet<string>, command: string): void {
+  const invalid = Object.keys(options).find((key) => !allowed.has(key));
+  if (invalid) throw new Error(`--${invalid} is not valid for ${command}`);
 }
 
 const CLI_CONTEXT_OPTIONS = new Set([
@@ -281,12 +290,27 @@ export async function runCli(argv = process.argv.slice(2)): Promise<void> {
   const { command: raw, options, positionals } = parse(argv); const command = ({ post: "send", get: "inbox", receipt: "acknowledge" } as Record<string, string>)[raw] ?? raw;
   if (["help", "-h", "--help"].includes(command)) { help(); return; }
   rejectUnknownOptions(options);
+  if (command === "owner") {
+    if (positionals.length !== 1) {
+      throw new Error("usage: agent-bridge owner <provision|inventory|rotate|revoke>");
+    }
+    const ownerOptions: OwnerOptions = {};
+    for (const [key, value] of Object.entries(options)) {
+      if (Array.isArray(value)) throw new Error("--" + key + " may only be provided once");
+      ownerOptions[key] = value;
+    }
+    output(await runOwnerCommand(positionals[0], ownerOptions, process.env));
+    return;
+  }
   if (command === "clients") {
-    if (positionals[0] !== "install" || !positionals[1]) {
+    if (positionals.length !== 2 || positionals[0] !== "install" || !positionals[1]) {
       throw new Error("usage: agent-bridge clients install <runtime> --identity <name>");
     }
-    const runtime = positionals[1] as InstallableRuntime;
-    if (!["codex", "claude-code", "claude-desktop"].includes(runtime)) {
+    rejectOptionsOutside(options, new Set([
+      "identity", "command", "scope", "instance", "token", "enrollment-file", "recover-lock",
+    ]), "clients install");
+    const runtime = positionals[1] as InstallableRuntime | undefined;
+    if (runtime && !["codex", "claude-code", "claude-desktop"].includes(runtime)) {
       throw new Error(`unsupported install runtime: ${runtime}`);
     }
     const scope = one(options, "scope");
@@ -298,6 +322,8 @@ export async function runCli(argv = process.argv.slice(2)): Promise<void> {
       scope: scope as "local" | "user" | "project" | undefined,
       instance: one(options, "instance"),
       token: one(options, "token"),
+      enrollmentFile: one(options, "enrollment-file"),
+      recoverLock: boolean(options, "recover-lock"),
       env: process.env,
     }));
     return;
@@ -531,4 +557,20 @@ export async function runCli(argv = process.argv.slice(2)): Promise<void> {
   } finally { await runtime.close(); }
 }
 
-if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) runCli().catch((error) => { process.stderr.write(`Error: ${error instanceof Error ? error.message : String(error)}\n`); process.exitCode = 1; });
+export function formatCliError(error: unknown, argv = process.argv.slice(2)): string {
+  const message = error instanceof Error ? error.message : String(error);
+  if (argv[0] === "owner") {
+    return JSON.stringify({
+      schemaVersion: 1,
+      status: "error",
+      operation: argv[1] ?? null,
+      error: { code: "OWNER_COMMAND_ERROR", message },
+    }) + "\n";
+  }
+  return `Error: ${message}\n`;
+}
+
+if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) runCli().catch((error) => {
+  process.stderr.write(formatCliError(error));
+  process.exitCode = 1;
+});

@@ -151,11 +151,41 @@ Schema migration and provisioning use a database-owner connection. The running g
 
 Migration 014 adds a separate offline owner control plane. Database-specific no-login control-owner, operator, and auditor roles have no superuser or RLS bypass powers. The control owner owns append-only request, event, membership, and catalog-attestation records. It can select only the non-secret credential columns used by its security-definer functions. Operators can provision several principals in a name-compatible workspace, rotate credentials, revoke credentials, and read safe inventory. Auditors can only read inventory.
 
+The owner CLI connects only through `AGENT_BRIDGE_OPERATOR_DATABASE_URL` and remains
+outside MCP, HTTP, and the versioned operation registry. Provision and rotation write
+a revisioned enrollment file with exact gateway, workspace, principal, runtime, and
+instance inputs before any database call. The file moves through `pending`, `ready`,
+`consuming`, and `consumed` states under one exclusive per-file operation lock. Every
+transition compares the current disk revision, state, request, operation, and token
+before durable atomic replacement. Stale lock recovery is explicit and requires
+same-host ownership, a minimum age, and proof that the recorded process has stopped.
+Only the local process computes the token hash. PostgreSQL never receives the raw
+token. The installer registers a provisioned client once. Provision stores nonsecret
+credential, principal, and instance metadata in the client backend. Rotation requires
+that metadata plus an exact live host registration before it replaces the token. An
+opaque inventory cursor includes its workspace authority so it cannot be reused under
+another filter.
+
+Enrollment deletion and lock release report durability separately. A failure before
+unlink leaves a retained consumed file. A failure after unlink reports unknown directory
+durability and never reports a retained path. On Windows, enrollment roots, every path
+component, enrollment files, temporary files, locks, and credential backends must be
+owned by the current SID. The process does not take ownership of an existing object. It
+then applies and verifies one protected current-SID FullControl rule. Node identity and
+file-type checks run before and after the native policy check. Native reparse attributes
+reject symlinks, junctions, and other reparse objects before and after DACL work.
+
 The schema owner is the trusted offline role administrator. It holds all three control roles with the admin option and registers eligible login roles through `register_control_member`; `revoke_control_member` removes them. Those functions are not available through HTTP or MCP. Each call is idempotent by request UUID and appends the database session actor to the membership ledger. Runtime readiness compares the active registry with the full `pg_has_role` closure and the direct `pg_auth_members` edges. It rejects unregistered operator or auditor holders, every external owner holder, missing registered grants, unsafe login attributes, extra roles inherited by a registered member, and roles that inherit a registered member. Direct edges must retain their expected grantor, admin, inherit, and set options. Only the schema owner is exempt from the broad closure check because a PostgreSQL superuser reports membership across roles. A direct `GRANT` is never a valid deployment shortcut.
 
 Every protected operation first locks a member-global key for `session_user`, followed by capability keys in operator-before-auditor order. It then checks the active registry, direct membership edge, safe login attributes, and complete upstream and downstream role closure. Inventory accepts either registered capability. Registration and revocation use the same global-first lock hierarchy. Opposite operator and auditor changes for one member therefore cannot deadlock. A revocation waits for an operation that already passed authorization, while every operation begun after revocation observes the new state. A session that remains in a revoked role through `SET ROLE` cannot use that stale authorization.
 
 Every mutation then locks its request UUID before reading the request ledger or lifecycle rows. The ledger stores a SHA-256 fingerprint of the canonical request. Timestamp inputs use epoch microseconds in that fingerprint, so session time zones cannot change replay identity. Identical concurrent calls return the first committed result, including a provisioning replay after its requested expiry. Changed content under the same UUID fails. Rotation accepts credentials without an expiry. A null grace cutoff invalidates the predecessor as soon as the successor exists. Audit actors come from `session_user`; results, audit rows, and sanitized constraint errors exclude credential digest material. Text fields at the control boundary reject surrounding whitespace, control characters, and values over 128 characters.
+
+Rotation includes the expected workspace and principal in its request fingerprint. The
+function checks both against the predecessor while holding its row lock. Its initial
+and replay results return the canonical workspace and principal from the stored
+request result. The owner CLI uses that result directly instead of performing a
+bounded inventory lookup after rotation.
 
 Inventory orders credentials by millisecond-normalized creation time and credential ID. Callers may filter by workspace, continue after a `(created_at, credential_id)` cursor, and request up to 1,000 rows. The default page contains 100 rows. Fixed-origin `date_bin` expression indexes cover both global and workspace ordering. The millisecond normalization matches the timestamp precision preserved by common PostgreSQL JavaScript clients.
 

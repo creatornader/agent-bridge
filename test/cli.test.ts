@@ -35,6 +35,27 @@ function runAtAsync(home: string, args: string[], extra: NodeJS.ProcessEnv = {})
 afterEach(() => { for (const home of homes.splice(0)) rmSync(home, { recursive: true, force: true }); });
 
 describe("agent-bridge CLI", () => {
+  it("uses exact owner and installer command contracts", () => {
+    const owner = run(["owner", "inventory", "extra"]);
+    expect(owner.status).toBe(1);
+    expect(JSON.parse(owner.stderr)).toEqual({
+      schemaVersion: 1,
+      status: "error",
+      operation: "inventory",
+      error: {
+        code: "OWNER_COMMAND_ERROR",
+        message: "usage: agent-bridge owner <provision|inventory|rotate|revoke>",
+      },
+    });
+    const client = run([
+      "clients", "install", "codex", "--identity", "codex", "--workspace", "ignored",
+    ]);
+    expect(client.status).toBe(1);
+    expect(client.stderr).toContain("--workspace is not valid for clients install");
+    const extra = run(["clients", "install", "codex", "extra", "--identity", "codex"]);
+    expect(extra.status).toBe(1);
+    expect(extra.stderr).toContain("usage: agent-bridge clients install");
+  });
   it("does not load SQLite for a legacy provider command", () => {
     const result = run(["help"], {
       AGENT_BRIDGE_PROVIDER: "legacy-supabase",

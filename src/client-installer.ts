@@ -1,9 +1,23 @@
-import { chmodSync, existsSync, mkdirSync, readFileSync, renameSync, rmSync, writeFileSync } from "node:fs";
+import {
+  closeSync, existsSync, fsyncSync, mkdirSync, openSync, readFileSync,
+  renameSync, rmSync, writeFileSync,
+} from "node:fs";
 import { createHash, randomUUID } from "node:crypto";
 import { homedir } from "node:os";
 import { dirname, join } from "node:path";
 import { spawnSync, type SpawnSyncReturns } from "node:child_process";
 import { readClientConfigFile, resolveClientConfig } from "./client-config.js";
+import { securePrivatePath, verifyPrivatePathAccess } from "./private-path.js";
+import {
+  acquireEnrollmentLock,
+  deleteEnrollmentFile,
+  readEnrollment,
+  recoverEnrollmentLock,
+  releaseEnrollmentLock,
+  transitionEnrollment,
+  type EnrollmentLock,
+  type EnrollmentFile,
+} from "./enrollment-file.js";
 
 export type InstallableRuntime = "codex" | "claude-code" | "claude-desktop";
 
@@ -15,12 +29,24 @@ export interface ClientInstallResult {
   configPath?: string;
   backendConfigPath: string;
   restartRequired: boolean;
+  installed?: true;
+  enrollmentDeleted?: boolean;
+  enrollmentFile?: string;
+  enrollmentStatus?: "consumed" | "consumed-file-retained" | "consumed-file-missing"
+    | "consumed-deletion-durability-unknown";
+  lockReleaseStatus?: "released" | "retained" | "durability-unknown";
 }
 
 type Executor = (
   command: string,
   args: string[],
 ) => SpawnSyncReturns<string>;
+
+interface BackendBinding {
+  credentialId: string;
+  principal: string;
+  instance: string;
+}
 
 function desktopConfigPath(env: NodeJS.ProcessEnv): string {
   if (process.platform === "win32") {
@@ -55,19 +81,35 @@ function clientBackendConfigPath(
 }
 
 function replacePrivateFile(path: string, content: string | Buffer): void {
-  mkdirSync(dirname(path), { recursive: true, mode: 0o700 });
-  if (process.platform !== "win32") chmodSync(dirname(path), 0o700);
+  const directory = dirname(path);
+  const privateRoot = dirname(directory);
+  mkdirSync(privateRoot, { recursive: true, mode: 0o700 });
+  securePrivatePath(privateRoot, "directory");
+  mkdirSync(directory, { recursive: true, mode: 0o700 });
+  securePrivatePath(directory, "directory");
+  if (existsSync(path)) verifyPrivatePathAccess(path, "file");
   const temporary = `${path}.${process.pid}.${randomUUID()}.tmp`;
-  writeFileSync(temporary, content, { mode: 0o600 });
+  const descriptor = openSync(temporary, "wx", 0o600);
+  try {
+    writeFileSync(descriptor, content);
+    fsyncSync(descriptor);
+  } finally {
+    closeSync(descriptor);
+  }
+  securePrivatePath(temporary, "file");
   renameSync(temporary, path);
-  if (process.platform !== "win32") chmodSync(path, 0o600);
+  verifyPrivatePathAccess(path, "file");
+  if (process.platform !== "win32") {
+    const descriptor = openSync(directory, "r");
+    try { fsyncSync(descriptor); } finally { closeSync(descriptor); }
+  }
 }
 
 function writeBackendConfig(
   runtime: InstallableRuntime,
   identity: string,
   instance: string,
-  options: { token?: string; env: NodeJS.ProcessEnv },
+  options: { token?: string; env: NodeJS.ProcessEnv; binding?: BackendBinding },
 ): string {
   const env = options.env;
   const home = env.HOME ?? homedir();
@@ -100,6 +142,9 @@ function writeBackendConfig(
     AGENT_BRIDGE_KEY: resolved.provider === "legacy-supabase" ? resolved.credential : undefined,
     AGENT_BRIDGE_DB: resolved.provider === "local" ? resolved.databasePath : undefined,
     AGENT_BRIDGE_EDGE_DB: resolved.provider === "gateway" ? resolved.edgeDatabasePath : undefined,
+    AGENT_BRIDGE_CREDENTIAL_ID: options.binding?.credentialId,
+    AGENT_BRIDGE_PRINCIPAL: options.binding?.principal,
+    AGENT_BRIDGE_CLIENT_INSTANCE: options.binding?.instance,
   };
   for (const value of Object.values(values)) {
     if (value?.includes("\n") || value?.includes("\r")) {
@@ -158,18 +203,441 @@ function writeJsonConfig(
   renameSync(temporary, path);
 }
 
-export function installClient(
-  runtime: InstallableRuntime,
+function assertEnrollmentConfiguration(
+  enrollment: EnrollmentFile,
+  assertions: {
+    runtime?: InstallableRuntime;
+    identity?: string;
+    instance?: string;
+    token?: string;
+    env: NodeJS.ProcessEnv;
+  },
+): void {
+  const input = enrollment.input;
+  const env = assertions.env;
+  const home = env.HOME ?? homedir();
+  const shared = readClientConfigFile(
+    env.AGENT_BRIDGE_CONFIG ?? join(home, ".agent-bridge", "config"),
+  );
+  const conflicts: Array<[string, string | undefined, string]> = [
+    ["runtime", assertions.runtime, input.runtime],
+    ["identity", assertions.identity?.trim() || undefined, input.principal],
+    ["instance", assertions.instance?.trim() || undefined, input.instance],
+    ["AGENT_BRIDGE_AGENT", env.AGENT_BRIDGE_AGENT?.trim(), input.principal],
+    ["AGENT_BRIDGE_INSTANCE", env.AGENT_BRIDGE_INSTANCE?.trim(), input.instance],
+    ["AGENT_BRIDGE_URL", env.AGENT_BRIDGE_URL?.trim(), input.gatewayUrl],
+    ["AGENT_BRIDGE_WORKSPACE", env.AGENT_BRIDGE_WORKSPACE?.trim(), input.workspaceId],
+    ["shared AGENT_BRIDGE_URL", shared.AGENT_BRIDGE_URL?.trim(), input.gatewayUrl],
+    ["shared AGENT_BRIDGE_WORKSPACE", shared.AGENT_BRIDGE_WORKSPACE?.trim(), input.workspaceId],
+  ];
+  for (const [name, actual, expected] of conflicts) {
+    if (actual && actual !== expected) throw new Error(name + " conflicts with the enrollment file");
+  }
+  for (const [name, provider] of [
+    ["AGENT_BRIDGE_PROVIDER", env.AGENT_BRIDGE_PROVIDER?.trim()],
+    ["shared AGENT_BRIDGE_PROVIDER", shared.AGENT_BRIDGE_PROVIDER?.trim()],
+  ] as const) {
+    if (provider && provider !== "gateway") throw new Error(name + " conflicts with the enrollment file");
+  }
+  if (assertions.token) throw new Error("--token cannot be used with --enrollment-file");
+  if (env.AGENT_BRIDGE_CLIENT_TOKEN || env.AGENT_BRIDGE_TOKEN) {
+    throw new Error("token environment variables cannot be used with --enrollment-file");
+  }
+}
+
+function removeConsumedEnrollment(
+  path: string,
+  result: ClientInstallResult,
+  lock: EnrollmentLock,
+  env: NodeJS.ProcessEnv,
+): ClientInstallResult {
+  try {
+    const deletion = deleteEnrollmentFile(path, lock, env);
+    if (deletion === "missing") {
+      return {
+        ...result,
+        installed: true,
+        enrollmentDeleted: false,
+        enrollmentFile: path,
+        enrollmentStatus: "consumed-file-missing",
+      };
+    }
+    if (deletion === "deleted-durability-unknown") {
+      return {
+        ...result,
+        installed: true,
+        enrollmentDeleted: true,
+        enrollmentStatus: "consumed-deletion-durability-unknown",
+      };
+    }
+    return {
+      ...result,
+      installed: true,
+      enrollmentDeleted: true,
+      enrollmentStatus: "consumed",
+    };
+  } catch {
+    return {
+      ...result,
+      installed: true,
+      enrollmentDeleted: false,
+      enrollmentFile: path,
+      enrollmentStatus: "consumed-file-retained",
+    };
+  }
+}
+
+function backendMatches(
+  path: string,
+  enrollment: EnrollmentFile,
+  credentialId: string,
+  requireToken: boolean,
+): boolean {
+  if (!existsSync(path)) return false;
+  const config = readClientConfigFile(path);
+  return config.AGENT_BRIDGE_PROVIDER === "gateway"
+    && config.AGENT_BRIDGE_URL === enrollment.input.gatewayUrl
+    && config.AGENT_BRIDGE_WORKSPACE === enrollment.input.workspaceId
+    && config.AGENT_BRIDGE_CREDENTIAL_ID === credentialId
+    && config.AGENT_BRIDGE_PRINCIPAL === enrollment.input.principal
+    && config.AGENT_BRIDGE_CLIENT_INSTANCE === enrollment.input.instance
+    && (!requireToken || config.AGENT_BRIDGE_TOKEN === enrollment.token);
+}
+
+function desktopRegistrationState(
+  enrollment: EnrollmentFile,
+  backendConfigPath: string,
+  command: string,
+  env: NodeJS.ProcessEnv,
+): "absent" | "matching" | "conflict" {
+  const path = desktopConfigPath(env);
+  if (!existsSync(path)) return "absent";
+  try {
+    const config = JSON.parse(readFileSync(path, "utf8"));
+    const server = config?.mcpServers?.["agent-bridge"];
+    if (!server) return "absent";
+    return server?.command === command
+      && server?.env?.AGENT_BRIDGE_AGENT === enrollment.input.principal
+      && server?.env?.AGENT_BRIDGE_INSTANCE === enrollment.input.instance
+      && server?.env?.AGENT_BRIDGE_CONFIG === backendConfigPath
+      ? "matching"
+      : "conflict";
+  } catch {
+    return "conflict";
+  }
+}
+
+function nativeRegistrationState(
+  enrollment: EnrollmentFile,
+  backendConfigPath: string,
+  command: string,
+  scope: "local" | "user" | "project",
+  execute: Executor,
+): "absent" | "matching" | "conflict" {
+  const executable = enrollment.input.runtime === "codex" ? "codex" : "claude";
+  const args = enrollment.input.runtime === "codex"
+    ? ["mcp", "get", "agent-bridge", "--json"]
+    : ["mcp", "get", "agent-bridge"];
+  const result = execute(executable, args);
+  if (result.error) throw new Error(enrollment.input.runtime + " MCP inspection failed");
+  if (result.status !== 0) {
+    const output = (result.stdout + "\n" + result.stderr).trim();
+    const notFound = enrollment.input.runtime === "codex"
+      ? output === "Error: No MCP server named 'agent-bridge' found."
+      : output === 'No MCP server named "agent-bridge".'
+        || /^No MCP server named "agent-bridge"\. Configured servers: [^\r\n]+$/.test(output);
+    if (notFound) return "absent";
+    throw new Error(enrollment.input.runtime + " MCP inspection failed");
+  }
+  if (enrollment.input.runtime === "codex") {
+    try {
+      const server = JSON.parse(result.stdout);
+      const transport = server?.transport;
+      const environment = transport?.env;
+      const exactEnvironment = environment && typeof environment === "object"
+        && !Array.isArray(environment)
+        && Object.keys(environment).sort().join(",")
+          === "AGENT_BRIDGE_AGENT,AGENT_BRIDGE_CONFIG,AGENT_BRIDGE_INSTANCE";
+      return server?.name === "agent-bridge" && server?.enabled === true
+        && transport?.type === "stdio" && transport?.command === command
+        && Array.isArray(transport?.args) && transport.args.length === 0
+        && exactEnvironment
+        && transport?.env?.AGENT_BRIDGE_AGENT === enrollment.input.principal
+        && transport?.env?.AGENT_BRIDGE_INSTANCE === enrollment.input.instance
+        && transport?.env?.AGENT_BRIDGE_CONFIG === backendConfigPath
+        ? "matching"
+        : "conflict";
+    } catch {
+      return "conflict";
+    }
+  }
+  const lines = result.stdout.replace(/\r\n/g, "\n").split("\n");
+  const scopeLine = {
+    local: "  Scope: Local config (private to you in this project)",
+    user: "  Scope: User config (available in all your projects)",
+    project: "  Scope: Project config (shared via .mcp.json)",
+  }[scope];
+  const expectedPrefix = [
+    "agent-bridge:",
+    scopeLine,
+  ];
+  if (lines[0] !== expectedPrefix[0] || lines[1] !== expectedPrefix[1]
+    || lines[3] !== "  Type: stdio" || lines[4] !== "  Command: " + command
+    || lines[5] !== "  Args:" || lines[6] !== "  Environment:") return "conflict";
+  const environmentLines: string[] = [];
+  let index = 7;
+  while (index < lines.length && lines[index]?.startsWith("    ")) {
+    environmentLines.push(lines[index]!);
+    index += 1;
+  }
+  const expectedEnvironment = [
+    "    AGENT_BRIDGE_AGENT=" + enrollment.input.principal,
+    "    AGENT_BRIDGE_INSTANCE=" + enrollment.input.instance,
+    "    AGENT_BRIDGE_CONFIG=" + backendConfigPath,
+  ].sort();
+  if (environmentLines.sort().join("\n") !== expectedEnvironment.join("\n")) return "conflict";
+  while (lines[index] === "") index += 1;
+  if (lines[index] !== "To remove this server, run: claude mcp remove agent-bridge -s " + scope) {
+    return "conflict";
+  }
+  if (lines.slice(index + 1).some((line) => line !== "")) return "conflict";
+  return "matching";
+}
+
+function enrolledInstallLocked(
+  runtimeAssertion: InstallableRuntime | undefined,
+  identityAssertion: string,
+  options: {
+    command?: string;
+    scope?: "local" | "user" | "project";
+    instance?: string;
+    token?: string;
+    enrollmentFile: string;
+    env?: NodeJS.ProcessEnv;
+  },
+  execute: Executor,
+  lock: EnrollmentLock,
+): ClientInstallResult {
+  const env = options.env ?? process.env;
+  let enrollment = readEnrollment(options.enrollmentFile, env);
+  assertEnrollmentConfiguration(enrollment, {
+    runtime: runtimeAssertion,
+    identity: identityAssertion,
+    instance: options.instance,
+    token: options.token,
+    env,
+  });
+  const runtime = enrollment.input.runtime;
+  const identity = enrollment.input.principal;
+  const expectedPath = clientBackendConfigPath(runtime, enrollment.input.instance, env);
+  const command = options.command?.trim() || "agent-bridge-mcp";
+  const scope = options.scope ?? "user";
+  const baseResult: ClientInstallResult = {
+    runtime,
+    identity,
+    instance: enrollment.input.instance,
+    method: runtime === "claude-desktop" ? "json-config" : "native-cli",
+    configPath: runtime === "claude-desktop" ? desktopConfigPath(env) : undefined,
+    backendConfigPath: expectedPath,
+    restartRequired: true,
+  };
+  if (enrollment.state === "consumed") {
+    if (!enrollment.result
+      || !backendMatches(expectedPath, enrollment, enrollment.result.credentialId, false)) {
+      throw new Error("consumed enrollment no longer matches its client backend");
+    }
+    const registration = runtime === "claude-desktop"
+      ? desktopRegistrationState(enrollment, expectedPath, command, env)
+      : nativeRegistrationState(enrollment, expectedPath, command, scope, execute);
+    if (registration !== "matching") {
+      throw new Error("consumed enrollment no longer matches its MCP registration");
+    }
+    return removeConsumedEnrollment(options.enrollmentFile, baseResult, lock, env);
+  }
+  if (enrollment.state === "pending") {
+    throw new Error("enrollment is pending; resume the owner command first");
+  }
+  const recovering = enrollment.state === "consuming";
+  if (!recovering && enrollment.operation === "provision" && existsSync(expectedPath)) {
+    throw new Error("provision enrollment would replace an existing client backend file");
+  }
+  if (!recovering && enrollment.operation === "provision") {
+    const registration = runtime === "claude-desktop"
+      ? desktopRegistrationState(enrollment, expectedPath, command, env)
+      : nativeRegistrationState(enrollment, expectedPath, command, scope, execute);
+    if (registration !== "absent") {
+      throw new Error("provision enrollment would replace an existing MCP registration");
+    }
+  }
+  if (enrollment.state === "ready") {
+    enrollment = transitionEnrollment(options.enrollmentFile, enrollment, "consuming", {}, env, lock);
+  }
+  if (enrollment.state !== "consuming" || !enrollment.token) {
+    throw new Error("enrollment is not ready for installation");
+  }
+  const derivedEnv: NodeJS.ProcessEnv = {
+    ...env,
+    AGENT_BRIDGE_PROVIDER: "gateway",
+    AGENT_BRIDGE_URL: enrollment.input.gatewayUrl,
+    AGENT_BRIDGE_WORKSPACE: enrollment.input.workspaceId,
+    AGENT_BRIDGE_AGENT: undefined,
+    AGENT_BRIDGE_INSTANCE: undefined,
+    AGENT_BRIDGE_CLIENT_TOKEN: undefined,
+  };
+  let result: ClientInstallResult;
+  let sideEffectsCompleted = false;
+  try {
+    if (enrollment.operation === "rotate") {
+      if (!enrollment.input.credentialId || !enrollment.result) {
+        throw new Error("rotation enrollment lacks credential lineage");
+      }
+      const predecessorMatches = backendMatches(
+        expectedPath, enrollment, enrollment.input.credentialId, false,
+      );
+      const successorMatches = recovering && backendMatches(
+        expectedPath, enrollment, enrollment.result.credentialId, true,
+      );
+      if (!predecessorMatches && !successorMatches) {
+        throw new Error("rotation requires an exactly bound predecessor or successor backend");
+      }
+      const registration = runtime === "claude-desktop"
+        ? desktopRegistrationState(enrollment, expectedPath, command, env)
+        : nativeRegistrationState(enrollment, expectedPath, command, scope, execute);
+      if (registration !== "matching") {
+        throw new Error("rotation requires the exact existing MCP registration");
+      }
+      if (predecessorMatches) {
+        const previous = readFileSync(expectedPath);
+        try {
+          writeBackendConfig(runtime, identity, enrollment.input.instance, {
+            token: enrollment.token,
+            env: derivedEnv,
+            binding: {
+              credentialId: enrollment.result.credentialId,
+              principal: identity,
+              instance: enrollment.input.instance,
+            },
+          });
+        } catch (error) {
+          replacePrivateFile(expectedPath, previous);
+          throw error;
+        }
+      }
+      result = baseResult;
+      sideEffectsCompleted = true;
+    } else {
+      if (recovering && existsSync(expectedPath) && !backendMatches(
+        expectedPath, enrollment, enrollment.result!.credentialId, true,
+      )) {
+        throw new Error("consuming enrollment conflicts with its client backend file");
+      }
+      const registration = recovering
+        ? runtime === "claude-desktop"
+          ? desktopRegistrationState(enrollment, expectedPath, command, env)
+          : nativeRegistrationState(enrollment, expectedPath, command, scope, execute)
+        : "absent";
+      if (recovering && registration === "conflict") {
+        throw new Error("consuming enrollment conflicts with the registered MCP server");
+      }
+      if (recovering && backendMatches(
+        expectedPath, enrollment, enrollment.result!.credentialId, true,
+      ) && registration === "matching") {
+        result = baseResult;
+      } else {
+        result = installClient(runtime, identity, {
+          command,
+          scope: options.scope,
+          instance: enrollment.input.instance,
+          token: enrollment.token,
+          backendBinding: {
+            credentialId: enrollment.result!.credentialId,
+            principal: identity,
+            instance: enrollment.input.instance,
+          },
+          env: derivedEnv,
+        }, execute);
+        sideEffectsCompleted = true;
+        const verified = runtime === "claude-desktop"
+          ? desktopRegistrationState(enrollment, expectedPath, command, env)
+          : nativeRegistrationState(enrollment, expectedPath, command, scope, execute);
+        if (verified !== "matching") throw new Error("MCP registration verification failed");
+      }
+    }
+  } catch (error) {
+    if (!recovering && !sideEffectsCompleted) {
+      transitionEnrollment(options.enrollmentFile, enrollment, "ready", {}, env, lock);
+    }
+    throw error;
+  }
+  enrollment = transitionEnrollment(
+    options.enrollmentFile,
+    enrollment,
+    "consumed",
+    { token: null },
+    env,
+    lock,
+  );
+  return removeConsumedEnrollment(options.enrollmentFile, result, lock, env);
+}
+
+function enrolledInstall(
+  runtime: InstallableRuntime | undefined,
   identity: string,
   options: {
     command?: string;
     scope?: "local" | "user" | "project";
     instance?: string;
     token?: string;
+    enrollmentFile: string;
+    recoverLock?: boolean;
+    env?: NodeJS.ProcessEnv;
+  },
+  execute: Executor,
+): ClientInstallResult {
+  const env = options.env ?? process.env;
+  if (options.recoverLock) recoverEnrollmentLock(options.enrollmentFile, env);
+  const lock = acquireEnrollmentLock(options.enrollmentFile, env);
+  let result: ClientInstallResult;
+  try {
+    result = enrolledInstallLocked(runtime, identity, options, execute, lock);
+  } catch (error) {
+    if (!lock.released) {
+      try { releaseEnrollmentLock(lock); } catch {}
+    }
+    throw error;
+  }
+  let lockReleaseStatus: NonNullable<ClientInstallResult["lockReleaseStatus"]>;
+  try {
+    const release = releaseEnrollmentLock(lock);
+    lockReleaseStatus = release === "released" ? "released" : "durability-unknown";
+  } catch {
+    lockReleaseStatus = existsSync(lock.lockPath) ? "retained" : "durability-unknown";
+  }
+  return { ...result, lockReleaseStatus };
+}
+
+export function installClient(
+  runtime: InstallableRuntime | undefined,
+  identity: string,
+  options: {
+    command?: string;
+    scope?: "local" | "user" | "project";
+    instance?: string;
+    token?: string;
+    enrollmentFile?: string;
+    recoverLock?: boolean;
+    backendBinding?: BackendBinding;
     env?: NodeJS.ProcessEnv;
   } = {},
   execute: Executor = (command, args) => spawnSync(command, args, { encoding: "utf8" }),
 ): ClientInstallResult {
+  if (options.enrollmentFile) {
+    return enrolledInstall(runtime, identity, {
+      ...options,
+      enrollmentFile: options.enrollmentFile,
+    }, execute);
+  }
+  if (!runtime) throw new Error("install runtime is required");
   const normalizedIdentity = identity.trim();
   if (!normalizedIdentity || normalizedIdentity.length > 128) throw new Error("--identity is required");
   const instance = options.instance?.trim() || `${runtime}-${randomUUID()}`;
@@ -185,6 +653,7 @@ export function installClient(
     const backendConfigPath = writeBackendConfig(runtime, normalizedIdentity, instance, {
       token: options.token,
       env,
+      binding: options.backendBinding,
     });
     if (runtime === "claude-desktop") {
       const path = desktopConfigPath(env);

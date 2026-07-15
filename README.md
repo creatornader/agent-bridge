@@ -123,7 +123,8 @@ agent-bridge clients install claude-code --identity claude-code
 agent-bridge clients install claude-desktop --identity claude-desktop
 ```
 
-For gateway mode, issue a distinct principal-bound token for each client and pass it only during that client's installation:
+For gateway mode, use the owner enrollment workflow below for new credentials. The
+older token handoff remains available for credentials issued by external tooling:
 
 ```bash
 AGENT_BRIDGE_CLIENT_TOKEN=<codex token> \
@@ -181,25 +182,25 @@ Each mutation takes a transaction lock for its request UUID before checking the
 request ledger. An identical concurrent call returns the stored result. Reusing the
 UUID with changed content fails. Provisioning reuses an existing workspace only when
 its name matches, so one workspace can contain several principals. Rotation supports
-credentials without an expiry and a null grace cutoff for immediate replacement.
+credentials without an expiry and a null grace cutoff for immediate replacement. A
+rotation request includes the expected workspace and principal. The function checks
+both while it locks the predecessor, then returns the stored canonical identity.
 The database derives the audit actor from `session_user`.
 
-This temporary operator workflow creates an eligible login, registers it through
-the protected SQL boundary, and provisions a token-bound `codex` principal. Node
-generates the raw token and its hash locally. PostgreSQL receives only the hash.
+This temporary operator workflow creates an eligible login and registers it through
+the protected SQL boundary. The owner CLI then provisions a token-bound `codex`
+principal. It generates the raw token locally, writes it to a private enrollment file
+before contacting PostgreSQL, and sends only the SHA-256 hash to the database.
 
 ```bash
 OPERATOR_LOGIN="agent_bridge_operator_$(date +%s)"
 OPERATOR_PASSWORD="$(node -e "process.stdout.write(require('node:crypto').randomBytes(32).toString('hex'))")"
-RAW_TOKEN="$(node -e "process.stdout.write(require('node:crypto').randomBytes(32).toString('hex'))")"
-TOKEN_HASH="$(RAW_TOKEN="$RAW_TOKEN" node -e "process.stdout.write(require('node:crypto').createHash('sha256').update(process.env.RAW_TOKEN).digest('hex'))")"
 MEMBERSHIP_REQUEST="$(node -e "process.stdout.write(require('node:crypto').randomUUID())")"
 PROVISION_REQUEST="$(node -e "process.stdout.write(require('node:crypto').randomUUID())")"
 export AGENT_BRIDGE_OPERATOR_LOGIN="$OPERATOR_LOGIN"
 export AGENT_BRIDGE_OPERATOR_PASSWORD="$OPERATOR_PASSWORD"
 export AGENT_BRIDGE_MEMBERSHIP_REQUEST="$MEMBERSHIP_REQUEST"
 export AGENT_BRIDGE_PROVISION_REQUEST="$PROVISION_REQUEST"
-export AGENT_BRIDGE_TOKEN_HASH="$TOKEN_HASH"
 
 psql -v ON_ERROR_STOP=1 "$AGENT_BRIDGE_DATABASE_URL" <<'SQL'
 \getenv operator_login AGENT_BRIDGE_OPERATOR_LOGIN
@@ -217,27 +218,20 @@ SELECT * FROM agent_bridge.register_control_member(
 );
 SQL
 
-PGPASSWORD="$OPERATOR_PASSWORD" psql -v ON_ERROR_STOP=1 "$AGENT_BRIDGE_DATABASE_URL" \
-  --username="$OPERATOR_LOGIN" <<'SQL'
-\getenv provision_request AGENT_BRIDGE_PROVISION_REQUEST
-\getenv token_hash AGENT_BRIDGE_TOKEN_HASH
-SELECT * FROM agent_bridge.control_provision(
-  :'provision_request'::uuid,
-  'team',
-  'Team',
-  'codex',
-  'Codex',
-  'codex',
-  :'token_hash'::char(64),
-  'codex',
-  'release-a-full',
-  NULL
-);
-SQL
+export AGENT_BRIDGE_OPERATOR_DATABASE_URL="postgresql://${OPERATOR_LOGIN}:${OPERATOR_PASSWORD}@host/database"
+export AGENT_BRIDGE_URL="https://bridge.example.com"
+ENROLLMENT_FILE="${AGENT_BRIDGE_ENROLLMENT_DIR:-$HOME/.agent-bridge/enrollments}/${PROVISION_REQUEST}.json"
 
-AGENT_BRIDGE_CLIENT_TOKEN="$RAW_TOKEN" \
-  agent-bridge clients install codex --identity codex
-unset RAW_TOKEN TOKEN_HASH AGENT_BRIDGE_TOKEN_HASH
+agent-bridge owner provision \
+  --request-id "$PROVISION_REQUEST" \
+  --workspace team \
+  --workspace-name Team \
+  --identity codex \
+  --runtime codex \
+  --instance codex-machine \
+  --scope-set release-a-full
+
+agent-bridge clients install codex --enrollment-file "$ENROLLMENT_FILE"
 
 REVOKE_REQUEST="$(node -e "process.stdout.write(require('node:crypto').randomUUID())")"
 export AGENT_BRIDGE_REVOKE_REQUEST="$REVOKE_REQUEST"
@@ -254,13 +248,69 @@ SQL
 unset OPERATOR_PASSWORD AGENT_BRIDGE_OPERATOR_PASSWORD
 unset AGENT_BRIDGE_OPERATOR_LOGIN AGENT_BRIDGE_MEMBERSHIP_REQUEST
 unset AGENT_BRIDGE_PROVISION_REQUEST AGENT_BRIDGE_REVOKE_REQUEST
+unset AGENT_BRIDGE_OPERATOR_DATABASE_URL
 ```
 
-The installer does not provision the credential. It stores the already-provisioned
-raw token in the client's owner-only backend file. Configure the shared gateway URL
-and workspace before the install, and use the same principal for `control_provision`
-and `--identity`. The final SQL block revokes and drops the temporary operator after
-the client installation has stored the credential.
+`AGENT_BRIDGE_OPERATOR_DATABASE_URL` is the owner CLI's only database authority. It
+does not fall back to the schema migration URL, runtime URL, shared client config, or
+active client identity. `owner inventory` returns at most 100 rows by default and
+1,000 when requested. Its opaque cursor is bound to the selected workspace.
+
+Provision and rotation enrollment files stay under
+`$AGENT_BRIDGE_ENROLLMENT_DIR` or `~/.agent-bridge/enrollments`. The CLI requires an
+owner-only root and private path components. It refuses symlinks, path escapes, and
+directory replacement during an operation. Every file has a monotonic revision. A
+per-file exclusive lock covers the read, state transition, database call, and client
+installation side effects. Each transition compares the revision, state, request,
+operation, and token with the current file before atomic replacement.
+
+If provisioning fails, rerun the same operation with `--resume "$ENROLLMENT_FILE"`.
+A process crash can leave the adjacent lock file behind. Do not delete it manually.
+After at least 60 seconds, use `--recover-lock` with `--resume` or the client install
+command. Recovery succeeds only when the lock belongs to this host and user and its
+recorded process no longer exists. The stored request UUID, inputs, instance, and raw
+token are reused exactly.
+
+`clients install <runtime> --enrollment-file <path>` derives the gateway URL,
+workspace, principal, instance, and token from the file. It rejects conflicting flags
+or environment values. Provisioning registers the host MCP server. Rotation updates
+only that instance's existing private backend file and never repeats host registration.
+The backend must contain the predecessor credential ID, principal, and instance metadata
+written by an enrollment-based provision. Rotation fails closed for older backend files
+without this metadata. It also verifies the exact live MCP registration before replacing
+the token.
+The installer removes the enrollment file only after installation succeeds. A failed
+delete returns `enrollmentStatus: "consumed-file-retained"` and the consumed file path.
+An already missing file returns `consumed-file-missing`. If unlink succeeds but the
+directory identity check or fsync fails, the result is
+`consumed-deletion-durability-unknown`; it never claims that the path was retained.
+`lockReleaseStatus` separately reports `released`, `retained`, or `durability-unknown`.
+A lock-release failure after successful installation does not replace the installation
+result with a generic error. The consumed artifact no longer contains the raw token. A retry validates the
+live backend and MCP registration before deleting a retained consumed file.
+
+`--token` and `AGENT_BRIDGE_CLIENT_TOKEN` remain available for the older manual
+installation flow, but they cannot be combined with `--enrollment-file`. The final SQL
+block revokes and drops the temporary operator after the client installation has
+stored the credential.
+
+Rotate the credential for one installed instance with an explicit grace cutoff or
+`--invalidate-immediately`, then consume the resulting enrollment file:
+
+```bash
+ROTATE_REQUEST="$(node -e "process.stdout.write(require('node:crypto').randomUUID())")"
+ROTATION_FILE="${AGENT_BRIDGE_ENROLLMENT_DIR:-$HOME/.agent-bridge/enrollments}/${ROTATE_REQUEST}.json"
+agent-bridge owner rotate \
+  --request-id "$ROTATE_REQUEST" \
+  --credential-id "<current credential UUID>" \
+  --workspace team \
+  --identity codex \
+  --runtime codex \
+  --instance codex-machine \
+  --scope-set release-a-full \
+  --invalidate-immediately
+agent-bridge clients install codex --enrollment-file "$ROTATION_FILE"
+```
 
 Control membership is an offline SQL administration boundary. The gateway and MCP
 server do not expose it. Runtime readiness compares PostgreSQL membership with the
@@ -307,7 +357,12 @@ AGENT_BRIDGE_URL=https://bridge.example.com
 AGENT_BRIDGE_WORKSPACE=team
 ```
 
-These shared settings are enough before `clients install`. The installer takes `AGENT_BRIDGE_CLIENT_TOKEN`, creates a private client backend file containing the matching token, and registers `AGENT_BRIDGE_AGENT`, `AGENT_BRIDGE_INSTANCE`, and that file's path with the host. Gateway initialization checks readiness, token validity, and that the token-bound principal matches that process identity.
+These shared settings are enough before `clients install`. The secure flow reads
+the principal-bound token and exact client settings from an enrollment file. The
+compatibility flow accepts `AGENT_BRIDGE_CLIENT_TOKEN`. Both write a private client
+backend and register `AGENT_BRIDGE_AGENT`, `AGENT_BRIDGE_INSTANCE`, and that file's
+path with the host. Gateway initialization checks readiness, token validity, and that
+the token-bound principal matches that process identity.
 
 ## Offline gateway behavior
 
@@ -494,7 +549,16 @@ npm run build
 npm pack
 ```
 
-Set `AGENT_BRIDGE_TEST_DATABASE_URL` to run the live PostgreSQL contract and migration tests. CI runs Node 22 and 24 on Linux, macOS, and Windows, plus PostgreSQL and clean package-install jobs.
+Set `AGENT_BRIDGE_TEST_DATABASE_URL` to run the live PostgreSQL contract and migration
+tests. CI runs Node 22 and 24 on Linux, macOS, and Windows. PostgreSQL 15 through 18 each
+pack and install the npm tarball, register a least-privilege operator, and exercise
+owner provision, inventory, rotation, and revocation. Enrollment roots, components,
+files, locks, and persistent credential backends require the current Windows SID as
+owner before the code applies or accepts a protected current-user-only DACL. Node file
+identity checks and native Windows reparse attributes must also agree before and after
+policy validation; symlinks, junctions, and other reparse objects fail closed. Windows
+CI covers static and fault behavior for this policy. Native Windows ACL race and
+durability behavior has not yet been proved on a dedicated Windows host.
 
 ## Documentation
 

@@ -1,9 +1,9 @@
 import { createHash, randomUUID } from "node:crypto";
-import { mkdtempSync, rmSync } from "node:fs";
+import { mkdirSync, mkdtempSync, rmSync } from "node:fs";
 import { createServer } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { spawn, type ChildProcess } from "node:child_process";
+import { spawn, spawnSync, type ChildProcess } from "node:child_process";
 import { once } from "node:events";
 import { fileURLToPath } from "node:url";
 import pg from "pg";
@@ -26,6 +26,7 @@ import { PostgresRequestAuthority } from "../src/postgres-request-authority.js";
 import { installClient } from "../src/client-installer.js";
 import { resolveClientConfig } from "../src/client-config.js";
 import { createClientRuntime } from "../src/client-runtime.js";
+import { enrollmentTokenHash, readEnrollment } from "../src/enrollment-file.js";
 
 const databaseUrl = process.env.AGENT_BRIDGE_TEST_DATABASE_URL;
 const integration = databaseUrl ? describe : describe.skip;
@@ -2126,6 +2127,142 @@ integration("PostgreSQL BridgeStore integration", () => {
     expect(eventAudit.rows).toEqual([{ actor: sessionActor }]);
   });
 
+  it("runs the packed owner CLI contract against PostgreSQL without exposing secrets", async () => {
+    const home = mkdtempSync(join(tmpdir(), "agent-bridge-owner-cli-"));
+    const workspaceId = "owner-cli-" + randomUUID();
+    const packageRoot = fileURLToPath(new URL("../", import.meta.url));
+    const packageDirectory = join(home, "packed-install");
+    mkdirSync(packageDirectory, { mode: 0o700 });
+    const packed = spawnSync("npm", ["pack", "--pack-destination", home, "--silent"], {
+      cwd: packageRoot,
+      encoding: "utf8",
+      timeout: 60_000,
+    });
+    expect(packed.status, packed.stderr).toBe(0);
+    const tarball = join(home, packed.stdout.trim().split("\n").at(-1)!);
+    const installed = spawnSync("npm", ["install", "--silent", tarball], {
+      cwd: packageDirectory,
+      encoding: "utf8",
+      timeout: 60_000,
+    });
+    expect(installed.status, installed.stderr).toBe(0);
+    const cli = join(packageDirectory, "node_modules", ".bin", "agent-bridge");
+    const names = await controlRoles(pool!);
+    const operatorLogin = `bridge_packed_operator_${randomUUID().replaceAll("-", "")}`;
+    const operatorPassword = randomUUID().replaceAll("-", "");
+    const operatorUrl = new URL(databaseUrl!);
+    operatorUrl.username = operatorLogin;
+    operatorUrl.password = operatorPassword;
+    await pool!.query(`CREATE ROLE ${operatorLogin} LOGIN PASSWORD '${operatorPassword}'`);
+    await pool!.query(
+      "SELECT * FROM agent_bridge.register_control_member($1,$2,'operator')",
+      [randomUUID(), operatorLogin],
+    );
+    const commonEnv = {
+      ...process.env,
+      HOME: home,
+      AGENT_BRIDGE_OPERATOR_DATABASE_URL: operatorUrl.toString(),
+      AGENT_BRIDGE_URL: undefined,
+      AGENT_BRIDGE_WORKSPACE: undefined,
+      AGENT_BRIDGE_AGENT: undefined,
+      AGENT_BRIDGE_INSTANCE: undefined,
+      AGENT_BRIDGE_TOKEN: undefined,
+      AGENT_BRIDGE_CLIENT_TOKEN: undefined,
+    };
+    try {
+      const provisioned = spawnSync(cli, [
+        "owner", "provision",
+        "--workspace", workspaceId,
+        "--workspace-name", workspaceId,
+        "--identity", "owner-cli-agent",
+        "--runtime", "codex",
+        "--instance", "owner-cli-instance",
+        "--gateway-url", "https://bridge.example.test",
+        "--scope-set", "release-a-full",
+      ], { encoding: "utf8", env: commonEnv, timeout: 20_000 });
+      expect(provisioned.status, provisioned.stderr).toBe(0);
+      const output = JSON.parse(provisioned.stdout);
+      expect(output).toMatchObject({
+        schemaVersion: 1,
+        status: "ok",
+        operation: "provision",
+        workspaceId,
+        principal: "owner-cli-agent",
+        enrollmentState: "ready",
+      });
+      expect(provisioned.stdout).not.toContain(databaseUrl!);
+      expect(provisioned.stdout).not.toContain(operatorPassword);
+      const enrollment = readEnrollment(output.enrollmentFile, { HOME: home });
+      expect(enrollment.token).toBeTruthy();
+      expect((await pool!.query(
+        "SELECT * FROM agent_bridge.resolve_credential_hash($1)",
+        [hashCredential(enrollment.token!)],
+      )).rows).toHaveLength(1);
+      expect(provisioned.stdout).not.toContain(enrollment.token!);
+      expect(provisioned.stdout).not.toContain(enrollmentTokenHash(enrollment));
+
+      const inventory = spawnSync(cli, [
+        "owner", "inventory", "--workspace", workspaceId,
+      ], { encoding: "utf8", env: commonEnv, timeout: 20_000 });
+      expect(inventory.status, inventory.stderr).toBe(0);
+      expect(JSON.parse(inventory.stdout)).toMatchObject({
+        schemaVersion: 1,
+        status: "ok",
+        operation: "inventory",
+        items: [expect.objectContaining({
+          credentialId: output.credentialId,
+          workspaceId,
+          principal: "owner-cli-agent",
+        })],
+      });
+
+      const rotated = spawnSync(cli, [
+        "owner", "rotate",
+        "--credential-id", output.credentialId,
+        "--workspace", workspaceId,
+        "--identity", "owner-cli-agent",
+        "--runtime", "codex",
+        "--instance", "owner-cli-instance",
+        "--gateway-url", "https://bridge.example.test",
+        "--scope-set", "release-a-full",
+        "--invalidate-immediately",
+      ], { encoding: "utf8", env: commonEnv, timeout: 20_000 });
+      expect(rotated.status, rotated.stderr).toBe(0);
+      const rotation = JSON.parse(rotated.stdout);
+      expect(rotation).toMatchObject({
+        schemaVersion: 1,
+        status: "ok",
+        operation: "rotate",
+        workspaceId,
+        principal: "owner-cli-agent",
+        enrollmentState: "ready",
+      });
+      expect(rotation.credentialId).not.toBe(output.credentialId);
+
+      const revoked = spawnSync(cli, [
+        "owner", "revoke",
+        "--credential-id", rotation.credentialId,
+        "--reason", "retired",
+      ], { encoding: "utf8", env: commonEnv, timeout: 20_000 });
+      expect(revoked.status, revoked.stderr).toBe(0);
+      expect(JSON.parse(revoked.stdout)).toMatchObject({
+        schemaVersion: 1,
+        status: "ok",
+        operation: "revoke",
+        credentialId: rotation.credentialId,
+        revoked: true,
+      });
+    } finally {
+      await pool!.query(
+        "SELECT * FROM agent_bridge.revoke_control_member($1,$2,'operator')",
+        [randomUUID(), operatorLogin],
+      ).catch(() => {});
+      await pool!.query(`REVOKE ${names.operator} FROM ${operatorLogin}`).catch(() => {});
+      await pool!.query(`DROP ROLE IF EXISTS ${operatorLogin}`).catch(() => {});
+      rmSync(home, { recursive: true, force: true });
+    }
+  }, 90_000);
+
   it("rotates and revokes credentials with exact replay and secret-safe failures", async () => {
     const names = await controlRoles(pool!);
     const client = await pool!.connect();
@@ -2144,23 +2281,46 @@ integration("PostgreSQL BridgeStore integration", () => {
         [randomUUID(), workspaceId, predecessorHash],
       )).rows[0]!;
       const rotateRequest = randomUUID();
-      const rotated = (await client.query<{ credential_id: string; replayed: boolean }>(
+      const rotated = (await client.query<{
+        credential_id: string; workspace_id: string; principal: string; replayed: boolean;
+      }>(
         `SELECT * FROM agent_bridge.control_rotate_credential(
-          $1,$2,$3,'rotated','release-a-full',NULL,NULL)`,
-        [rotateRequest, predecessor.credential_id, successorHash],
+          $1,$2,$3,$4,$5,'rotated','release-a-full',NULL,NULL)`,
+        [rotateRequest, predecessor.credential_id, workspaceId, "agent", successorHash],
       )).rows[0]!;
       revokedCredentialId = rotated.credential_id;
+      expect(rotated.workspace_id).toBe(workspaceId);
+      expect(rotated.principal).toBe("agent");
       expect(rotated.replayed).toBe(false);
-      expect((await client.query<{ replayed: boolean }>(
-        `SELECT replayed FROM agent_bridge.control_rotate_credential(
-          $1,$2,$3,'rotated','release-a-full',NULL,NULL)`,
-        [rotateRequest, predecessor.credential_id, successorHash],
-      )).rows[0]!.replayed).toBe(true);
+      expect((await client.query<{
+        workspace_id: string; principal: string; replayed: boolean;
+      }>(
+        `SELECT workspace_id,principal,replayed FROM agent_bridge.control_rotate_credential(
+          $1,$2,$3,$4,$5,'rotated','release-a-full',NULL,NULL)`,
+        [rotateRequest, predecessor.credential_id, workspaceId, "agent", successorHash],
+      )).rows[0]).toEqual({ workspace_id: workspaceId, principal: "agent", replayed: true });
       await expect(client.query(
         `SELECT * FROM agent_bridge.control_rotate_credential(
-          $1,$2,$3,'rotated','release-a-full',NULL,NULL)`,
-        [rotateRequest, predecessor.credential_id, hashCredential(`changed-${randomUUID()}`)],
+          $1,$2,$3,$4,$5,'rotated','release-a-full',NULL,NULL)`,
+        [rotateRequest, predecessor.credential_id, workspaceId, "agent",
+          hashCredential(`changed-${randomUUID()}`)],
       )).rejects.toThrow(/different content/);
+      await expect(client.query(
+        `SELECT * FROM agent_bridge.control_rotate_credential(
+          $1,$2,$3,$4,$5,'rotated','release-a-full',NULL,NULL)`,
+        [rotateRequest, predecessor.credential_id, workspaceId + "-changed", "agent", successorHash],
+      )).rejects.toThrow(/different content/);
+      await expect(client.query(
+        `SELECT * FROM agent_bridge.control_rotate_credential(
+          $1,$2,$3,$4,$5,'rotated','release-a-full',NULL,NULL)`,
+        [rotateRequest, predecessor.credential_id, workspaceId, "agent-changed", successorHash],
+      )).rejects.toThrow(/different content/);
+      await expect(client.query(
+        `SELECT * FROM agent_bridge.control_rotate_credential(
+          $1,$2,$3,$4,$5,'rotated','release-a-full',NULL,NULL)`,
+        [randomUUID(), predecessor.credential_id, workspaceId, "other-agent",
+          hashCredential(`wrong-principal-${randomUUID()}`)],
+      )).rejects.toThrow(/predecessor credential is not active and replaceable/);
 
       const revokeRequest = randomUUID();
       expect((await client.query<{ revoked: boolean; replayed: boolean }>(
@@ -2184,8 +2344,8 @@ integration("PostgreSQL BridgeStore integration", () => {
       let rotationError = "";
       try {
         await client.query(
-          "SELECT * FROM agent_bridge.control_rotate_credential($1,$2,$3,NULL,'release-a-full',NULL,NULL)",
-          [randomUUID(), duplicatePredecessor.credential_id, successorHash],
+          "SELECT * FROM agent_bridge.control_rotate_credential($1,$2,$3,$4,$5,NULL,'release-a-full',NULL,NULL)",
+          [randomUUID(), duplicatePredecessor.credential_id, workspaceId, "duplicate-agent", successorHash],
         );
       } catch (error) {
         rotationError = databaseErrorDiagnostic(error);
@@ -2241,13 +2401,15 @@ integration("PostgreSQL BridgeStore integration", () => {
       )).rejects.toThrow(/invalid provisioning request/);
       await expect(client.query(
         `SELECT * FROM agent_bridge.control_rotate_credential(
-          $1,$2,$3,E'rotated\nlabel','release-a-full',NULL,NULL)`,
-        [randomUUID(), duplicatePredecessor.credential_id, hashCredential(`invalid-rotation-${randomUUID()}`)],
+          $1,$2,$3,$4,$5,E'rotated\nlabel','release-a-full',NULL,NULL)`,
+        [randomUUID(), duplicatePredecessor.credential_id, workspaceId, "duplicate-agent",
+          hashCredential(`invalid-rotation-${randomUUID()}`)],
       )).rejects.toThrow(/invalid credential rotation request/);
       await expect(client.query(
         `SELECT * FROM agent_bridge.control_rotate_credential(
-          $1,$2,$3,NULL,' release-a-full',NULL,NULL)`,
-        [randomUUID(), duplicatePredecessor.credential_id, hashCredential(`invalid-scope-${randomUUID()}`)],
+          $1,$2,$3,$4,$5,NULL,' release-a-full',NULL,NULL)`,
+        [randomUUID(), duplicatePredecessor.credential_id, workspaceId, "duplicate-agent",
+          hashCredential(`invalid-scope-${randomUUID()}`)],
       )).rejects.toThrow(/invalid credential rotation request/);
       await expect(client.query(
         `SELECT * FROM agent_bridge.control_provision(
@@ -2256,8 +2418,8 @@ integration("PostgreSQL BridgeStore integration", () => {
       )).rejects.toThrow(/invalid provisioning request/);
       await expect(client.query(
         `SELECT * FROM agent_bridge.control_rotate_credential(
-          $1,$2,$3,NULL,'release-a-full',NULL,NULL)`,
-        [randomUUID(), duplicatePredecessor.credential_id, null],
+          $1,$2,$3,$4,$5,NULL,'release-a-full',NULL,NULL)`,
+        [randomUUID(), duplicatePredecessor.credential_id, workspaceId, "duplicate-agent", null],
       )).rejects.toThrow(/invalid credential rotation request/);
       await expect(client.query(
         "SELECT * FROM agent_bridge.control_revoke_credential($1,$2,$3)",
@@ -2782,13 +2944,13 @@ integration("PostgreSQL BridgeStore integration", () => {
 
       await first.query("BEGIN");
       const firstRotate = (await first.query<{ credential_id: string; replayed: boolean }>(
-        "SELECT * FROM agent_bridge.control_rotate_credential($1,$2,$3,NULL,'release-a-full',NULL,NULL)",
-        [rotateRequest, initial.rows[0]!.credential_id, rotatedHash],
+        "SELECT credential_id,replayed FROM agent_bridge.control_rotate_credential($1,$2,$3,$4,$5,NULL,'release-a-full',NULL,NULL)",
+        [rotateRequest, initial.rows[0]!.credential_id, workspaceId, "rotate-agent", rotatedHash],
       )).rows[0]!;
       let settled = false;
       const repeatedRotate = second.query<{ credential_id: string; replayed: boolean }>(
-        "SELECT * FROM agent_bridge.control_rotate_credential($1,$2,$3,NULL,'release-a-full',NULL,NULL)",
-        [rotateRequest, initial.rows[0]!.credential_id, rotatedHash],
+        "SELECT credential_id,replayed FROM agent_bridge.control_rotate_credential($1,$2,$3,$4,$5,NULL,'release-a-full',NULL,NULL)",
+        [rotateRequest, initial.rows[0]!.credential_id, workspaceId, "rotate-agent", rotatedHash],
       ).then((result) => { settled = true; return result.rows[0]!; });
       await new Promise((resolve) => setTimeout(resolve, 50));
       expect(settled).toBe(false);
@@ -2847,13 +3009,15 @@ integration("PostgreSQL BridgeStore integration", () => {
       const graceUntil = new Date(Date.now() + 3_600_000);
       await client.query("SET TIME ZONE 'UTC'");
       await client.query(
-        "SELECT * FROM agent_bridge.control_rotate_credential($1,$2,$3,NULL,'release-a-full',$4,$5)",
-        [rotateRequest, provisioned.credential_id, successorHash, successorExpiry, graceUntil],
+        "SELECT * FROM agent_bridge.control_rotate_credential($1,$2,$3,$4,$5,NULL,'release-a-full',$6,$7)",
+        [rotateRequest, provisioned.credential_id, workspaceId, "agent", successorHash,
+          successorExpiry, graceUntil],
       );
       await client.query("SET TIME ZONE 'Asia/Tokyo'");
       expect((await client.query<{ replayed: boolean }>(
-        "SELECT replayed FROM agent_bridge.control_rotate_credential($1,$2,$3,NULL,'release-a-full',$4,$5)",
-        [rotateRequest, provisioned.credential_id, successorHash, successorExpiry, graceUntil],
+        "SELECT replayed FROM agent_bridge.control_rotate_credential($1,$2,$3,$4,$5,NULL,'release-a-full',$6,$7)",
+        [rotateRequest, provisioned.credential_id, workspaceId, "agent", successorHash,
+          successorExpiry, graceUntil],
       )).rows[0]!.replayed).toBe(true);
 
       const shortRequest = randomUUID();
