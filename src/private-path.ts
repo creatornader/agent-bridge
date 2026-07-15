@@ -32,9 +32,6 @@ function windowsScript(kind: PrivatePathKind, apply: boolean): string {
   const flags = kind === "directory"
     ? "[System.Security.AccessControl.InheritanceFlags]'ContainerInherit,ObjectInherit'"
     : "[System.Security.AccessControl.InheritanceFlags]::None";
-  const security = kind === "directory"
-    ? "System.Security.AccessControl.DirectorySecurity"
-    : "System.Security.AccessControl.FileSecurity";
   return [
     "$p=$env:AGENT_BRIDGE_PRIVATE_PATH",
     "$identity=[System.Security.Principal.WindowsIdentity]::GetCurrent()",
@@ -46,9 +43,10 @@ function windowsScript(kind: PrivatePathKind, apply: boolean): string {
     "$beforeOwner=$before.GetOwner([System.Security.Principal.SecurityIdentifier]).Value",
     "if($beforeOwner -ne $sid.Value -and ($null -eq $tokenOwner -or $beforeOwner -ne $tokenOwner.Value)){exit 24}",
     ...(apply ? [
-      `$acl=New-Object ${security}`,
-      "$acl.SetOwner($sid)",
+      "$acl=$before",
       "$acl.SetAccessRuleProtection($true,$false)",
+      "foreach($existing in @($acl.Access)){$acl.RemoveAccessRuleSpecific($existing)}",
+      "$acl.SetOwner($sid)",
       `$flags=${flags}`,
       "$rule=New-Object System.Security.AccessControl.FileSystemAccessRule($sid,'FullControl',$flags,[System.Security.AccessControl.PropagationFlags]::None,[System.Security.AccessControl.AccessControlType]::Allow)",
       "$acl.AddAccessRule($rule)",
@@ -78,9 +76,16 @@ function windowsPrivatePath(
     "-NoProfile", "-NonInteractive", "-Command", windowsScript(kind, apply),
   ], { ...process.env, AGENT_BRIDGE_PRIVATE_PATH: path });
   if (result.status !== 0) {
-    throw new PrivatePathError(apply
-      ? "cannot apply the current-user private path policy"
-      : "path does not satisfy the current-user private path policy");
+    const phase = result.status === 23
+      ? "final ACL verification failed"
+      : result.status === 24
+        ? "the existing owner is not trusted"
+        : result.status === 25
+          ? "the path is a reparse object"
+          : "the native ACL command failed";
+    throw new PrivatePathError(`${apply
+      ? "cannot apply"
+      : "path does not satisfy"} the current-user private path policy: ${phase}`);
   }
   const after = dependencies.inspect(path);
   if (after.isSymbolicLink()
