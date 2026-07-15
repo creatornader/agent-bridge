@@ -3120,7 +3120,9 @@ integration("PostgreSQL BridgeStore integration", () => {
     const packageRoot = fileURLToPath(new URL("../", import.meta.url));
     const packageDirectory = join(home, "packed-install");
     mkdirSync(packageDirectory, { mode: 0o700 });
-    const packed = spawnSync("npm", ["pack", "--pack-destination", home, "--silent"], {
+    // The suite builds once before Vitest. Running prepack here would clean the
+    // shared dist directory while CLI tests execute its entry point.
+    const packed = spawnSync("npm", ["pack", "--ignore-scripts", "--pack-destination", home, "--silent"], {
       cwd: packageRoot,
       encoding: "utf8",
       timeout: 60_000,
