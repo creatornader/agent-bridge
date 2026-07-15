@@ -1,6 +1,14 @@
 # Agent Bridge
 
-Agent Bridge is a durable, pull-first mailbox and work-delivery control plane for AI agents that run in different clients, processes, sessions, and machines.
+[![npm version](https://img.shields.io/npm/v/%40creatornader%2Fagent-bridge)](https://www.npmjs.com/package/@creatornader/agent-bridge)
+[![test](https://github.com/creatornader/agent-bridge/actions/workflows/test.yml/badge.svg)](https://github.com/creatornader/agent-bridge/actions/workflows/test.yml)
+[![license](https://img.shields.io/github/license/creatornader/agent-bridge)](LICENSE)
+
+Agent Bridge is a durable, pull-first mailbox and work-delivery control plane for AI
+agents across runtimes, sessions, and machines. It gives coding agents, desktop agents,
+always-on workers, and agent frameworks a shared inbox that survives disconnection and
+restart. Start locally with SQLite, then use an operator-owned PostgreSQL gateway when
+agents need to communicate across machines.
 
 It supports three operating modes:
 
@@ -11,6 +19,29 @@ It supports three operating modes:
 | Legacy Supabase | Existing `shared_context` table through PostgREST | Compatibility while a v1 deployment migrates |
 
 PostgreSQL remains the authority in gateway mode. SQLite holds local-only messages or gateway edge state. Supabase is one way to host PostgreSQL, not a protocol dependency.
+
+## Quick start
+
+Install the published package and run a two-principal local proof. Local mode needs no
+account, daemon, or external database.
+
+```bash
+npm install --global @creatornader/agent-bridge
+agent-bridge init --provider local
+agent-bridge demo
+```
+
+Install Agent Bridge into a supported client after the demo succeeds:
+
+```bash
+agent-bridge clients install codex --identity codex
+agent-bridge clients install claude-code --identity claude-code
+agent-bridge clients install claude-desktop --identity claude-desktop
+```
+
+Restart the client, then run `agent-bridge doctor --json` if the MCP server does not
+attach. The [troubleshooting guide](docs/troubleshooting.md) covers executable paths,
+client configuration, and recovery steps.
 
 ## What v2 provides
 
@@ -26,6 +57,7 @@ PostgreSQL remains the authority in gateway mode. SQLite holds local-only messag
 - Leased runtime presence with instance IDs and capabilities.
 - MCP, CLI, Codex, Claude Code, and Claude Desktop integration paths.
 - Canonical portable archives for messages and read receipts across local SQLite and shared PostgreSQL stores.
+- Native SQLite and PostgreSQL backup, verification, and restore.
 - Existing `post_context`, `get_context`, `ack_context`, `post`, and `get` behavior during migration.
 
 The accepted protocol and storage decisions live in [docs/architecture-v2.md](docs/architecture-v2.md).
@@ -63,6 +95,10 @@ A2A and application task semantics sit above Agent Bridge. MCP, CLI, and HTTPS a
 
 [ADR-0001](docs/decisions/0001-protocol-layers-and-acknowledgment-semantics.md) defines this boundary and the distinct acknowledgment meanings.
 
+Agent Bridge is not a workflow engine, scheduler, memory system, terminal manager, or
+new universal agent protocol. See [Agent Bridge in the agent ecosystem](docs/ecosystem.md)
+for its relationship to MCP, A2A, agmsg, brokers, and agent runtimes.
+
 ## Requirements
 
 - Node.js 22.23.1 or newer.
@@ -73,7 +109,9 @@ A2A and application task semantics sit above Agent Bridge. MCP, CLI, and HTTPS a
 
 ## Install from source
 
-The unscoped npm name belongs to another project. This repository uses the published package `@creatornader/agent-bridge`. The release workflow builds every tagged package before the protected npm publication step.
+Use the source install for development. The normal installation path is the published
+`@creatornader/agent-bridge` package shown in the quick start. The unscoped npm name
+belongs to another project.
 
 ```bash
 git clone https://github.com/creatornader/agent-bridge.git
@@ -91,7 +129,7 @@ The package exposes three executables:
 
 `npm pack` builds the package before creating a tarball. CI installs that tarball into an empty project, imports the provider-neutral library API, and runs the packaged CLI. Importing the package root does not start the MCP server.
 
-## Local quick start
+## Client identities and local commands
 
 Initialize backend settings. `init` does not write an agent identity into the shared config.
 
@@ -102,17 +140,18 @@ agent-bridge init --provider local
 Each client supplies its own identity:
 
 ```bash
-AGENT_BRIDGE_AGENT=codex agent-bridge post --category operational "Bridge is ready"
-AGENT_BRIDGE_AGENT=claude-code agent-bridge get --unacked-by claude-code
+AGENT_BRIDGE_AGENT=codex agent-bridge send \
+  --target claude-code \
+  --type context \
+  "Bridge is ready"
+AGENT_BRIDGE_AGENT=claude-code agent-bridge inbox --receipt-state unread
 ```
 
 You can also pass `--source` to a standalone send. If the process already has `AGENT_BRIDGE_AGENT`, an explicit identity must match it.
 
-Run a two-principal local proof:
-
-```bash
-agent-bridge demo
-```
+The `post`, `get`, and `--unacked-by` forms remain available only for compatibility
+with older clients. New integrations should use `send`, caller-bound inboxes, and
+`--receipt-state`.
 
 ## Portable archives
 
@@ -718,6 +757,10 @@ durability behavior has not yet been proved on a dedicated Windows host.
 
 ## Documentation
 
+- [ROADMAP.md](ROADMAP.md): released work, unreleased implementation, and the remaining program.
+- [SECURITY.md](SECURITY.md): supported versions, private vulnerability reporting, and security boundaries.
+- [docs/ecosystem.md](docs/ecosystem.md): product boundary, adjacent systems, and interoperability direction.
+- [docs/troubleshooting.md](docs/troubleshooting.md): MCP startup, identity, backend, and client recovery.
 - [ADR-0001](docs/decisions/0001-protocol-layers-and-acknowledgment-semantics.md): protocol layers and acknowledgment semantics.
 - [ADR-0002](docs/decisions/0002-canonical-operation-contract-registry.md): canonical contracts, generated artifacts, discovery, and version negotiation.
 - [docs/architecture-v2.md](docs/architecture-v2.md): protocol and storage decisions.

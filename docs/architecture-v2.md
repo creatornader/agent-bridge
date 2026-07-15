@@ -4,7 +4,7 @@ Status: living architecture for the 0.3.0 development line. Version 0.2.0 was re
 
 ## Product boundary
 
-Agent Bridge is the durable, pull-first mailbox and work-delivery control plane for agents that run in different clients, processes, sessions, and machines. It supports two operating modes:
+Agent Bridge is the durable, pull-first mailbox and work-delivery control plane for agents that run in different clients, processes, sessions, and machines. It supports three operating modes: local SQLite, the authenticated PostgreSQL gateway, and the legacy Supabase adapter.
 
 History visibility is caller-relative. `inbox` is the default and preserves broadcast-plus-targeted visibility; `sent` is source equal to the caller; `all` is their union. Receipt state (`any`, `unread`, `read`) is valid only for inbox and is always evaluated for the authenticated caller. Opaque v2 cursors bind workspace, caller, mailbox, and normalized filters. Readers temporarily accept v1 sequence cursors but emit only v2. After an edge cache contract upgrade, the gateway resets the authoritative pull cursor and replays `all` visibility; the publication outbox is never treated as sent history.
 
@@ -322,7 +322,13 @@ Gateway responses carry a request ID, including stable error envelopes. Scope fa
 
 The unscoped npm name `agent-bridge` belongs to another project. This repository uses `@creatornader/agent-bridge`. Tagged builds always produce a package artifact. Publishing stays gated by the protected `npm` environment, npm's OIDC trusted-publisher binding to `release.yml`, and the `NPM_PUBLISH_ENABLED` repository variable.
 
-The package must contain built runtime files, migrations, client manifests, license, README, and changelog. It exports the portable archive API from `@creatornader/agent-bridge/archive`. A clean tarball install runs archive and CLI smoke checks in CI. Releases use one version source, a tag-to-version check, npm provenance, and a human approval gate.
+The package must contain built runtime files, migrations, client manifests, maintained
+public documentation, the license, README, roadmap, security policy, and changelog. It
+exports the portable archive API from `@creatornader/agent-bridge/archive`. A clean
+tarball install runs archive and CLI smoke checks in CI. Releases use one version
+source, a tag-to-version check, and npm provenance. The npm environment does not
+currently require a human reviewer, so the release process must not claim a manual
+approval gate.
 
 ## Acceptance checks
 

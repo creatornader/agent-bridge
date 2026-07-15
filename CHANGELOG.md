@@ -6,14 +6,19 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and 
 
 ## [Unreleased]
 
-### Added
+The changes in this section are implemented on the 0.3.0 development line. They are
+not released until the matching tag, GitHub release, and npm package exist.
+
+### Control, portability, and recovery
+
+#### Added
 
 - Additive PostgreSQL migration 014 with database-specific owner, operator, and auditor roles. Protected SQL functions register operator and auditor logins in an append-only membership ledger. Owner functions provision more than one principal per workspace, rotate or revoke credentials with exact concurrent replay, and expose bounded keyset inventory without credential hashes. Rotation checks its requested workspace and principal under the predecessor row lock and returns the canonical identity. Fixed-origin expression indexes serve global and workspace inventory. The migration refuses critical dependency or privilege drift before recording a scoped catalog attestation. PostgreSQL 15, 16, 17, and 18 use separately certified prerequisite digests; unknown future majors fail closed.
 - Offline `agent-bridge owner` commands for provisioning, inventory, rotation, and revocation through a dedicated operator database URL. Provision and rotation use private, revisioned enrollment files with an exclusive operation lock and compare-and-swap transitions. The client installer consumes those files without putting raw credentials in command arguments. Rotation requires exact predecessor metadata and live host registration before replacing one backend file.
 - Canonical portable workspace archives for local SQLite and shared PostgreSQL stores. `agent-bridge archive export`, `verify`, and dry-run-first `import` move immutable messages and read receipts without copying delivery, presence, credential, control, or security state. The package exports the provider-neutral archive API from `@creatornader/agent-bridge/archive`.
 - Native SQLite and PostgreSQL disaster recovery through `agent-bridge dr backup`, `verify`, and `restore`. The common private bundle records provider-specific schema metadata and hashes. Local backup uses SQLite's online backup API and rejects gateway edge stores. PostgreSQL backup captures the schema, bounded role inventory, memberships, default privileges, readiness attestations, and recoverable data across PostgreSQL 15 through 18. The package exports the DR API from `@creatornader/agent-bridge/dr`.
 
-### Security
+#### Security
 
 - Enrollment files use exclusive creation, owner-only directories and files, confined paths, component and directory identity checks, symlink refusal, durable atomic state transitions, and a current-user Windows ACL. Windows enrollment and credential paths must already be owned by the current SID before the code changes or accepts their DACL. Node identity checks and native reparse attributes reject symlinks, junctions, other reparse objects, and path replacement around DACL validation. Stale lock recovery is explicit and requires same-host metadata, a minimum age, and proof that the recorded process has stopped. Deletion results distinguish a retained file, a missing file, a durable unlink, and an unlink whose directory durability could not be proved. PostgreSQL receives only the locally computed token hash. Owner JSON and errors exclude the raw token, token hash, SQL text, and operator connection URL.
 - New raw credential inserts default to no scopes. Owner mutations derive actors from the database session and never return, audit, or expose credential digest material in any PostgreSQL error property. External control fields reject null required values, surrounding whitespace, control characters, and values over 128 characters. Runtime readiness rejects uncertified PostgreSQL majors, unregistered control-role holders, registered members with unrelated inherited authority, downstream role delegation, protected-object grants to untrusted roles, unsafe future-object defaults, and exact prerequisite drift. Protected operations, registration, and revocation use a member-global lock before capability locks, so opposite capability changes do not deadlock and stale `SET ROLE` sessions cannot continue after revocation. Issued credential identity, scopes, labels, expiry, and replacement lineage are immutable. Migration 014 preserves lifecycle operations for credentials created under migration 013.
@@ -22,9 +27,9 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and 
 - Export request IDs are caller-visible, embedded as `exportRequestId` in the digest-bound header, and returned by verification and import. Import request IDs remain independent destination operation identifiers. Completed retries verify terminal metadata, while started retries reconcile only a matching retained file through the verified descriptor. Deterministic adjacent recovery artifacts derive from the export ID. Force replacement uses a durable private backup and reports restored, retained, publication-unknown, durability-unknown, and audit-unknown outcomes without hiding recovery paths.
 - Native DR uses owner-only paths, exclusive staging files, no-replace publication, same-descriptor extraction, and deterministic recovery names. PostgreSQL URLs are environment-only. Restore requires a fresh same-name, same-major target and explicit acceptance of executable source SQL. It recreates external principals as `NOLOGIN`, validates counts and readiness attestations, normalizes claimed leases, and disables the target after a partial failure. The bundle hash detects changed bytes but provides neither encryption nor source authentication. Windows success results state that parent-directory durability is unavailable instead of claiming a flush the platform cannot prove through Node.
 
-## [0.3.0] - 2026-07-14
+### Protocol and delivery
 
-### Added
+#### Added
 
 - Canonical TypeBox-backed v2 operation registry with deterministic JSON Schema 2020-12, OpenAPI 3.1.2, MCP manifest, and capability artifacts.
 - Surface-aware capability discovery over authenticated HTTP, MCP, and CLI. HTTP 2.1 is current, while upgraded gateways preserve the released headerless and explicit 2.0 response shapes.
@@ -48,7 +53,7 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and 
 - CLI health separates local edge health from remote gateway reachability, and unknown publication outcomes retry idempotently.
 - Passive `status` no longer starts synchronization or probes remote providers. `doctor` now reports named checks and exits 0, 2, or 1 for ok, degraded, or failed. Queue diagnostics distinguish due, scheduled, and leased work. They retain blocked outbox evidence after later successful synchronization.
 
-### Changed
+#### Changed
 
 - The pre-1.0 client status contract now has four states: `ok`, `unknown`, `degraded`, and `failed`. Named checks are required. Scripts that assumed only `ok` or `degraded` must handle the two new states. Passive status still exits 0.
 
@@ -57,7 +62,7 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and 
 - Consumer-side `maxAttempts` on claim and `retryPolicy` on nack are validated but ignored for one compatibility release. Stored publisher policy now controls retry and exhaustion.
 - Gateway authorization now checks scopes and rate policy before reading request bodies. Scope and rate errors use structured details, and missing security state fails closed.
 
-### Security
+#### Security
 
 - Existing credentials retain full compatibility access without lifecycle metadata changes. New direct SQL inserts default to no scopes; owner provisioning assigns an immutable named scope set.
 - Credential grace can only shorten a predecessor after replacement. Ordinary expiry and revocation cannot be extended or bypassed.
@@ -80,7 +85,7 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and 
 
 ### Changed
 
-- Package identity is `@creatornader/agent-bridge` at version `0.2.0`. Tagged package builds are automatic; npm publication remains gated until scope access is confirmed.
+- Package identity is `@creatornader/agent-bridge` at version `0.2.0`. The first npm publication was performed manually. OIDC trusted publishing was configured afterward for later releases.
 - Agent identity is process-scoped. Shared config no longer supplies `AGENT_BRIDGE_AGENT`.
 - Exact idempotent replays deduplicate. Reusing a key for changed content returns a conflict.
 - Gateway clients authenticate through separate principal-bound credentials stored in owner-only client backend files.
@@ -113,6 +118,5 @@ First tagged release. Marks the point where agent-bridge has shipped its initial
 - Narrative-leak detection in CI + on commit via `creatornader/textleaks@v0.2.0` (renamed from leakguard).
 
 [0.1.0]: https://github.com/creatornader/agent-bridge/releases/tag/v0.1.0
-[Unreleased]: https://github.com/creatornader/agent-bridge/compare/v0.3.0...HEAD
-[0.3.0]: https://github.com/creatornader/agent-bridge/compare/v0.2.0...v0.3.0
+[Unreleased]: https://github.com/creatornader/agent-bridge/compare/v0.2.0...HEAD
 [0.2.0]: https://github.com/creatornader/agent-bridge/compare/v0.1.0...v0.2.0

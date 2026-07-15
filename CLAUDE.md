@@ -26,6 +26,10 @@ Provider-neutral MCP server, CLI, and HTTPS gateway for messaging between AI age
 - `docs/decisions/0001-protocol-layers-and-acknowledgment-semantics.md`: Protocol boundary and acknowledgment semantics
 - `docs/decisions/0002-canonical-operation-contract-registry.md`: Canonical v2 contracts and version negotiation
 - `docs/architecture-v2.md`: Accepted v2 protocol, storage, security, delivery, and migration design
+- `docs/ecosystem.md`: Public product boundary and interoperability position
+- `docs/troubleshooting.md`: Public MCP and client recovery guide
+- `ROADMAP.md`: Released, implemented, and remaining product work
+- `SECURITY.md`: Supported versions, vulnerability reporting, and security boundaries
 - `SKILL.md`: Runtime-neutral instructions for agents using the bridge
 - `llms.txt`: Compact package and interface map for model tooling
 - `.github/workflows/test.yml`: Cross-platform, PostgreSQL, and packed-install checks
@@ -38,7 +42,11 @@ Provider-neutral MCP server, CLI, and HTTPS gateway for messaging between AI age
 - `README.md` describes installation, public behavior, and supported interfaces.
 - `docs/architecture-v2.md` is the source of truth for v2 architecture and acceptance checks.
 - ADRs under `docs/decisions/` record durable protocol and architecture choices. `docs/architecture-v2.md` describes the resulting system.
-- `CHANGELOG.md` records released behavior.
+- `docs/ecosystem.md` explains how Agent Bridge fits with adjacent protocols, brokers, runtimes, and client interfaces.
+- `docs/troubleshooting.md` records public recovery procedures for MCP and supported clients.
+- `ROADMAP.md` separates released behavior, implementation awaiting release, and remaining work.
+- `SECURITY.md` records supported versions, private reporting, and public security boundaries.
+- `CHANGELOG.md` records released and pending behavior.
 - `SKILL.md` records the public agent operating contract.
 - `llms.txt` provides a compact index and must match the public commands and identity model.
 - Postmortems under `docs/postmortems/` record incidents and corrective policy.
@@ -50,6 +58,10 @@ Sync triggers:
 | Public command, tool, or config changes | `README.md`, `CHANGELOG.md` |
 | Agent operating contract changes | `SKILL.md`, `llms.txt`, `README.md` |
 | Protocol, storage, identity, or delivery decision changes | `docs/architecture-v2.md`, `CLAUDE.md`, `README.md` |
+| Product boundary or interoperability changes | `docs/ecosystem.md`, matching ADR, `README.md`, `CLAUDE.md` |
+| Client startup or recovery behavior changes | `docs/troubleshooting.md`, `README.md`, `SKILL.md`, `llms.txt` |
+| Roadmap item changes state | `ROADMAP.md`, `CHANGELOG.md` when released |
+| Security support or threat boundary changes | `SECURITY.md`, `README.md`, `docs/architecture-v2.md` when architectural |
 | Release version changes | `package.json`, `CHANGELOG.md`, `README.md` when compatibility changes |
 | Incident changes operating policy | Matching postmortem, `CLAUDE.md`, and any affected public setup docs |
 | New maintained document | `README.md`, `CLAUDE.md`, and related docs that should link to it |
