@@ -1,6 +1,7 @@
 import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
+import { formatContractArtifact, normalizeContractArtifact } from "./artifact-format.js";
 import {
   capabilityDocument,
   ErrorEnvelopeSchema,
@@ -15,10 +16,6 @@ import {
   SUPPORTED_PROTOCOL_HEADER,
   SUPPORTED_PROTOCOL_VERSIONS,
 } from "./registry.js";
-
-function json(value: unknown): string {
-  return `${JSON.stringify(value, null, 2)}\n`;
-}
 
 function clone<T>(value: T): T {
   return JSON.parse(JSON.stringify(value)) as T;
@@ -217,10 +214,10 @@ const mcp = {
 
 const root = resolve(dirname(fileURLToPath(import.meta.url)), "../..");
 const outputs = new Map([
-  [resolve(root, "schemas/agent-bridge-v2.schema.json"), json(schemas)],
-  [resolve(root, "openapi/agent-bridge-v2.openapi.json"), json(openapi)],
-  [resolve(root, "schemas/agent-bridge-v2.mcp.json"), json(mcp)],
-  [resolve(root, "schemas/agent-bridge-v2.capabilities.json"), json(capabilityDocument())],
+  [resolve(root, "schemas/agent-bridge-v2.schema.json"), formatContractArtifact(schemas)],
+  [resolve(root, "openapi/agent-bridge-v2.openapi.json"), formatContractArtifact(openapi)],
+  [resolve(root, "schemas/agent-bridge-v2.mcp.json"), formatContractArtifact(mcp)],
+  [resolve(root, "schemas/agent-bridge-v2.capabilities.json"), formatContractArtifact(capabilityDocument())],
 ]);
 const check = process.argv.includes("--check");
 const drift: string[] = [];
@@ -228,7 +225,9 @@ for (const [path, contents] of outputs) {
   if (check) {
     let current = "";
     try { current = readFileSync(path, "utf8"); } catch {}
-    if (current !== contents) drift.push(path.slice(root.length + 1));
+    if (normalizeContractArtifact(current) !== normalizeContractArtifact(contents)) {
+      drift.push(path.slice(root.length + 1));
+    }
   } else {
     mkdirSync(dirname(path), { recursive: true });
     writeFileSync(path, contents);
