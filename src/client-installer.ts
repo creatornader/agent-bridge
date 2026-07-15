@@ -1,11 +1,12 @@
 import {
-  closeSync, existsSync, fsyncSync, mkdirSync, openSync, readFileSync,
-  renameSync, rmSync, writeFileSync,
+  accessSync, closeSync, constants, existsSync, fsyncSync, mkdirSync, openSync, readFileSync,
+  renameSync, rmSync, statSync, writeFileSync,
 } from "node:fs";
 import { createHash, randomUUID } from "node:crypto";
 import { homedir } from "node:os";
-import { dirname, join } from "node:path";
+import { delimiter, dirname, extname, isAbsolute, join, resolve } from "node:path";
 import { spawnSync, type SpawnSyncReturns } from "node:child_process";
+import { fileURLToPath } from "node:url";
 import { readClientConfigFile, resolveClientConfig } from "./client-config.js";
 import { securePrivatePath, verifyPrivatePathAccess } from "./private-path.js";
 import {
@@ -46,6 +47,71 @@ interface BackendBinding {
   credentialId: string;
   principal: string;
   instance: string;
+}
+
+interface DesktopLaunchContract {
+  command: string;
+  args: string[];
+}
+
+function assertExecutable(path: string): string {
+  if (!existsSync(path)) {
+    throw new Error(`Claude Desktop MCP executable does not exist: ${path}`);
+  }
+  if (!statSync(path).isFile()) {
+    throw new Error(`Claude Desktop MCP executable is not a file: ${path}`);
+  }
+  try {
+    accessSync(path, process.platform === "win32" ? constants.F_OK : constants.X_OK);
+  } catch {
+    throw new Error(`Claude Desktop MCP executable is not executable: ${path}`);
+  }
+  return path;
+}
+
+function resolveExecutable(command: string, env: NodeJS.ProcessEnv): string {
+  if (isAbsolute(command) || command.includes("/") || command.includes("\\")) {
+    return assertExecutable(resolve(command));
+  }
+  const searchPath = env.PATH ?? process.env.PATH ?? "";
+  const extensions = process.platform === "win32" && !extname(command)
+    ? (env.PATHEXT ?? process.env.PATHEXT ?? ".COM;.EXE;.BAT;.CMD")
+      .split(";")
+      .filter(Boolean)
+    : [""];
+  for (const directory of searchPath.split(delimiter).filter(Boolean)) {
+    for (const extension of extensions) {
+      const candidate = join(directory, command + extension);
+      if (!existsSync(candidate)) continue;
+      return assertExecutable(resolve(candidate));
+    }
+  }
+  throw new Error(`Claude Desktop MCP executable was not found on PATH: ${command}`);
+}
+
+function defaultServerEntry(): string {
+  const moduleDirectory = dirname(fileURLToPath(import.meta.url));
+  const candidates = [
+    join(moduleDirectory, "index.js"),
+    join(moduleDirectory, "..", "dist", "index.js"),
+  ];
+  const entry = candidates.find((candidate) => existsSync(candidate) && statSync(candidate).isFile());
+  if (!entry) {
+    throw new Error(`Claude Desktop MCP server entry does not exist: ${candidates[0]}`);
+  }
+  return resolve(entry);
+}
+
+function desktopLaunchContract(
+  requestedCommand: string | undefined,
+  env: NodeJS.ProcessEnv,
+): DesktopLaunchContract {
+  const command = requestedCommand?.trim();
+  if (command) return { command: resolveExecutable(command, env), args: [] };
+  return {
+    command: assertExecutable(resolve(process.execPath)),
+    args: [defaultServerEntry()],
+  };
 }
 
 function desktopConfigPath(env: NodeJS.ProcessEnv): string {
@@ -167,7 +233,7 @@ function writeJsonConfig(
   identity: string,
   instance: string,
   backendConfigPath: string,
-  command: string,
+  launch: DesktopLaunchContract,
 ): void {
   let config: Record<string, unknown> = {};
   if (existsSync(path)) {
@@ -188,7 +254,8 @@ function writeJsonConfig(
     mcpServers: {
       ...mcpServers,
       "agent-bridge": {
-        command,
+        command: launch.command,
+        args: launch.args,
         env: {
           AGENT_BRIDGE_AGENT: identity,
           AGENT_BRIDGE_INSTANCE: instance,
@@ -307,24 +374,50 @@ function backendMatches(
 function desktopRegistrationState(
   enrollment: EnrollmentFile,
   backendConfigPath: string,
-  command: string,
+  launch: DesktopLaunchContract,
   env: NodeJS.ProcessEnv,
-): "absent" | "matching" | "conflict" {
+): "absent" | "matching" | "legacy" | "conflict" {
   const path = desktopConfigPath(env);
   if (!existsSync(path)) return "absent";
   try {
     const config = JSON.parse(readFileSync(path, "utf8"));
     const server = config?.mcpServers?.["agent-bridge"];
     if (!server) return "absent";
-    return server?.command === command
-      && server?.env?.AGENT_BRIDGE_AGENT === enrollment.input.principal
+    const exactEnvironment = server?.env?.AGENT_BRIDGE_AGENT === enrollment.input.principal
       && server?.env?.AGENT_BRIDGE_INSTANCE === enrollment.input.instance
-      && server?.env?.AGENT_BRIDGE_CONFIG === backendConfigPath
+      && server?.env?.AGENT_BRIDGE_CONFIG === backendConfigPath;
+    if (server?.command === "agent-bridge-mcp"
+      && (server?.args === undefined || (Array.isArray(server.args) && server.args.length === 0))
+      && exactEnvironment) return "legacy";
+    return server?.command === launch.command
+      && Array.isArray(server?.args)
+      && server.args.length === launch.args.length
+      && server.args.every((arg: unknown, index: number) => arg === launch.args[index])
+      && exactEnvironment
       ? "matching"
       : "conflict";
   } catch {
     return "conflict";
   }
+}
+
+function repairLegacyDesktopRegistration(
+  state: "absent" | "matching" | "legacy" | "conflict",
+  enrollment: EnrollmentFile,
+  backendConfigPath: string,
+  launch: DesktopLaunchContract,
+  env: NodeJS.ProcessEnv,
+): "absent" | "matching" | "conflict" {
+  if (state !== "legacy") return state;
+  writeJsonConfig(
+    desktopConfigPath(env),
+    enrollment.input.principal,
+    enrollment.input.instance,
+    backendConfigPath,
+    launch,
+  );
+  const repaired = desktopRegistrationState(enrollment, backendConfigPath, launch, env);
+  return repaired === "legacy" ? "conflict" : repaired;
 }
 
 function nativeRegistrationState(
@@ -431,6 +524,9 @@ function enrolledInstallLocked(
   const identity = enrollment.input.principal;
   const expectedPath = clientBackendConfigPath(runtime, enrollment.input.instance, env);
   const command = options.command?.trim() || "agent-bridge-mcp";
+  const desktopLaunch = runtime === "claude-desktop"
+    ? desktopLaunchContract(options.command, env)
+    : undefined;
   const scope = options.scope ?? "user";
   const baseResult: ClientInstallResult = {
     runtime,
@@ -446,9 +542,14 @@ function enrolledInstallLocked(
       || !backendMatches(expectedPath, enrollment, enrollment.result.credentialId, false)) {
       throw new Error("consumed enrollment no longer matches its client backend");
     }
-    const registration = runtime === "claude-desktop"
-      ? desktopRegistrationState(enrollment, expectedPath, command, env)
+    const inspected = runtime === "claude-desktop"
+      ? desktopRegistrationState(enrollment, expectedPath, desktopLaunch!, env)
       : nativeRegistrationState(enrollment, expectedPath, command, scope, execute);
+    const registration = runtime === "claude-desktop"
+      ? repairLegacyDesktopRegistration(
+          inspected, enrollment, expectedPath, desktopLaunch!, env,
+        )
+      : inspected;
     if (registration !== "matching") {
       throw new Error("consumed enrollment no longer matches its MCP registration");
     }
@@ -463,7 +564,7 @@ function enrolledInstallLocked(
   }
   if (!recovering && enrollment.operation === "provision") {
     const registration = runtime === "claude-desktop"
-      ? desktopRegistrationState(enrollment, expectedPath, command, env)
+      ? desktopRegistrationState(enrollment, expectedPath, desktopLaunch!, env)
       : nativeRegistrationState(enrollment, expectedPath, command, scope, execute);
     if (registration !== "absent") {
       throw new Error("provision enrollment would replace an existing MCP registration");
@@ -500,9 +601,14 @@ function enrolledInstallLocked(
       if (!predecessorMatches && !successorMatches) {
         throw new Error("rotation requires an exactly bound predecessor or successor backend");
       }
-      const registration = runtime === "claude-desktop"
-        ? desktopRegistrationState(enrollment, expectedPath, command, env)
+      const inspected = runtime === "claude-desktop"
+        ? desktopRegistrationState(enrollment, expectedPath, desktopLaunch!, env)
         : nativeRegistrationState(enrollment, expectedPath, command, scope, execute);
+      const registration = runtime === "claude-desktop"
+        ? repairLegacyDesktopRegistration(
+            inspected, enrollment, expectedPath, desktopLaunch!, env,
+          )
+        : inspected;
       if (registration !== "matching") {
         throw new Error("rotation requires the exact existing MCP registration");
       }
@@ -531,11 +637,16 @@ function enrolledInstallLocked(
       )) {
         throw new Error("consuming enrollment conflicts with its client backend file");
       }
-      const registration = recovering
+      const inspected = recovering
         ? runtime === "claude-desktop"
-          ? desktopRegistrationState(enrollment, expectedPath, command, env)
+          ? desktopRegistrationState(enrollment, expectedPath, desktopLaunch!, env)
           : nativeRegistrationState(enrollment, expectedPath, command, scope, execute)
         : "absent";
+      const registration = recovering && runtime === "claude-desktop"
+        ? repairLegacyDesktopRegistration(
+            inspected, enrollment, expectedPath, desktopLaunch!, env,
+          )
+        : inspected;
       if (recovering && registration === "conflict") {
         throw new Error("consuming enrollment conflicts with the registered MCP server");
       }
@@ -545,7 +656,7 @@ function enrolledInstallLocked(
         result = baseResult;
       } else {
         result = installClient(runtime, identity, {
-          command,
+          command: runtime === "claude-desktop" ? options.command : command,
           scope: options.scope,
           instance: enrollment.input.instance,
           token: enrollment.token,
@@ -558,7 +669,7 @@ function enrolledInstallLocked(
         }, execute);
         sideEffectsCompleted = true;
         const verified = runtime === "claude-desktop"
-          ? desktopRegistrationState(enrollment, expectedPath, command, env)
+          ? desktopRegistrationState(enrollment, expectedPath, desktopLaunch!, env)
           : nativeRegistrationState(enrollment, expectedPath, command, scope, execute);
         if (verified !== "matching") throw new Error("MCP registration verification failed");
       }
@@ -647,6 +758,9 @@ export function installClient(
   }
   const command = options.command?.trim() || "agent-bridge-mcp";
   const env = options.env ?? process.env;
+  const desktopLaunch = runtime === "claude-desktop"
+    ? desktopLaunchContract(options.command, env)
+    : undefined;
   const expectedPath = clientBackendConfigPath(runtime, instance, env);
   const previous = existsSync(expectedPath) ? readFileSync(expectedPath) : undefined;
   try {
@@ -657,7 +771,7 @@ export function installClient(
     });
     if (runtime === "claude-desktop") {
       const path = desktopConfigPath(env);
-      writeJsonConfig(path, normalizedIdentity, instance, backendConfigPath, command);
+      writeJsonConfig(path, normalizedIdentity, instance, backendConfigPath, desktopLaunch!);
       return { runtime, identity: normalizedIdentity, instance, method: "json-config", configPath: path, backendConfigPath, restartRequired: true };
     }
     const executable = runtime === "codex" ? "codex" : "claude";

@@ -16,5 +16,10 @@ describe("runtime manifests", () => {
       expect(manifest.install.command.join(" ")).toContain("AGENT_BRIDGE_CONFIG={{backendConfig}}");
       expect(manifest.install.instanceValue).toBe("installer-generated");
     }
+    if (runtime === "claude-desktop") {
+      expect(manifest.command).toBe("{{absoluteNodeExecutable}}");
+      expect(manifest.args).toEqual(["{{absoluteServerEntry}}"]);
+      expect(manifest.install.launchValue).toBe("installer-resolved-absolute");
+    }
   });
 });

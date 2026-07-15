@@ -2,7 +2,8 @@
   "schema": "agent-bridge.runtime-manifest.v1",
   "runtime": "claude-desktop",
   "transport": "stdio",
-  "command": "agent-bridge-mcp",
+  "command": "{{absoluteNodeExecutable}}",
+  "args": ["{{absoluteServerEntry}}"],
   "identity": { "source": "env", "variable": "AGENT_BRIDGE_AGENT", "required": true },
   "instance": { "source": "env", "variable": "AGENT_BRIDGE_INSTANCE", "required": true },
   "backendConfig": { "source": "env", "variable": "AGENT_BRIDGE_CONFIG", "perClient": true },
@@ -13,6 +14,7 @@
     "identityValue": "operator-selected",
     "instanceValue": "installer-generated",
     "backendConfigValue": "installer-generated",
+    "launchValue": "installer-resolved-absolute",
     "restartRequired": true
   },
   "wakeModes": ["poll"],
