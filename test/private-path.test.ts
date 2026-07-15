@@ -47,6 +47,8 @@ describe("private path policy", () => {
     expect(script).toContain("$before.GetOwner([System.Security.Principal.SecurityIdentifier])");
     expect(script).toContain("$beforeOwner -ne $sid.Value -and ($null -eq $tokenOwner -or $beforeOwner -ne $tokenOwner.Value)");
     expect(script.indexOf("$beforeOwner -ne $sid.Value")).toBeLessThan(script.indexOf("Set-Acl"));
+    expect(script).toContain("$acl=$before");
+    expect(script).toContain("$acl.RemoveAccessRuleSpecific($existing)");
     expect(script).toContain("$acl.SetOwner($sid)");
     expect(script).toContain("$check.GetOwner([System.Security.Principal.SecurityIdentifier])");
     expect(script).toContain("AreAccessRulesProtected");
@@ -59,12 +61,12 @@ describe("private path policy", () => {
       platform: "win32",
       execute: () => result(24),
       inspect: () => fileIdentity(),
-    })).toThrow(/current-user private path policy/);
+    })).toThrow(/existing owner is not trusted/);
     expect(() => securePrivatePath("C:\\private", "directory", {
       platform: "win32",
       execute: () => result(23),
       inspect: () => directoryIdentity(),
-    })).toThrow(/current-user private path policy/);
+    })).toThrow(/final ACL verification failed/);
   });
 
   it("rejects a persistent backend reparse path before DACL changes", () => {
@@ -85,7 +87,7 @@ describe("private path policy", () => {
       platform: "win32",
       execute: () => result(25),
       inspect: () => fileIdentity(),
-    })).toThrow(/current-user private path policy/);
+    })).toThrow(/path is a reparse object/);
 
     let reads = 0;
     expect(() => securePrivatePath("C:\\private\\credential.config", "file", {
