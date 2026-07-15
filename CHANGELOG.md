@@ -6,6 +6,14 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and 
 
 ## [Unreleased]
 
+### Added
+
+- Additive PostgreSQL migration 014 with database-specific owner, operator, and auditor roles. Protected SQL functions register operator and auditor logins in an append-only membership ledger. Owner functions provision more than one principal per workspace, rotate or revoke credentials with exact concurrent replay, and expose bounded keyset inventory without credential hashes. Fixed-origin expression indexes serve global and workspace inventory. The migration refuses critical dependency or privilege drift before recording a scoped catalog attestation. PostgreSQL 15, 16, 17, and 18 use separately certified prerequisite digests; unknown future majors fail closed.
+
+### Security
+
+- New raw credential inserts default to no scopes. Owner mutations derive actors from the database session and never return, audit, or expose credential digest material in any PostgreSQL error property. External control fields reject null required values, surrounding whitespace, control characters, and values over 128 characters. Runtime readiness rejects uncertified PostgreSQL majors, unregistered control-role holders, registered members with unrelated inherited authority, downstream role delegation, protected-object grants to untrusted roles, unsafe future-object defaults, and exact prerequisite drift. Protected operations, registration, and revocation use a member-global lock before capability locks, so opposite capability changes do not deadlock and stale `SET ROLE` sessions cannot continue after revocation. Issued credential identity, scopes, labels, expiry, and replacement lineage are immutable. Migration 014 preserves lifecycle operations for credentials created under migration 013.
+
 ## [0.3.0] - 2026-07-14
 
 ### Added

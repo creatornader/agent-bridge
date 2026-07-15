@@ -36,7 +36,7 @@ async function withTemporaryDatabase(
 ): Promise<void> {
   const name = `bridge_upgrade_${randomUUID().replaceAll("-", "")}`;
   const suffix = createHash("md5").update(name).digest("hex").slice(0, 16);
-  const roleNames = ["runtime", "data_owner", "context_reader", "event_writer"]
+  const roleNames = ["runtime", "data_owner", "context_reader", "event_writer", "control_owner", "control_operator", "control_auditor", "acl_intruder"]
     .map((kind) => `agent_bridge_${kind}_${suffix}`);
   const adminUrl = new URL(databaseUrl!);
   adminUrl.pathname = "/postgres";
@@ -122,6 +122,24 @@ async function runtimeRole(database: { query: pg.Pool["query"] }): Promise<strin
   return role;
 }
 
+async function controlRoles(database: { query: pg.Pool["query"] }): Promise<{
+  owner: string; operator: string; auditor: string; runtime: string;
+  dataOwner: string; contextReader: string; eventWriter: string;
+}> {
+  const result = await database.query<{
+    owner: string; operator: string; auditor: string; runtime: string;
+    dataOwner: string; contextReader: string; eventWriter: string;
+  }>(`SELECT
+    'agent_bridge_control_owner_'||substr(md5(current_database()),1,16) AS owner,
+    'agent_bridge_control_operator_'||substr(md5(current_database()),1,16) AS operator,
+    'agent_bridge_control_auditor_'||substr(md5(current_database()),1,16) AS auditor,
+    'agent_bridge_runtime_'||substr(md5(current_database()),1,16) AS runtime,
+    'agent_bridge_data_owner_'||substr(md5(current_database()),1,16) AS "dataOwner",
+    'agent_bridge_context_reader_'||substr(md5(current_database()),1,16) AS "contextReader",
+    'agent_bridge_event_writer_'||substr(md5(current_database()),1,16) AS "eventWriter"`);
+  return result.rows[0]!;
+}
+
 async function withRuntimeAuthority<T>(
   database: pg.Pool,
   credentialId: string,
@@ -159,9 +177,28 @@ async function expectStatementRejected(
   await client.query("ROLLBACK TO SAVEPOINT hostile_statement");
 }
 
+function databaseErrorDiagnostic(error: unknown): string {
+  if (!error || typeof error !== "object") return String(error);
+  const record = error as Record<string, unknown>;
+  return JSON.stringify(Object.fromEntries(
+    Object.getOwnPropertyNames(error).sort().map((property) => {
+      const value = record[property];
+      return [property, value === undefined ? null : typeof value === "bigint" ? value.toString() : value];
+    }),
+  ));
+}
+
 integration("PostgreSQL BridgeStore integration", () => {
   beforeAll(async () => {
     await runMigrations(pool!, fileURLToPath(new URL("../sql/migrations", import.meta.url)));
+  });
+
+  it("captures non-enumerable PostgreSQL diagnostic properties", () => {
+    const diagnostic = new Error("synthetic PostgreSQL error") as Error & { internalQuery?: string };
+    Object.defineProperty(diagnostic, "internalQuery", {
+      value: "SELECT internal diagnostic", enumerable: false,
+    });
+    expect(databaseErrorDiagnostic(diagnostic)).toContain('"internalQuery":"SELECT internal diagnostic"');
   });
 
   afterAll(async () => {
@@ -667,7 +704,7 @@ integration("PostgreSQL BridgeStore integration", () => {
     )).rejects.toThrow(/active request authority is required/);
   });
 
-  it("enforces canonical scopes and preserves the transitional full default", async () => {
+  it("enforces canonical scopes and defaults raw credentials to no access", async () => {
     const workspaceId = await workspace();
     const agent = await pool!.query<{ id: string }>(
       "INSERT INTO agent_bridge.agents(workspace_id,principal) VALUES ($1,'scope-test') RETURNING id",
@@ -677,7 +714,7 @@ integration("PostgreSQL BridgeStore integration", () => {
       "INSERT INTO agent_bridge.credentials(workspace_id,agent_id,token_hash) VALUES ($1,$2,$3) RETURNING scopes",
       [workspaceId, agent.rows[0]!.id, hashCredential(`full-${randomUUID()}`)],
     );
-    expect(full.rows[0]!.scopes).toEqual(AUTHORIZATION_SCOPES);
+    expect(full.rows[0]!.scopes).toEqual([]);
     await expect(pool!.query(
       "INSERT INTO agent_bridge.credentials(workspace_id,agent_id,token_hash,scopes) VALUES ($1,$2,$3,$4)",
       [workspaceId, agent.rows[0]!.id, hashCredential(`empty-${randomUUID()}`), []],
@@ -1568,6 +1605,143 @@ integration("PostgreSQL BridgeStore integration", () => {
     });
   });
 
+  it("refuses to attest dependency drift present before the owner-control migration", async () => {
+    await withTemporaryDatabase(async (upgrade) => {
+      const directory = fileURLToPath(new URL("../sql/migrations", import.meta.url));
+      const plan = await loadMigrationPlan(directory);
+      for (const migration of plan.slice(0, 13)) {
+        await upgrade.query(
+          migration.source.split("__AGENT_BRIDGE_MIGRATION_CHECKSUM__").join(migration.checksum),
+        );
+      }
+      await upgrade.query(
+        "ALTER TABLE agent_bridge.agents DROP CONSTRAINT agents_workspace_id_principal_key",
+      );
+      const ownerControlPlaneMigration = plan[13]!;
+      await expect(upgrade.query(
+        ownerControlPlaneMigration.source
+          .split("__AGENT_BRIDGE_MIGRATION_CHECKSUM__")
+          .join(ownerControlPlaneMigration.checksum),
+      )).rejects.toThrow(/preflight rejected workspace or agent constraint drift/);
+      await upgrade.query("ROLLBACK");
+      expect((await upgrade.query<{ relation: string | null }>(
+        "SELECT to_regclass('agent_bridge.control_requests')::text AS relation",
+      )).rows[0]!.relation).toBeNull();
+    });
+  });
+
+  it("refuses preexisting PUBLIC and arbitrary future-object privilege paths", async () => {
+    for (const hostileSetup of [
+      async (upgrade: pg.Pool) => {
+        await upgrade.query("GRANT SELECT(token_hash) ON agent_bridge.credentials TO PUBLIC");
+      },
+      async (upgrade: pg.Pool) => {
+        const suffix = createHash("md5").update((await upgrade.query<{ name: string }>(
+          "SELECT current_database() AS name",
+        )).rows[0]!.name).digest("hex").slice(0, 16);
+        const intruder = `agent_bridge_acl_intruder_${suffix}`;
+        await upgrade.query(`CREATE ROLE ${intruder}`);
+        await upgrade.query(
+          `ALTER DEFAULT PRIVILEGES IN SCHEMA agent_bridge GRANT EXECUTE ON FUNCTIONS TO ${intruder}`,
+        );
+      },
+    ]) {
+      await withTemporaryDatabase(async (upgrade) => {
+        const directory = fileURLToPath(new URL("../sql/migrations", import.meta.url));
+        const plan = await loadMigrationPlan(directory);
+        for (const migration of plan.slice(0, 13)) {
+          await upgrade.query(
+            migration.source.split("__AGENT_BRIDGE_MIGRATION_CHECKSUM__").join(migration.checksum),
+          );
+        }
+        await hostileSetup(upgrade);
+        const ownerControlPlaneMigration = plan[13]!;
+        await expect(upgrade.query(
+          ownerControlPlaneMigration.source
+            .split("__AGENT_BRIDGE_MIGRATION_CHECKSUM__")
+            .join(ownerControlPlaneMigration.checksum),
+        )).rejects.toThrow(/owner control preflight rejected/);
+        await upgrade.query("ROLLBACK");
+      });
+    }
+
+    await withTemporaryDatabase(async (upgrade) => {
+      const directory = fileURLToPath(new URL("../sql/migrations", import.meta.url));
+      const plan = await loadMigrationPlan(directory);
+      for (const migration of plan.slice(0, 13)) {
+        await upgrade.query(
+          migration.source.split("__AGENT_BRIDGE_MIGRATION_CHECKSUM__").join(migration.checksum),
+        );
+      }
+      const createdRoles: string[] = [];
+      for (const role of ["anon", "authenticated"]) {
+        if (!(await upgrade.query("SELECT 1 FROM pg_roles WHERE rolname=$1", [role])).rowCount) {
+          await upgrade.query(`CREATE ROLE ${role}`);
+          createdRoles.push(role);
+        }
+        await upgrade.query(`GRANT SELECT(token_hash) ON agent_bridge.credentials TO ${role}`);
+      }
+      const migration = plan[13]!;
+      await expect(upgrade.query(
+        migration.source.split("__AGENT_BRIDGE_MIGRATION_CHECKSUM__").join(migration.checksum),
+      )).rejects.toThrow(/column privilege drift/);
+      await upgrade.query("ROLLBACK");
+      for (const role of createdRoles) {
+        await upgrade.query(`DROP OWNED BY ${role}`);
+        await upgrade.query(`DROP ROLE ${role}`);
+      }
+    });
+  });
+
+  it("refuses forged credential-security and row-isolation helpers before attestation", async () => {
+    await withTemporaryDatabase(async (upgrade) => {
+      const directory = fileURLToPath(new URL("../sql/migrations", import.meta.url));
+      const plan = await loadMigrationPlan(directory);
+      for (const migration of plan.slice(0, 13)) {
+        await upgrade.query(
+          migration.source.split("__AGENT_BRIDGE_MIGRATION_CHECKSUM__").join(migration.checksum),
+        );
+      }
+      await upgrade.query(`CREATE OR REPLACE FUNCTION agent_bridge.reject_credential_delete()
+        RETURNS trigger LANGUAGE plpgsql SET search_path='' AS $forged$
+        BEGIN RETURN OLD; END $forged$`);
+      await upgrade.query(`CREATE OR REPLACE FUNCTION agent_bridge.security_schema_ready()
+        RETURNS boolean LANGUAGE sql STABLE SECURITY DEFINER SET search_path='' AS $forged$
+        SELECT true $forged$`);
+      const migration = plan[13]!;
+      await expect(upgrade.query(
+        migration.source.split("__AGENT_BRIDGE_MIGRATION_CHECKSUM__").join(migration.checksum),
+      )).rejects.toThrow(/credential security definition drift/);
+      await upgrade.query("ROLLBACK");
+    });
+
+    await withTemporaryDatabase(async (upgrade) => {
+      const directory = fileURLToPath(new URL("../sql/migrations", import.meta.url));
+      const plan = await loadMigrationPlan(directory);
+      for (const migration of plan.slice(0, 13)) {
+        await upgrade.query(
+          migration.source.split("__AGENT_BRIDGE_MIGRATION_CHECKSUM__").join(migration.checksum),
+        );
+      }
+      const runtime = await runtimeRole(upgrade);
+      await upgrade.query(`DROP POLICY messages_runtime_select ON agent_bridge.messages;
+        CREATE POLICY messages_runtime_select ON agent_bridge.messages
+        FOR SELECT TO ${runtime} USING (true)`);
+      await upgrade.query(`CREATE OR REPLACE FUNCTION agent_bridge.current_request_workspace()
+        RETURNS text LANGUAGE sql STABLE SECURITY DEFINER SET search_path='' AS $forged$
+        SELECT 'forged'::text $forged$`);
+      await upgrade.query(`CREATE OR REPLACE FUNCTION agent_bridge.row_isolation_catalog_definition()
+        RETURNS text LANGUAGE sql STABLE SET search_path='' AS $forged$
+        SELECT catalog_definition FROM agent_bridge.row_isolation_attestations
+        WHERE name='domain-v1' $forged$`);
+      const migration = plan[13]!;
+      await expect(upgrade.query(
+        migration.source.split("__AGENT_BRIDGE_MIGRATION_CHECKSUM__").join(migration.checksum),
+      )).rejects.toThrow(/row isolation drift/);
+      await upgrade.query("ROLLBACK");
+    });
+  });
+
   it("upgrades populated deliveries to row isolation and serves them through request authority", async () => {
     await withTemporaryDatabase(async (upgrade) => {
       const directory = fileURLToPath(new URL("../sql/migrations", import.meta.url));
@@ -1578,7 +1752,9 @@ integration("PostgreSQL BridgeStore integration", () => {
         );
       }
       const rowIsolationMigration = plan[12]!;
+      const ownerControlPlaneMigration = plan[13]!;
       expect(rowIsolationMigration).toMatchObject({ version: 13, name: "row_isolation" });
+      expect(ownerControlPlaneMigration).toMatchObject({ version: 14, name: "owner_control_plane" });
 
       const workspaceId = "upgrade-row-isolation";
       const messageId = "018f4a70-0000-7000-8000-000000000201";
@@ -1644,8 +1820,64 @@ integration("PostgreSQL BridgeStore integration", () => {
           .split("__AGENT_BRIDGE_MIGRATION_CHECKSUM__")
           .join(rowIsolationMigration.checksum),
       );
+      const dirtyRoles = await controlRoles(upgrade);
+      await upgrade.query(`CREATE ROLE ${dirtyRoles.owner} LOGIN BYPASSRLS`);
+      await upgrade.query(`CREATE ROLE ${dirtyRoles.operator} LOGIN BYPASSRLS`);
+      await upgrade.query(`CREATE ROLE ${dirtyRoles.auditor} LOGIN BYPASSRLS`);
+      await upgrade.query(`GRANT pg_read_all_data TO ${dirtyRoles.operator}`);
+      await upgrade.query(`GRANT ${dirtyRoles.operator},${dirtyRoles.owner} TO pg_monitor`);
+      await upgrade.query(`GRANT SELECT ON agent_bridge.messages TO ${dirtyRoles.operator}`);
+      await upgrade.query("CREATE MATERIALIZED VIEW agent_bridge.dirty_control_surface AS SELECT 1 AS id");
+      await upgrade.query(`GRANT SELECT ON agent_bridge.dirty_control_surface TO ${dirtyRoles.operator}`);
+      await upgrade.query(`GRANT SELECT(token_hash) ON agent_bridge.credentials TO ${dirtyRoles.owner}`);
+      await upgrade.query(`GRANT USAGE ON SEQUENCE agent_bridge.messages_sequence_seq TO ${dirtyRoles.auditor}`);
+      await upgrade.query(
+        `GRANT EXECUTE ON FUNCTION agent_bridge.replace_credential(
+          uuid,character,text[],text,text,timestamptz,timestamptz,text,uuid
+        ) TO ${dirtyRoles.auditor}`,
+      );
+      const legacyAgent = await upgrade.query<{ id: string }>(
+        "INSERT INTO agent_bridge.agents(workspace_id,principal) VALUES ($1,'legacy-custom') RETURNING id",
+        [workspaceId],
+      );
+      const legacyCredential = await upgrade.query<{ id: string }>(
+        `INSERT INTO agent_bridge.credentials(
+           workspace_id,agent_id,token_hash,label,scopes,scope_set_name
+         ) VALUES ($1,$2,$3,E'legacy\\nlabel',ARRAY['messages:read']::text[],NULL) RETURNING id`,
+        [workspaceId, legacyAgent.rows[0]!.id, hashCredential(`legacy-${randomUUID()}`)],
+      );
+      await upgrade.query(
+        ownerControlPlaneMigration.source
+          .split("__AGENT_BRIDGE_MIGRATION_CHECKSUM__")
+          .join(ownerControlPlaneMigration.checksum),
+      );
       expect(await migrationsReady(upgrade, plan)).toBe(true);
       expect(await runtimeSchemaReady(upgrade, { allowPrivilegedCaller: true })).toBe(true);
+      const scrubbedRoles = await upgrade.query<{
+        attributes_ready: boolean; inherited_external: boolean; granted_external: boolean;
+        data_grant: boolean; materialized_grant: boolean; token_grant: boolean;
+        sequence_grant: boolean; function_grant: boolean;
+      }>(`SELECT
+        (SELECT bool_and(NOT rolcanlogin AND NOT rolbypassrls) FROM pg_roles
+          WHERE rolname IN ($1,$2,$3)) AS attributes_ready,
+        pg_has_role($2,'pg_read_all_data','MEMBER') AS inherited_external,
+        pg_has_role('pg_monitor',$1,'MEMBER') OR pg_has_role('pg_monitor',$2,'MEMBER') AS granted_external,
+        has_table_privilege($2,'agent_bridge.messages','SELECT') AS data_grant,
+        has_table_privilege($2,'agent_bridge.dirty_control_surface','SELECT') AS materialized_grant,
+        has_column_privilege($1,'agent_bridge.credentials','token_hash','SELECT') AS token_grant,
+        has_sequence_privilege($3,'agent_bridge.messages_sequence_seq','USAGE') AS sequence_grant,
+        has_function_privilege($3,'agent_bridge.replace_credential(uuid,character,text[],text,text,timestamptz,timestamptz,text,uuid)','EXECUTE') AS function_grant`,
+        [dirtyRoles.owner, dirtyRoles.operator, dirtyRoles.auditor],
+      );
+      expect(scrubbedRoles.rows[0]).toEqual({
+        attributes_ready: true, inherited_external: false, granted_external: false,
+        data_grant: false, materialized_grant: false, token_grant: false,
+        sequence_grant: false, function_grant: false,
+      });
+      expect((await upgrade.query<{ revoked: boolean }>(
+        "SELECT revoked FROM agent_bridge.control_revoke_credential($1,$2,'retired')",
+        [randomUUID(), legacyCredential.rows[0]!.id],
+      )).rows[0]!.revoked).toBe(true);
       expect((await upgrade.query(
         "SELECT name,checksum FROM agent_bridge.schema_migrations WHERE version=13",
       )).rows).toEqual([{ name: "row_isolation", checksum: rowIsolationMigration.checksum }]);
@@ -1820,6 +2052,1019 @@ integration("PostgreSQL BridgeStore integration", () => {
       }
     }
     expect(await runtimeSchemaReady(pool!, { allowPrivilegedCaller: true })).toBe(true);
+  });
+
+  it("isolates owner provisioning behind hostile-role-safe control functions", async () => {
+    const names = await controlRoles(pool!);
+    const workspaceId = `owner-${randomUUID()}`;
+    const requestId = randomUUID();
+    const tokenHash = hashCredential(`owner-token-${randomUUID()}`);
+    const client = await pool!.connect();
+    const sessionActor = (await client.query<{ actor: string }>(
+      "SELECT session_user::text AS actor",
+    )).rows[0]!.actor;
+    try {
+      await client.query(`SET ROLE ${names.operator}`);
+      const provisioned = await client.query<{ workspace_id: string; agent_id: string; credential_id: string; replayed: boolean }>(
+        `SELECT * FROM agent_bridge.control_provision(
+          $1,$2,$3,'owner-agent','Owner agent','test',$4,'initial','release-a-full',NULL)`,
+        [requestId, workspaceId, workspaceId, tokenHash],
+      );
+      expect(provisioned.rows[0]).toMatchObject({ workspace_id: workspaceId, replayed: false });
+      const replay = await client.query<{ replayed: boolean }>(
+        `SELECT replayed FROM agent_bridge.control_provision(
+          $1,$2,$3,'owner-agent','Owner agent','test',$4,'initial','release-a-full',NULL)`,
+        [requestId, workspaceId, workspaceId, tokenHash],
+      );
+      expect(replay.rows[0]!.replayed).toBe(true);
+      await expect(client.query(
+        `SELECT * FROM agent_bridge.control_provision(
+          $1,$2,$3,'changed','Owner agent','test',$4,'initial','release-a-full',NULL)`,
+        [requestId, workspaceId, workspaceId, tokenHash],
+      )).rejects.toThrow(/different content/);
+      const second = await client.query<{ replayed: boolean }>(
+        `SELECT replayed FROM agent_bridge.control_provision(
+          $1,$2,$3,'second-agent',NULL,NULL,$4,NULL,'release-a-full',NULL)`,
+        [randomUUID(), workspaceId, workspaceId, hashCredential(`second-${randomUUID()}`)],
+      );
+      expect(second.rows[0]!.replayed).toBe(false);
+      const inventory = await client.query("SELECT * FROM agent_bridge.control_credential_inventory($1)", [workspaceId]);
+      expect(inventory.rows).toHaveLength(2);
+      expect(JSON.stringify(inventory.rows)).not.toContain(tokenHash);
+      await client.query("RESET ROLE");
+
+      expect((await client.query<{ allowed: boolean }>(
+        `SELECT has_column_privilege($1,'agent_bridge.credentials','token_hash','SELECT') AS allowed`,
+        [names.owner],
+      )).rows[0]!.allowed).toBe(false);
+
+      await client.query(`SET ROLE ${names.auditor}`);
+      await expect(client.query("SELECT * FROM agent_bridge.control_credential_inventory($1)", [workspaceId])).resolves.toBeTruthy();
+      await expect(client.query(
+        `SELECT * FROM agent_bridge.control_revoke_credential($1,$2,'retired')`,
+        [randomUUID(), provisioned.rows[0]!.credential_id],
+      )).rejects.toThrow(/permission denied/);
+      await client.query("RESET ROLE");
+
+      await client.query(`SET ROLE ${names.runtime}`);
+      expect((await client.query<{ ready: boolean }>(
+        "SELECT agent_bridge.owner_control_plane_ready() AS ready",
+      )).rows[0]!.ready).toBe(true);
+      await expect(client.query("SELECT * FROM agent_bridge.control_credential_inventory(NULL)"))
+        .rejects.toThrow(/permission denied/);
+    } finally {
+      await client.query("RESET ROLE").catch(() => {});
+      client.release();
+    }
+    const audit = await pool!.query("SELECT actor,result FROM agent_bridge.control_requests WHERE request_id=$1", [requestId]);
+    expect(audit.rows).toHaveLength(1);
+    expect(audit.rows[0]!.actor).toBe(sessionActor);
+    expect(JSON.stringify(audit.rows)).not.toContain(tokenHash);
+    const eventAudit = await pool!.query(
+      "SELECT actor FROM agent_bridge.control_events WHERE request_id=$1", [requestId],
+    );
+    expect(eventAudit.rows).toEqual([{ actor: sessionActor }]);
+  });
+
+  it("rotates and revokes credentials with exact replay and secret-safe failures", async () => {
+    const names = await controlRoles(pool!);
+    const client = await pool!.connect();
+    const sessionActor = (await client.query<{ actor: string }>(
+      "SELECT session_user::text AS actor",
+    )).rows[0]!.actor;
+    const workspaceId = `lifecycle-${randomUUID()}`;
+    const predecessorHash = hashCredential(`predecessor-${randomUUID()}`);
+    const successorHash = hashCredential(`successor-${randomUUID()}`);
+    let revokedCredentialId = "";
+    try {
+      await client.query(`SET ROLE ${names.operator}`);
+      const predecessor = (await client.query<{ credential_id: string }>(
+        `SELECT credential_id FROM agent_bridge.control_provision(
+          $1,$2,$2,'agent',NULL,NULL,$3,NULL,'release-a-full',NULL)`,
+        [randomUUID(), workspaceId, predecessorHash],
+      )).rows[0]!;
+      const rotateRequest = randomUUID();
+      const rotated = (await client.query<{ credential_id: string; replayed: boolean }>(
+        `SELECT * FROM agent_bridge.control_rotate_credential(
+          $1,$2,$3,'rotated','release-a-full',NULL,NULL)`,
+        [rotateRequest, predecessor.credential_id, successorHash],
+      )).rows[0]!;
+      revokedCredentialId = rotated.credential_id;
+      expect(rotated.replayed).toBe(false);
+      expect((await client.query<{ replayed: boolean }>(
+        `SELECT replayed FROM agent_bridge.control_rotate_credential(
+          $1,$2,$3,'rotated','release-a-full',NULL,NULL)`,
+        [rotateRequest, predecessor.credential_id, successorHash],
+      )).rows[0]!.replayed).toBe(true);
+      await expect(client.query(
+        `SELECT * FROM agent_bridge.control_rotate_credential(
+          $1,$2,$3,'rotated','release-a-full',NULL,NULL)`,
+        [rotateRequest, predecessor.credential_id, hashCredential(`changed-${randomUUID()}`)],
+      )).rejects.toThrow(/different content/);
+
+      const revokeRequest = randomUUID();
+      expect((await client.query<{ revoked: boolean; replayed: boolean }>(
+        "SELECT * FROM agent_bridge.control_revoke_credential($1,$2,'retired')",
+        [revokeRequest, rotated.credential_id],
+      )).rows[0]).toEqual({ revoked: true, replayed: false });
+      expect((await client.query<{ replayed: boolean }>(
+        "SELECT replayed FROM agent_bridge.control_revoke_credential($1,$2,'retired')",
+        [revokeRequest, rotated.credential_id],
+      )).rows[0]!.replayed).toBe(true);
+      await expect(client.query(
+        "SELECT * FROM agent_bridge.control_revoke_credential($1,$2,'compromise')",
+        [revokeRequest, rotated.credential_id],
+      )).rejects.toThrow(/different content/);
+
+      const duplicatePredecessor = (await client.query<{ credential_id: string }>(
+        `SELECT credential_id FROM agent_bridge.control_provision(
+          $1,$2,$2,'duplicate-agent',NULL,NULL,$3,NULL,'release-a-full',NULL)`,
+        [randomUUID(), workspaceId, hashCredential(`duplicate-predecessor-${randomUUID()}`)],
+      )).rows[0]!;
+      let rotationError = "";
+      try {
+        await client.query(
+          "SELECT * FROM agent_bridge.control_rotate_credential($1,$2,$3,NULL,'release-a-full',NULL,NULL)",
+          [randomUUID(), duplicatePredecessor.credential_id, successorHash],
+        );
+      } catch (error) {
+        rotationError = databaseErrorDiagnostic(error);
+      }
+      expect(rotationError).toMatch(/credential rotation conflicts/);
+      for (const digest of [predecessorHash, successorHash]) {
+        expect(rotationError).not.toContain(digest);
+      }
+
+      const duplicateWorkspace = `duplicate-${randomUUID()}`;
+      let duplicateError = "";
+      try {
+        await client.query(
+          `SELECT * FROM agent_bridge.control_provision(
+            $1,$2,$2,'agent',NULL,NULL,$3,NULL,'release-a-full',NULL)`,
+          [randomUUID(), duplicateWorkspace, successorHash],
+        );
+      } catch (error) {
+        duplicateError = databaseErrorDiagnostic(error);
+      }
+      expect(duplicateError).toMatch(/provisioning request conflicts/);
+      for (const digest of [predecessorHash, successorHash]) {
+        expect(duplicateError).not.toContain(digest);
+      }
+      await expect(client.query(
+        `SELECT * FROM agent_bridge.control_provision(
+          $1,$2,$2,' agent',NULL,NULL,$3,NULL,'release-a-full',NULL)`,
+        [randomUUID(), `invalid-${randomUUID()}`, hashCredential(`invalid-${randomUUID()}`)],
+      )).rejects.toThrow(/invalid provisioning request/);
+      const validWorkspace = `validated-${randomUUID()}`;
+      const validHash = hashCredential(`validated-${randomUUID()}`);
+      const invalidFields: unknown[][] = [
+        [` ${validWorkspace}`, validWorkspace, "agent", null, null, null],
+        [validWorkspace, `${validWorkspace}\n`, "agent", null, null, null],
+        [validWorkspace, validWorkspace, "agent\n", null, null, null],
+        [validWorkspace, validWorkspace, "agent", "x".repeat(129), null, null],
+        [validWorkspace, validWorkspace, "agent", null, "runtime\t", null],
+        [validWorkspace, validWorkspace, "agent", null, null, " label"],
+      ];
+      for (const [invalidWorkspaceId, invalidWorkspaceName, invalidPrincipal,
+        invalidDisplayName, invalidRuntimeType, invalidLabel] of invalidFields) {
+        await expect(client.query(
+          `SELECT * FROM agent_bridge.control_provision(
+            $1,$2,$3,$4,$5,$6,$7,$8,'release-a-full',NULL)`,
+          [randomUUID(), invalidWorkspaceId, invalidWorkspaceName, invalidPrincipal,
+            invalidDisplayName, invalidRuntimeType, validHash, invalidLabel],
+        )).rejects.toThrow(/invalid provisioning request/);
+      }
+      await expect(client.query(
+        `SELECT * FROM agent_bridge.control_provision(
+          $1,$2,$2,'agent',NULL,NULL,$3,NULL,E'release-a-full\n',NULL)`,
+        [randomUUID(), validWorkspace, validHash],
+      )).rejects.toThrow(/invalid provisioning request/);
+      await expect(client.query(
+        `SELECT * FROM agent_bridge.control_rotate_credential(
+          $1,$2,$3,E'rotated\nlabel','release-a-full',NULL,NULL)`,
+        [randomUUID(), duplicatePredecessor.credential_id, hashCredential(`invalid-rotation-${randomUUID()}`)],
+      )).rejects.toThrow(/invalid credential rotation request/);
+      await expect(client.query(
+        `SELECT * FROM agent_bridge.control_rotate_credential(
+          $1,$2,$3,NULL,' release-a-full',NULL,NULL)`,
+        [randomUUID(), duplicatePredecessor.credential_id, hashCredential(`invalid-scope-${randomUUID()}`)],
+      )).rejects.toThrow(/invalid credential rotation request/);
+      await expect(client.query(
+        `SELECT * FROM agent_bridge.control_provision(
+          $1,$2,$2,'agent',NULL,NULL,$3,NULL,'release-a-full',NULL)`,
+        [randomUUID(), `null-token-${randomUUID()}`, null],
+      )).rejects.toThrow(/invalid provisioning request/);
+      await expect(client.query(
+        `SELECT * FROM agent_bridge.control_rotate_credential(
+          $1,$2,$3,NULL,'release-a-full',NULL,NULL)`,
+        [randomUUID(), duplicatePredecessor.credential_id, null],
+      )).rejects.toThrow(/invalid credential rotation request/);
+      await expect(client.query(
+        "SELECT * FROM agent_bridge.control_revoke_credential($1,$2,$3)",
+        [randomUUID(), duplicatePredecessor.credential_id, null],
+      )).rejects.toThrow(/credential revocation reason is invalid/);
+    } finally {
+      await client.query("RESET ROLE").catch(() => {});
+      client.release();
+    }
+    expect((await pool!.query(
+      "SELECT * FROM agent_bridge.resolve_credential_hash($1)", [predecessorHash],
+    )).rows).toHaveLength(0);
+    expect((await pool!.query<{ revoked_by: string }>(
+      "SELECT revoked_by FROM agent_bridge.credentials WHERE id=$1", [revokedCredentialId],
+    )).rows[0]!.revoked_by).toBe(sessionActor);
+    expect((await pool!.query<{ actor: string }>(
+      "SELECT actor FROM agent_bridge.control_events WHERE credential_id=$1 AND operation='revoke'",
+      [revokedCredentialId],
+    )).rows[0]!.actor).toBe(sessionActor);
+  });
+
+  it("denies direct control data, credential hashes, sequences, and mutation functions", async () => {
+    const names = await controlRoles(pool!);
+    const client = await pool!.connect();
+    try {
+      for (const role of [names.operator, names.auditor, names.runtime]) {
+        await client.query(`SET ROLE ${role}`);
+        await expect(client.query("SELECT * FROM agent_bridge.control_requests LIMIT 1"))
+          .rejects.toThrow(/permission denied/);
+        await expect(client.query("SELECT token_hash FROM agent_bridge.credentials LIMIT 1"))
+          .rejects.toThrow(/permission denied/);
+        await expect(client.query("SELECT nextval('agent_bridge.control_events_sequence_seq')"))
+          .rejects.toThrow(/permission denied/);
+        await client.query("RESET ROLE");
+      }
+      await client.query(`SET ROLE ${names.operator}`);
+      await expect(client.query("UPDATE agent_bridge.credentials SET revoked_at=now() WHERE false"))
+        .rejects.toThrow(/permission denied/);
+      await client.query("RESET ROLE");
+      await client.query(`SET ROLE ${names.owner}`);
+      await expect(client.query(
+        "UPDATE agent_bridge.control_requests SET request_id=request_id WHERE false",
+      )).rejects.toThrow(/append-only/);
+      await client.query("RESET ROLE");
+      for (const role of [names.auditor, names.runtime]) {
+        await client.query(`SET ROLE ${role}`);
+        await expect(client.query(
+          `SELECT * FROM agent_bridge.control_provision(
+            $1,'denied','denied','agent',NULL,NULL,$2,NULL,'release-a-full',NULL)`,
+          [randomUUID(), hashCredential(`denied-${randomUUID()}`)],
+        )).rejects.toThrow(/permission denied/);
+        await expect(client.query(
+          "SELECT * FROM agent_bridge.control_revoke_credential($1,$2,'retired')",
+          [randomUUID(), randomUUID()],
+        )).rejects.toThrow(/permission denied/);
+        await client.query("RESET ROLE");
+      }
+    } finally {
+      await client.query("RESET ROLE").catch(() => {});
+      client.release();
+    }
+  });
+
+  it("keeps live owner readiness closed to certified PostgreSQL majors", async () => {
+    const result = await pool!.query<{ major: number; definition: string; ready: boolean }>(
+      `SELECT current_setting('server_version_num')::integer/10000 AS major,
+        pg_get_functiondef('agent_bridge.owner_control_plane_ready()'::regprocedure) AS definition,
+        agent_bridge.owner_control_plane_ready() AS ready`,
+    );
+    expect([15, 16, 17, 18]).toContain(result.rows[0]!.major);
+    expect(result.rows[0]!.ready).toBe(true);
+    expect(result.rows[0]!.definition).toContain("server_version_num");
+    expect(result.rows[0]!.definition).toMatch(/array\[15,\s*16,\s*17,\s*18\]/i);
+  });
+
+  it("registers operator and auditor logins as the exact allowed membership graph", async () => {
+    const names = await controlRoles(pool!);
+    const login = `bridge_control_login_${randomUUID().replaceAll("-", "")}`;
+    const password = randomUUID().replaceAll("-", "");
+    const loginUrl = new URL(databaseUrl!);
+    loginUrl.username = login;
+    loginUrl.password = password;
+    const loginPool = new pg.Pool({ connectionString: loginUrl.toString(), max: 1 });
+    const sessionActor = (await pool!.query<{ actor: string }>(
+      "SELECT session_user::text AS actor",
+    )).rows[0]!.actor;
+    await pool!.query(`CREATE ROLE ${login} LOGIN PASSWORD '${password}'`);
+    try {
+      await expect(pool!.query(
+        "SELECT * FROM agent_bridge.register_control_member($1,$2,$3)",
+        [randomUUID(), login, null],
+      )).rejects.toThrow(/invalid control membership registration/);
+      await expect(pool!.query(
+        "SELECT * FROM agent_bridge.revoke_control_member($1,$2,$3)",
+        [randomUUID(), login, null],
+      )).rejects.toThrow(/invalid control membership revocation/);
+      await pool!.query(`GRANT ${names.operator} TO ${login}`);
+      expect(await runtimeSchemaReady(pool!, { allowPrivilegedCaller: true })).toBe(false);
+      await pool!.query(`REVOKE ${names.operator} FROM ${login}`);
+      expect(await runtimeSchemaReady(pool!, { allowPrivilegedCaller: true })).toBe(true);
+
+      const registerRequest = randomUUID();
+      expect((await pool!.query<{ replayed: boolean }>(
+        "SELECT replayed FROM agent_bridge.register_control_member($1,$2,'operator')",
+        [registerRequest, login],
+      )).rows[0]!.replayed).toBe(false);
+      expect((await pool!.query<{ replayed: boolean }>(
+        "SELECT replayed FROM agent_bridge.register_control_member($1,$2,'operator')",
+        [registerRequest, login],
+      )).rows[0]!.replayed).toBe(true);
+      const auditorRequest = randomUUID();
+      expect((await pool!.query<{ replayed: boolean }>(
+        "SELECT replayed FROM agent_bridge.register_control_member($1,$2,'auditor')",
+        [auditorRequest, login],
+      )).rows[0]!.replayed).toBe(false);
+      expect(await runtimeSchemaReady(pool!, { allowPrivilegedCaller: true })).toBe(true);
+
+      const client = await loginPool.connect();
+      try {
+        const workspaceId = `registered-${randomUUID()}`;
+        await expect(client.query(
+          `SELECT * FROM agent_bridge.control_provision(
+            $1,$2,$2,'registered-agent',NULL,NULL,$3,NULL,'release-a-full',NULL)`,
+          [randomUUID(), workspaceId, hashCredential(`registered-${randomUUID()}`)],
+        )).resolves.toBeTruthy();
+        await expect(client.query(
+          "SELECT * FROM agent_bridge.control_credential_inventory(NULL,NULL,NULL,1)",
+        )).resolves.toBeTruthy();
+      } finally {
+        client.release();
+      }
+
+      expect((await pool!.query<{ actor: string }>(
+        "SELECT actor FROM agent_bridge.control_membership_events WHERE request_id=$1",
+        [registerRequest],
+      )).rows).toEqual([{ actor: sessionActor }]);
+      const revokeRequest = randomUUID();
+      expect((await pool!.query<{ replayed: boolean }>(
+        "SELECT replayed FROM agent_bridge.revoke_control_member($1,$2,'operator')",
+        [revokeRequest, login],
+      )).rows[0]!.replayed).toBe(false);
+      expect((await pool!.query<{ replayed: boolean }>(
+        "SELECT replayed FROM agent_bridge.revoke_control_member($1,$2,'operator')",
+        [revokeRequest, login],
+      )).rows[0]!.replayed).toBe(true);
+      expect((await pool!.query<{ replayed: boolean }>(
+        "SELECT replayed FROM agent_bridge.revoke_control_member($1,$2,'auditor')",
+        [randomUUID(), login],
+      )).rows[0]!.replayed).toBe(false);
+      expect(await runtimeSchemaReady(pool!, { allowPrivilegedCaller: true })).toBe(true);
+    } finally {
+      await loginPool.end().catch(() => {});
+      await pool!.query(`REVOKE ${names.operator},${names.auditor} FROM ${login}`).catch(() => {});
+      await pool!.query(`DROP ROLE IF EXISTS ${login}`);
+    }
+  });
+
+  it("serializes opposite control-role transactions without a deadlock", async () => {
+    const names = await controlRoles(pool!);
+    const login = `bridge_lock_order_${randomUUID().replaceAll("-", "")}`;
+    const first = await pool!.connect();
+    const second = await pool!.connect();
+    let firstOpen = false;
+    let secondOpen = false;
+    let secondRegistration: Promise<pg.QueryResult> | undefined;
+    await pool!.query(`CREATE ROLE ${login} LOGIN`);
+    try {
+      await first.query("BEGIN");
+      firstOpen = true;
+      await second.query("BEGIN");
+      secondOpen = true;
+      await first.query(
+        "SELECT * FROM agent_bridge.register_control_member($1,$2,'operator')",
+        [randomUUID(), login],
+      );
+
+      let secondSettled = false;
+      secondRegistration = second.query(
+        "SELECT * FROM agent_bridge.register_control_member($1,$2,'auditor')",
+        [randomUUID(), login],
+      ).finally(() => {
+        secondSettled = true;
+      });
+      await new Promise((resolve) => setTimeout(resolve, 75));
+      expect(secondSettled).toBe(false);
+
+      await first.query(
+        "SELECT * FROM agent_bridge.register_control_member($1,$2,'auditor')",
+        [randomUUID(), login],
+      );
+      await first.query("COMMIT");
+      firstOpen = false;
+      await expect(secondRegistration).resolves.toBeTruthy();
+      await second.query(
+        "SELECT * FROM agent_bridge.register_control_member($1,$2,'operator')",
+        [randomUUID(), login],
+      );
+      await second.query("COMMIT");
+      secondOpen = false;
+      expect(await runtimeSchemaReady(pool!, { allowPrivilegedCaller: true })).toBe(true);
+    } finally {
+      if (firstOpen) await first.query("ROLLBACK").catch(() => {});
+      if (secondOpen) await second.query("ROLLBACK").catch(() => {});
+      if (secondRegistration) await secondRegistration.catch(() => {});
+      first.release();
+      second.release();
+      await pool!.query(
+        "SELECT * FROM agent_bridge.revoke_control_member($1,$2,'operator')",
+        [randomUUID(), login],
+      ).catch(() => {});
+      await pool!.query(
+        "SELECT * FROM agent_bridge.revoke_control_member($1,$2,'auditor')",
+        [randomUUID(), login],
+      ).catch(() => {});
+      await pool!.query(`REVOKE ${names.operator},${names.auditor} FROM ${login}`).catch(() => {});
+      await pool!.query(`DROP ROLE IF EXISTS ${login}`);
+    }
+  });
+
+  it("enforces PostgreSQL 16 membership options for control authority", async () => {
+    const major = Number((await pool!.query<{ major: string }>(
+      "SELECT current_setting('server_version_num')::integer/10000 AS major",
+    )).rows[0]!.major);
+    if (major < 16) return;
+
+    const names = await controlRoles(pool!);
+    const login = `bridge_options_${randomUUID().replaceAll("-", "")}`;
+    const password = randomUUID().replaceAll("-", "");
+    const loginUrl = new URL(databaseUrl!);
+    loginUrl.username = login;
+    loginUrl.password = password;
+    const loginPool = new pg.Pool({ connectionString: loginUrl.toString(), max: 1 });
+    await pool!.query(`CREATE ROLE ${login} LOGIN PASSWORD '${password}'`);
+    try {
+      const ownerMemberships = await pool!.query<{
+        admin: boolean; inherit: boolean; set: boolean;
+      }>(`SELECT membership.admin_option AS admin,
+          (to_jsonb(membership)->>'inherit_option')::boolean AS inherit,
+          (to_jsonb(membership)->>'set_option')::boolean AS set
+        FROM pg_auth_members membership
+        JOIN pg_roles granted ON granted.oid=membership.roleid
+        JOIN pg_roles member ON member.oid=membership.member
+        WHERE member.rolname=session_user AND granted.rolname IN ($1,$2,$3)
+        ORDER BY granted.rolname`, [names.owner, names.operator, names.auditor]);
+      expect(ownerMemberships.rows).toHaveLength(3);
+      expect(ownerMemberships.rows).toEqual([
+        { admin: true, inherit: true, set: true },
+        { admin: true, inherit: true, set: true },
+        { admin: true, inherit: true, set: true },
+      ]);
+
+      await pool!.query(
+        "SELECT * FROM agent_bridge.register_control_member($1,$2,'operator')",
+        [randomUUID(), login],
+      );
+      const client = await loginPool.connect();
+      try {
+        await pool!.query(`GRANT ${names.operator} TO ${login} WITH INHERIT FALSE`);
+        expect(await runtimeSchemaReady(pool!, { allowPrivilegedCaller: true })).toBe(false);
+        await client.query(`SET ROLE ${names.operator}`);
+        await expect(client.query(
+          "SELECT * FROM agent_bridge.control_credential_inventory(NULL,NULL,NULL,1)",
+        )).rejects.toThrow(/unsafe membership graph/);
+        await client.query("RESET ROLE");
+        await pool!.query(`GRANT ${names.operator} TO ${login} WITH INHERIT TRUE`);
+        expect(await runtimeSchemaReady(pool!, { allowPrivilegedCaller: true })).toBe(true);
+
+        await pool!.query(`GRANT ${names.operator} TO ${login} WITH SET FALSE`);
+        expect(await runtimeSchemaReady(pool!, { allowPrivilegedCaller: true })).toBe(false);
+        await expect(client.query(
+          "SELECT * FROM agent_bridge.control_credential_inventory(NULL,NULL,NULL,1)",
+        )).rejects.toThrow(/unsafe membership graph/);
+        await pool!.query(`GRANT ${names.operator} TO ${login} WITH SET TRUE`);
+        expect(await runtimeSchemaReady(pool!, { allowPrivilegedCaller: true })).toBe(true);
+      } finally {
+        await client.query("RESET ROLE").catch(() => {});
+        client.release();
+      }
+    } finally {
+      await loginPool.end().catch(() => {});
+      await pool!.query(
+        "SELECT * FROM agent_bridge.revoke_control_member($1,$2,'operator')",
+        [randomUUID(), login],
+      ).catch(() => {});
+      await pool!.query(`REVOKE ${names.operator} FROM ${login}`).catch(() => {});
+      await pool!.query(`DROP ROLE IF EXISTS ${login}`);
+    }
+  });
+
+  it("rejects broad inherited authority and downstream membership delegation", async () => {
+    const names = await controlRoles(pool!);
+    const operatorLogin = `bridge_operator_${randomUUID().replaceAll("-", "")}`;
+    const delegatedLogin = `bridge_delegate_${randomUUID().replaceAll("-", "")}`;
+    const operatorPassword = randomUUID().replaceAll("-", "");
+    const delegatedPassword = randomUUID().replaceAll("-", "");
+    const operatorUrl = new URL(databaseUrl!);
+    operatorUrl.username = operatorLogin;
+    operatorUrl.password = operatorPassword;
+    const delegatedUrl = new URL(databaseUrl!);
+    delegatedUrl.username = delegatedLogin;
+    delegatedUrl.password = delegatedPassword;
+    const operatorPool = new pg.Pool({ connectionString: operatorUrl.toString(), max: 1 });
+    const delegatedPool = new pg.Pool({ connectionString: delegatedUrl.toString(), max: 1 });
+    await pool!.query(`CREATE ROLE ${operatorLogin} LOGIN PASSWORD '${operatorPassword}'`);
+    await pool!.query(`CREATE ROLE ${delegatedLogin} LOGIN PASSWORD '${delegatedPassword}'`);
+    try {
+      await pool!.query(`GRANT pg_read_all_data TO ${operatorLogin}`);
+      await expect(pool!.query(
+        "SELECT * FROM agent_bridge.register_control_member($1,$2,'operator')",
+        [randomUUID(), operatorLogin],
+      )).rejects.toThrow(/unsafe membership graph/);
+      await pool!.query(`REVOKE pg_read_all_data FROM ${operatorLogin}`);
+
+      await pool!.query(
+        "SELECT * FROM agent_bridge.register_control_member($1,$2,'operator')",
+        [randomUUID(), operatorLogin],
+      );
+      expect(await runtimeSchemaReady(pool!, { allowPrivilegedCaller: true })).toBe(true);
+
+      await pool!.query(`GRANT ${names.operator} TO ${operatorLogin} WITH ADMIN OPTION`);
+      expect(await runtimeSchemaReady(pool!, { allowPrivilegedCaller: true })).toBe(false);
+      await expect(operatorPool.query(
+        "SELECT * FROM agent_bridge.control_credential_inventory(NULL,NULL,NULL,1)",
+      )).rejects.toThrow(/unsafe membership graph/);
+      await pool!.query(`REVOKE ADMIN OPTION FOR ${names.operator} FROM ${operatorLogin}`);
+      expect(await runtimeSchemaReady(pool!, { allowPrivilegedCaller: true })).toBe(true);
+
+      await pool!.query(`GRANT pg_read_all_data TO ${operatorLogin}`);
+      expect(await runtimeSchemaReady(pool!, { allowPrivilegedCaller: true })).toBe(false);
+      await expect(operatorPool.query(
+        "SELECT * FROM agent_bridge.control_credential_inventory(NULL,NULL,NULL,1)",
+      )).rejects.toThrow(/unsafe membership graph/);
+      await pool!.query(`REVOKE pg_read_all_data FROM ${operatorLogin}`);
+      expect(await runtimeSchemaReady(pool!, { allowPrivilegedCaller: true })).toBe(true);
+
+      await pool!.query(`GRANT ${operatorLogin} TO ${delegatedLogin}`);
+      expect(await runtimeSchemaReady(pool!, { allowPrivilegedCaller: true })).toBe(false);
+      await expect(delegatedPool.query(
+        "SELECT * FROM agent_bridge.control_credential_inventory(NULL,NULL,NULL,1)",
+      )).rejects.toThrow(/unsafe membership graph/);
+      await pool!.query(`REVOKE ${operatorLogin} FROM ${delegatedLogin}`);
+      expect(await runtimeSchemaReady(pool!, { allowPrivilegedCaller: true })).toBe(true);
+    } finally {
+      await delegatedPool.end().catch(() => {});
+      await operatorPool.end().catch(() => {});
+      await pool!.query(`REVOKE ${operatorLogin} FROM ${delegatedLogin}`).catch(() => {});
+      await pool!.query(`REVOKE pg_read_all_data FROM ${operatorLogin}`).catch(() => {});
+      await pool!.query(
+        "SELECT * FROM agent_bridge.revoke_control_member($1,$2,'operator')",
+        [randomUUID(), operatorLogin],
+      ).catch(() => {});
+      await pool!.query(`REVOKE ${names.operator} FROM ${operatorLogin}`).catch(() => {});
+      await pool!.query(`DROP ROLE IF EXISTS ${delegatedLogin}`);
+      await pool!.query(`DROP ROLE IF EXISTS ${operatorLogin}`);
+    }
+  });
+
+  it("serializes live operations before revocation and denies stale SET ROLE sessions", async () => {
+    const names = await controlRoles(pool!);
+    const login = `bridge_revocation_${randomUUID().replaceAll("-", "")}`;
+    const password = randomUUID().replaceAll("-", "");
+    const loginUrl = new URL(databaseUrl!);
+    loginUrl.username = login;
+    loginUrl.password = password;
+    const loginPool = new pg.Pool({ connectionString: loginUrl.toString(), max: 1 });
+    let client: pg.PoolClient | undefined;
+    let transactionOpen = false;
+    let revokePromise: Promise<pg.QueryResult> | undefined;
+    await pool!.query(`CREATE ROLE ${login} LOGIN PASSWORD '${password}'`);
+    try {
+      await pool!.query(
+        "SELECT * FROM agent_bridge.register_control_member($1,$2,'operator')",
+        [randomUUID(), login],
+      );
+      client = await loginPool.connect();
+      await client.query("BEGIN");
+      transactionOpen = true;
+      await client.query(`SET ROLE ${names.operator}`);
+      await client.query(
+        "SELECT * FROM agent_bridge.control_credential_inventory(NULL,NULL,NULL,1)",
+      );
+
+      let revokeSettled = false;
+      revokePromise = pool!.query(
+        "SELECT * FROM agent_bridge.revoke_control_member($1,$2,'operator')",
+        [randomUUID(), login],
+      ).finally(() => {
+        revokeSettled = true;
+      });
+      await new Promise((resolve) => setTimeout(resolve, 75));
+      expect(revokeSettled).toBe(false);
+
+      await client.query("COMMIT");
+      transactionOpen = false;
+      await revokePromise;
+      expect((await client.query<{ actor: string }>(
+        "SELECT current_user::text AS actor",
+      )).rows[0]!.actor).toBe(names.operator);
+      await expect(client.query(
+        "SELECT * FROM agent_bridge.control_credential_inventory(NULL,NULL,NULL,1)",
+      )).rejects.toThrow(/not registered/);
+      expect(await runtimeSchemaReady(pool!, { allowPrivilegedCaller: true })).toBe(true);
+    } finally {
+      if (transactionOpen && client) await client.query("ROLLBACK").catch(() => {});
+      if (revokePromise) await revokePromise.catch(() => {});
+      if (client) {
+        await client.query("RESET ROLE").catch(() => {});
+        client.release();
+      }
+      await loginPool.end().catch(() => {});
+      await pool!.query(
+        "SELECT * FROM agent_bridge.revoke_control_member($1,$2,'operator')",
+        [randomUUID(), login],
+      ).catch(() => {});
+      await pool!.query(`REVOKE ${names.operator} FROM ${login}`).catch(() => {});
+      await pool!.query(`DROP ROLE IF EXISTS ${login}`);
+    }
+  });
+
+  it("denies PUBLIC-only, anon, and authenticated roles every control or secret path", async () => {
+    const publicOnly = `bridge_public_only_${randomUUID().replaceAll("-", "")}`;
+    const createdRoles: string[] = [];
+    for (const role of [publicOnly, "anon", "authenticated"]) {
+      if (!(await pool!.query("SELECT 1 FROM pg_roles WHERE rolname=$1", [role])).rowCount) {
+        await pool!.query(`CREATE ROLE ${role}`);
+        createdRoles.push(role);
+      }
+    }
+    const client = await pool!.connect();
+    try {
+      for (const role of [publicOnly, "anon", "authenticated"]) {
+        await client.query(`SET ROLE ${role}`);
+        await expect(client.query("SELECT * FROM agent_bridge.control_requests LIMIT 1"))
+          .rejects.toThrow(/permission denied/);
+        await expect(client.query("SELECT * FROM agent_bridge.control_membership_events LIMIT 1"))
+          .rejects.toThrow(/permission denied/);
+        await expect(client.query("SELECT token_hash FROM agent_bridge.credentials LIMIT 1"))
+          .rejects.toThrow(/permission denied/);
+        await expect(client.query("SELECT nextval('agent_bridge.control_events_sequence_seq')"))
+          .rejects.toThrow(/permission denied/);
+        await expect(client.query("SELECT * FROM agent_bridge.control_credential_inventory(NULL)"))
+          .rejects.toThrow(/permission denied/);
+        await expect(client.query(
+          "SELECT * FROM agent_bridge.register_control_member($1,$2,'operator')",
+          [randomUUID(), role],
+        )).rejects.toThrow(/permission denied/);
+        await expect(client.query("SELECT agent_bridge.owner_control_plane_ready()"))
+          .rejects.toThrow(/permission denied/);
+        await expect(client.query(
+          `SELECT * FROM agent_bridge.control_provision(
+            $1,'denied','denied','agent',NULL,NULL,$2,NULL,'release-a-full',NULL)`,
+          [randomUUID(), hashCredential(`public-denied-${randomUUID()}`)],
+        )).rejects.toThrow(/permission denied/);
+        await client.query("RESET ROLE");
+      }
+    } finally {
+      await client.query("RESET ROLE").catch(() => {});
+      client.release();
+      for (const role of createdRoles.reverse()) await pool!.query(`DROP ROLE ${role}`);
+    }
+  });
+
+  it("serializes identical concurrent rotate and revoke requests into exact replay", async () => {
+    const names = await controlRoles(pool!);
+    const workspaceId = `concurrent-${randomUUID()}`;
+    const initial = await pool!.query<{ credential_id: string }>(
+      `SELECT credential_id FROM agent_bridge.control_provision(
+        $1,$2,$2,'rotate-agent',NULL,NULL,$3,NULL,'release-a-full',NULL)`,
+      [randomUUID(), workspaceId, hashCredential(`rotate-initial-${randomUUID()}`)],
+    );
+    const rotateRequest = randomUUID();
+    const rotatedHash = hashCredential(`rotate-next-${randomUUID()}`);
+    const first = await pool!.connect();
+    const second = await pool!.connect();
+    try {
+      await first.query(`SET ROLE ${names.operator}`);
+      await second.query(`SET ROLE ${names.operator}`);
+      const provisionWorkspace = `concurrent-provision-${randomUUID()}`;
+      const provisionRequest = randomUUID();
+      const provisionHash = hashCredential(`concurrent-provision-${randomUUID()}`);
+      await first.query("BEGIN");
+      const firstProvision = (await first.query<{ credential_id: string }>(
+        `SELECT credential_id FROM agent_bridge.control_provision(
+          $1,$2,$2,'agent',NULL,NULL,$3,NULL,'release-a-full',NULL)`,
+        [provisionRequest, provisionWorkspace, provisionHash],
+      )).rows[0]!;
+      let provisionSettled = false;
+      const repeatedProvision = second.query<{ credential_id: string; replayed: boolean }>(
+        `SELECT credential_id,replayed FROM agent_bridge.control_provision(
+          $1,$2,$2,'agent',NULL,NULL,$3,NULL,'release-a-full',NULL)`,
+        [provisionRequest, provisionWorkspace, provisionHash],
+      ).then((result) => { provisionSettled = true; return result.rows[0]!; });
+      await new Promise((resolve) => setTimeout(resolve, 50));
+      expect(provisionSettled).toBe(false);
+      await first.query("COMMIT");
+      expect(await repeatedProvision).toEqual({ credential_id: firstProvision.credential_id, replayed: true });
+
+      const changedWorkspace = `concurrent-changed-${randomUUID()}`;
+      const changedRequest = randomUUID();
+      const changedHash = hashCredential(`concurrent-changed-${randomUUID()}`);
+      await first.query("BEGIN");
+      await first.query(
+        `SELECT * FROM agent_bridge.control_provision(
+          $1,$2,$2,'first',NULL,NULL,$3,NULL,'release-a-full',NULL)`,
+        [changedRequest, changedWorkspace, changedHash],
+      );
+      let changedSettled = false;
+      const changedProvision = second.query(
+        `SELECT * FROM agent_bridge.control_provision(
+          $1,$2,$2,'changed',NULL,NULL,$3,NULL,'release-a-full',NULL)`,
+        [changedRequest, changedWorkspace, changedHash],
+      ).then(() => ({ succeeded: true, message: "" }), (error) => {
+        changedSettled = true;
+        return { succeeded: false, message: databaseErrorDiagnostic(error) };
+      });
+      await new Promise((resolve) => setTimeout(resolve, 50));
+      expect(changedSettled).toBe(false);
+      await first.query("COMMIT");
+      const changedResult = await changedProvision;
+      expect(changedResult.succeeded).toBe(false);
+      expect(changedResult.message).toMatch(/different content/);
+
+      await first.query("BEGIN");
+      const firstRotate = (await first.query<{ credential_id: string; replayed: boolean }>(
+        "SELECT * FROM agent_bridge.control_rotate_credential($1,$2,$3,NULL,'release-a-full',NULL,NULL)",
+        [rotateRequest, initial.rows[0]!.credential_id, rotatedHash],
+      )).rows[0]!;
+      let settled = false;
+      const repeatedRotate = second.query<{ credential_id: string; replayed: boolean }>(
+        "SELECT * FROM agent_bridge.control_rotate_credential($1,$2,$3,NULL,'release-a-full',NULL,NULL)",
+        [rotateRequest, initial.rows[0]!.credential_id, rotatedHash],
+      ).then((result) => { settled = true; return result.rows[0]!; });
+      await new Promise((resolve) => setTimeout(resolve, 50));
+      expect(settled).toBe(false);
+      await first.query("COMMIT");
+      expect(await repeatedRotate).toEqual({ credential_id: firstRotate.credential_id, replayed: true });
+
+      const revokeRequest = randomUUID();
+      await first.query("BEGIN");
+      expect((await first.query<{ replayed: boolean }>(
+        "SELECT replayed FROM agent_bridge.control_revoke_credential($1,$2,'retired')",
+        [revokeRequest, firstRotate.credential_id],
+      )).rows[0]!.replayed).toBe(false);
+      settled = false;
+      const repeatedRevoke = second.query<{ revoked: boolean; replayed: boolean }>(
+        "SELECT * FROM agent_bridge.control_revoke_credential($1,$2,'retired')",
+        [revokeRequest, firstRotate.credential_id],
+      ).then((result) => { settled = true; return result.rows[0]!; });
+      await new Promise((resolve) => setTimeout(resolve, 50));
+      expect(settled).toBe(false);
+      await first.query("COMMIT");
+      expect(await repeatedRevoke).toEqual({ revoked: true, replayed: true });
+    } finally {
+      await first.query("ROLLBACK").catch(() => {});
+      await first.query("RESET ROLE").catch(() => {});
+      await second.query("RESET ROLE").catch(() => {});
+      first.release();
+      second.release();
+    }
+  });
+
+  it("replays provision and rotation across time zones and after provision expiry", async () => {
+    const names = await controlRoles(pool!);
+    const client = await pool!.connect();
+    try {
+      await client.query(`SET ROLE ${names.operator}`);
+      const workspaceId = `timezone-${randomUUID()}`;
+      const provisionRequest = randomUUID();
+      const tokenHash = hashCredential(`timezone-${randomUUID()}`);
+      const expiresAt = new Date(Date.now() + 86_400_000);
+      await client.query("SET TIME ZONE 'UTC'");
+      const provisioned = (await client.query<{ credential_id: string }>(
+        `SELECT credential_id FROM agent_bridge.control_provision(
+          $1,$2,$2,'agent',NULL,NULL,$3,NULL,'release-a-full',$4)`,
+        [provisionRequest, workspaceId, tokenHash, expiresAt],
+      )).rows[0]!;
+      await client.query("SET TIME ZONE 'America/Chicago'");
+      expect((await client.query<{ replayed: boolean }>(
+        `SELECT replayed FROM agent_bridge.control_provision(
+          $1,$2,$2,'agent',NULL,NULL,$3,NULL,'release-a-full',$4)`,
+        [provisionRequest, workspaceId, tokenHash, expiresAt],
+      )).rows[0]!.replayed).toBe(true);
+
+      const rotateRequest = randomUUID();
+      const successorHash = hashCredential(`timezone-successor-${randomUUID()}`);
+      const successorExpiry = new Date(Date.now() + 172_800_000);
+      const graceUntil = new Date(Date.now() + 3_600_000);
+      await client.query("SET TIME ZONE 'UTC'");
+      await client.query(
+        "SELECT * FROM agent_bridge.control_rotate_credential($1,$2,$3,NULL,'release-a-full',$4,$5)",
+        [rotateRequest, provisioned.credential_id, successorHash, successorExpiry, graceUntil],
+      );
+      await client.query("SET TIME ZONE 'Asia/Tokyo'");
+      expect((await client.query<{ replayed: boolean }>(
+        "SELECT replayed FROM agent_bridge.control_rotate_credential($1,$2,$3,NULL,'release-a-full',$4,$5)",
+        [rotateRequest, provisioned.credential_id, successorHash, successorExpiry, graceUntil],
+      )).rows[0]!.replayed).toBe(true);
+
+      const shortRequest = randomUUID();
+      const shortExpiry = new Date(Date.now() + 500);
+      const shortHash = hashCredential(`short-${randomUUID()}`);
+      await client.query(
+        `SELECT * FROM agent_bridge.control_provision(
+          $1,$2,$2,'short-lived',NULL,NULL,$3,NULL,'release-a-full',$4)`,
+        [shortRequest, workspaceId, shortHash, shortExpiry],
+      );
+      await new Promise((resolve) => setTimeout(resolve, 600));
+      expect((await client.query<{ replayed: boolean }>(
+        `SELECT replayed FROM agent_bridge.control_provision(
+          $1,$2,$2,'short-lived',NULL,NULL,$3,NULL,'release-a-full',$4)`,
+        [shortRequest, workspaceId, shortHash, shortExpiry],
+      )).rows[0]!.replayed).toBe(true);
+    } finally {
+      await client.query("RESET ROLE").catch(() => {});
+      client.release();
+    }
+  });
+
+  it("bounds and keyset-paginates secret-free credential inventory", async () => {
+    const names = await controlRoles(pool!);
+    const workspaceId = `inventory-${randomUUID()}`;
+    await pool!.query("INSERT INTO agent_bridge.workspaces(id,name) VALUES($1,$1)", [workspaceId]);
+    await pool!.query(
+      `WITH inserted_agents AS (
+         INSERT INTO agent_bridge.agents(workspace_id,principal)
+         SELECT $1,'inventory-'||series FROM generate_series(1,105) series
+         RETURNING id,principal
+       ) INSERT INTO agent_bridge.credentials(workspace_id,agent_id,token_hash)
+         SELECT $1,id,encode(sha256(convert_to(principal,'UTF8')),'hex') FROM inserted_agents`,
+      [workspaceId],
+    );
+    const client = await pool!.connect();
+    try {
+      await client.query(`SET ROLE ${names.auditor}`);
+      const firstPage = await client.query<{ credential_id: string; created_at: Date }>(
+        "SELECT * FROM agent_bridge.control_credential_inventory($1,NULL,NULL,25)", [workspaceId],
+      );
+      expect(firstPage.rows).toHaveLength(25);
+      expect(new Set(firstPage.rows.map((row) => (row as { workspace_id: string }).workspace_id)))
+        .toEqual(new Set([workspaceId]));
+      const cursor = firstPage.rows.at(-1)!;
+      const secondPage = await client.query<{ credential_id: string }>(
+        "SELECT * FROM agent_bridge.control_credential_inventory($1,$2,$3,25)",
+        [workspaceId, cursor.created_at, cursor.credential_id],
+      );
+      expect(secondPage.rows).toHaveLength(25);
+      expect(secondPage.rows.map((row) => row.credential_id)).not.toContain(cursor.credential_id);
+      expect((await client.query(
+        "SELECT * FROM agent_bridge.control_credential_inventory($1)", [workspaceId],
+      )).rows).toHaveLength(100);
+      for (const invalidLimit of [0, -1, 1001]) {
+        await expect(client.query(
+          "SELECT * FROM agent_bridge.control_credential_inventory($1,NULL,NULL,$2)",
+          [workspaceId, invalidLimit],
+        )).rejects.toThrow(/cursor or limit is invalid/);
+      }
+      for (const invalidWorkspace of [` ${workspaceId}`, `${workspaceId}\n`, "x".repeat(129)]) {
+        await expect(client.query(
+          "SELECT * FROM agent_bridge.control_credential_inventory($1,NULL,NULL,25)",
+          [invalidWorkspace],
+        )).rejects.toThrow(/cursor or limit is invalid/);
+      }
+      await expect(client.query(
+        "SELECT * FROM agent_bridge.control_credential_inventory($1,$2,NULL,25)",
+        [workspaceId, cursor.created_at],
+      )).rejects.toThrow(/cursor or limit is invalid/);
+      await expect(client.query(
+        "SELECT * FROM agent_bridge.control_credential_inventory($1,NULL,$2,25)",
+        [workspaceId, cursor.credential_id],
+      )).rejects.toThrow(/cursor or limit is invalid/);
+      const unfilteredFirst = await client.query<{ credential_id: string; created_at: Date }>(
+        "SELECT * FROM agent_bridge.control_credential_inventory(NULL,NULL,NULL,25)",
+      );
+      const unfilteredCursor = unfilteredFirst.rows.at(-1)!;
+      const unfilteredSecond = await client.query<{ credential_id: string }>(
+        "SELECT * FROM agent_bridge.control_credential_inventory(NULL,$1,$2,25)",
+        [unfilteredCursor.created_at, unfilteredCursor.credential_id],
+      );
+      expect(unfilteredSecond.rows.map((row) => row.credential_id))
+        .not.toContain(unfilteredCursor.credential_id);
+      expect(JSON.stringify(firstPage.rows)).not.toContain("token_hash");
+      await client.query("RESET ROLE");
+      await client.query("SET enable_seqscan=off");
+      const globalPlan = await client.query(
+        `EXPLAIN (FORMAT JSON) SELECT credential.id FROM agent_bridge.credentials credential
+         WHERE (date_bin('1 millisecond',credential.created_at,
+           '2000-01-01 00:00:00+00'::timestamptz),credential.id)>
+           (date_bin('1 millisecond',$1::timestamptz,
+             '2000-01-01 00:00:00+00'::timestamptz),$2::uuid)
+         ORDER BY date_bin('1 millisecond',credential.created_at,
+           '2000-01-01 00:00:00+00'::timestamptz),credential.id LIMIT 25`,
+        [unfilteredCursor.created_at, unfilteredCursor.credential_id],
+      );
+      expect(JSON.stringify(globalPlan.rows)).toContain("credentials_inventory_global");
+      const workspacePlan = await client.query(
+        `EXPLAIN (FORMAT JSON) SELECT credential.id FROM agent_bridge.credentials credential
+         WHERE credential.workspace_id=$1
+           AND (date_bin('1 millisecond',credential.created_at,
+             '2000-01-01 00:00:00+00'::timestamptz),credential.id)>
+             (date_bin('1 millisecond',$2::timestamptz,
+               '2000-01-01 00:00:00+00'::timestamptz),$3::uuid)
+         ORDER BY date_bin('1 millisecond',credential.created_at,
+           '2000-01-01 00:00:00+00'::timestamptz),credential.id LIMIT 25`,
+        [workspaceId, cursor.created_at, cursor.credential_id],
+      );
+      expect(JSON.stringify(workspacePlan.rows)).toContain("credentials_inventory_workspace");
+      await client.query("RESET enable_seqscan");
+    } finally {
+      await client.query("RESET enable_seqscan").catch(() => {});
+      await client.query("RESET ROLE").catch(() => {});
+      client.release();
+    }
+  });
+
+  it("detects hostile owner-control catalog drift", async () => {
+    const names = await controlRoles(pool!);
+    const bypassRole = `bridge_bypass_${randomUUID().replaceAll("-", "")}`;
+    const changes = [
+      "ALTER TABLE agent_bridge.control_events DISABLE TRIGGER control_events_append_only",
+      "ALTER FUNCTION agent_bridge.control_credential_inventory(text,timestamptz,uuid,integer) SET search_path=public",
+      `GRANT EXECUTE ON FUNCTION agent_bridge.control_revoke_credential(uuid,uuid,text) TO ${names.runtime}`,
+      `GRANT EXECUTE ON FUNCTION agent_bridge.control_revoke_credential(uuid,uuid,text) TO ${names.auditor}`,
+      `GRANT SELECT(token_hash) ON agent_bridge.credentials TO ${names.owner}`,
+      `GRANT SELECT ON agent_bridge.messages TO ${names.operator}`,
+      `GRANT INSERT ON agent_bridge.control_events TO ${names.operator}`,
+      `GRANT USAGE ON SEQUENCE agent_bridge.control_events_sequence_seq TO ${names.operator}`,
+      `GRANT ${names.dataOwner} TO ${names.operator}`,
+      `GRANT pg_read_all_data TO ${names.operator}`,
+      `ALTER ROLE ${names.auditor} LOGIN`,
+      `REVOKE SELECT(id) ON agent_bridge.credentials FROM ${names.owner}`,
+      "ALTER TABLE agent_bridge.credentials ALTER COLUMN scopes SET DEFAULT ARRAY['messages:read']::text[]",
+      "ALTER TABLE agent_bridge.credentials ENABLE ROW LEVEL SECURITY",
+      "ALTER TABLE agent_bridge.control_requests ALTER COLUMN actor TYPE text USING actor::text",
+      "ALTER TABLE agent_bridge.control_events ALTER COLUMN operation DROP NOT NULL",
+      "ALTER TABLE agent_bridge.agents DROP CONSTRAINT agents_workspace_id_principal_key",
+      `DROP INDEX agent_bridge.credentials_replacement_lineage;
+       CREATE INDEX credentials_replacement_lineage ON agent_bridge.credentials(replaces_credential_id)
+       WHERE replaces_credential_id IS NOT NULL`,
+      `DROP TRIGGER control_events_append_only ON agent_bridge.control_events;
+       CREATE TRIGGER control_events_append_only BEFORE UPDATE ON agent_bridge.control_events
+       FOR EACH STATEMENT EXECUTE FUNCTION agent_bridge.reject_control_ledger_mutation()`,
+      `CREATE OR REPLACE FUNCTION agent_bridge.reject_control_ledger_mutation()
+       RETURNS trigger LANGUAGE plpgsql SET search_path='' AS $$ BEGIN RETURN NULL; END $$`,
+      `CREATE OR REPLACE FUNCTION agent_bridge.validate_credential_security()
+       RETURNS trigger LANGUAGE plpgsql SET search_path='' AS $$ BEGIN RETURN NEW; END $$`,
+      `CREATE OR REPLACE FUNCTION agent_bridge.control_revoke_credential(
+         requested_request_id uuid,requested_credential_id uuid,requested_reason_code text
+       ) RETURNS TABLE(revoked boolean,replayed boolean)
+       LANGUAGE sql SECURITY DEFINER SET search_path='' AS $$ SELECT false,false $$`,
+      `CREATE OR REPLACE FUNCTION agent_bridge.assert_control_actor(requested_capability text)
+       RETURNS void LANGUAGE plpgsql SECURITY DEFINER SET search_path=''
+       AS $$ BEGIN RETURN; END $$`,
+      `ALTER DEFAULT PRIVILEGES IN SCHEMA agent_bridge
+       GRANT SELECT ON TABLES TO ${names.operator}`,
+      `CREATE FUNCTION agent_bridge.unrelated_public_function() RETURNS integer
+       LANGUAGE sql AS $$ SELECT 1 $$`,
+      "GRANT SELECT(token_hash) ON agent_bridge.credentials TO PUBLIC",
+      `CREATE ROLE ${bypassRole}; GRANT USAGE ON SCHEMA agent_bridge TO ${bypassRole}`,
+      `CREATE ROLE ${bypassRole}; GRANT EXECUTE ON FUNCTION
+       agent_bridge.control_credential_inventory(text,timestamptz,uuid,integer) TO ${bypassRole}`,
+      `CREATE ROLE ${bypassRole}; GRANT ${names.operator} TO ${bypassRole}`,
+      `CREATE ROLE ${bypassRole}; GRANT ${names.owner} TO ${bypassRole}`,
+      `CREATE ROLE ${bypassRole}; ALTER DEFAULT PRIVILEGES IN SCHEMA agent_bridge
+       GRANT EXECUTE ON FUNCTIONS TO ${bypassRole}`,
+      `CREATE OR REPLACE FUNCTION agent_bridge.security_schema_ready()
+       RETURNS boolean LANGUAGE sql STABLE SECURITY DEFINER SET search_path=''
+       AS $$ SELECT true $$`,
+      `CREATE OR REPLACE FUNCTION agent_bridge.current_request_workspace()
+       RETURNS text LANGUAGE sql STABLE SECURITY DEFINER SET search_path=''
+       AS $$ SELECT 'forged'::text $$`,
+      `CREATE OR REPLACE FUNCTION agent_bridge.reject_credential_delete()
+       RETURNS trigger LANGUAGE plpgsql SET search_path=''
+       AS $$ BEGIN RETURN OLD; END $$`,
+      `ALTER TABLE agent_bridge.credentials
+       DROP CONSTRAINT credentials_replacement_not_self;
+       ALTER TABLE agent_bridge.credentials
+       ADD CONSTRAINT credentials_replacement_not_self CHECK (true)`,
+    ];
+    for (const change of changes) {
+      const client = await pool!.connect();
+      try {
+        await client.query("BEGIN");
+        await client.query(change);
+        expect((await client.query<{ ready: boolean }>(
+          "SELECT agent_bridge.owner_control_plane_ready() AS ready",
+        )).rows[0]!.ready, change).toBe(false);
+        expect(await runtimeSchemaReady(client, { allowPrivilegedCaller: true }), change).toBe(false);
+      } finally {
+        await client.query("ROLLBACK").catch(() => {});
+        client.release();
+      }
+    }
+  });
+
+  it("allows unrelated additive schema objects without changing owner readiness", async () => {
+    const client = await pool!.connect();
+    try {
+      await client.query("BEGIN");
+      await client.query("CREATE TABLE agent_bridge.unrelated_safe_table(id integer)");
+      expect((await client.query<{ ready: boolean }>(
+        "SELECT agent_bridge.owner_control_plane_ready() AS ready",
+      )).rows[0]!.ready).toBe(true);
+      expect(await runtimeSchemaReady(client, { allowPrivilegedCaller: true })).toBe(true);
+    } finally {
+      await client.query("ROLLBACK").catch(() => {});
+      client.release();
+    }
   });
 
   it("imports a legacy shared_context database through fresh migrations", async () => {
