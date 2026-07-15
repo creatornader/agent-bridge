@@ -1,2 +1,3 @@
 schemas/*.json text eol=lf
 openapi/*.json text eol=lf
+test/fixtures/*.ndjson text eol=lf

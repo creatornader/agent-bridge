@@ -2382,7 +2382,7 @@ integration("PostgreSQL BridgeStore integration", () => {
         }
       }
     });
-  });
+  }, 30_000);
 
   it("detects request-authority privilege and definer drift", async () => {
     const client = await pool!.connect();

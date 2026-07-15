@@ -214,7 +214,11 @@ describe("generated contract artifacts", () => {
   });
 
   it("includes every published contract artifact in the npm tarball", () => {
-    const packed = JSON.parse(execFileSync("npm", ["pack", "--json", "--dry-run", "--ignore-scripts"], { cwd: root, encoding: "utf8", timeout: 20_000 }));
+    const args = ["pack", "--json", "--dry-run", "--ignore-scripts"];
+    const command = process.env.npm_execpath ? process.execPath : process.platform === "win32" ? "npm.cmd" : "npm";
+    const packed = JSON.parse(execFileSync(command, process.env.npm_execpath ? [process.env.npm_execpath, ...args] : args, {
+      cwd: root, encoding: "utf8", timeout: 20_000,
+    }));
     const files = new Set(packed[0].files.map((entry: { path: string }) => entry.path));
     for (const path of [
       "schemas/agent-bridge-v2.schema.json",

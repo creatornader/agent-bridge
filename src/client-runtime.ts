@@ -1,4 +1,4 @@
-import { chmodSync, mkdirSync } from "node:fs";
+import { existsSync, mkdirSync } from "node:fs";
 import { basename, dirname } from "node:path";
 import { BridgeService } from "./bridge-service.js";
 import type { BridgeStore } from "./bridge-store.js";
@@ -8,23 +8,25 @@ import { SyncingBridgeStore } from "./syncing-bridge-store.js";
 import { LegacySupabaseRestStore } from "./legacy-supabase-store.js";
 import { SQLiteBridgeStore } from "./sqlite-bridge-store.js";
 import type { ClientConfig } from "./client-config.js";
+import { securePrivatePath } from "./private-path.js";
 
 export interface ClientRuntime { config: ClientConfig; store: BridgeStore; service: BridgeService; close(): Promise<void>; }
 export interface ClientRuntimeOptions { autoSync?: boolean; initializationMode?: "active" | "passive"; }
 
+function prepareStoreDirectory(path: string): void {
+  const directory = dirname(path);
+  const existed = existsSync(directory);
+  mkdirSync(directory, { recursive: true, mode: 0o700 });
+  if (!existed || basename(directory) === ".agent-bridge") securePrivatePath(directory, "directory");
+}
+
 export function createStore(config: ClientConfig, options: ClientRuntimeOptions = {}): BridgeStore {
   if (config.provider === "local") {
-    if (config.databasePath !== ":memory:") {
-      const directory = dirname(config.databasePath);
-      mkdirSync(directory, { recursive: true, mode: 0o700 });
-      if (basename(directory) === ".agent-bridge") chmodSync(directory, 0o700);
-    }
+    if (config.databasePath !== ":memory:") prepareStoreDirectory(config.databasePath);
     return new SQLiteBridgeStore(config.databasePath);
   }
   if (config.provider === "gateway") {
-    const directory = dirname(config.edgeDatabasePath);
-    mkdirSync(directory, { recursive: true, mode: 0o700 });
-    if (basename(directory) === ".agent-bridge") chmodSync(directory, 0o700);
+    prepareStoreDirectory(config.edgeDatabasePath);
     const remote = new HttpBridgeStore({ baseUrl: config.url!, token: config.credential!, principal: config.principal });
     const edge = new SQLiteEdgeStore(config.edgeDatabasePath, { endpoint: config.url!, principal: config.principal });
     return new SyncingBridgeStore(edge, remote, config.principal, { autoSync: options.autoSync });

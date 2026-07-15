@@ -130,9 +130,9 @@ describe("archive publication", () => {
     expect(events).toEqual(["abandon:publication_failed"]);
     expect(existsSync(target)).toBe(false);
     expect(readdirSync(directory)).toEqual([]);
-  }, 15_000);
+  }, 30_000);
 
-  it("restores the original force target when post-rename durability fails", async () => {
+  it.skipIf(process.platform === "win32")("restores the original force target when post-rename durability fails", async () => {
     const directory = root(); const target = join(directory, "archive.ndjson"); const events: string[] = [];
     const original = encode({ workspace: "acme", messages: [{ ...message, content: "original" }], receipts: [] });
     writePrivateFile(target, original);

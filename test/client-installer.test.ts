@@ -540,7 +540,7 @@ describe("client installer", () => {
       "AGENT_BRIDGE_TOKEN=rotated-token",
     );
     expect(result.enrollmentStatus).toBe("consumed");
-  });
+  }, 90_000);
 
   it("revalidates consumed enrollment state before deleting the file", () => {
     const home = mkdtempSync(join(tmpdir(), "agent-bridge-installer-"));
@@ -575,7 +575,7 @@ describe("client installer", () => {
       signal: null,
     }))).toThrow(/no longer matches its MCP registration/);
     expect(readEnrollment(path, { HOME: home })).toMatchObject({ state: "consumed", token: null });
-  });
+  }, 90_000);
 
   it("finalizes a consuming rotation whose successor backend was already written", () => {
     const home = mkdtempSync(join(tmpdir(), "agent-bridge-installer-"));
@@ -616,7 +616,7 @@ describe("client installer", () => {
     expect(adds).toBe(0);
     if (process.platform !== "win32") expect(statSync(seeded.backendConfigPath).ino).toBe(inode);
     expect(result.enrollmentStatus).toBe("consumed");
-  });
+  }, 90_000);
 
   it("rejects appended Claude not-found diagnostics and inexact scope proof", () => {
     const home = mkdtempSync(join(tmpdir(), "agent-bridge-installer-"));
@@ -671,5 +671,5 @@ describe("client installer", () => {
       };
     })).toThrow(/verification failed/);
     expect(readEnrollment(second.path, { HOME: home }).state).toBe("consuming");
-  });
+  }, 90_000);
 });

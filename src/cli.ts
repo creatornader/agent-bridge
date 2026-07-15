@@ -1,6 +1,6 @@
 import { existsSync, mkdirSync, readFileSync, renameSync, rmSync, writeFileSync } from "node:fs";
 import { createHash } from "node:crypto";
-import { dirname, join } from "node:path";
+import { basename, dirname, join } from "node:path";
 import { homedir, tmpdir } from "node:os";
 import { mkdtempSync } from "node:fs";
 import { fileURLToPath, pathToFileURL } from "node:url";
@@ -19,6 +19,7 @@ import { runOwnerCommand, type OwnerOptions } from "./owner-control.js";
 import { ArchiveCommandError, runArchiveCommand } from "./archive-cli.js";
 import { runDrCommand } from "./dr-cli.js";
 import { NativeDrCommandError } from "./sqlite-native-dr.js";
+import { securePrivatePath, verifyPrivatePathAccess } from "./private-path.js";
 
 type Options = Record<string, string | boolean | string[]>;
 const SUPPORTED_OPTIONS = new Set([
@@ -120,7 +121,29 @@ function failedClientStatus(
   });
 }
 function cursor(path: string): string | undefined { try { return readFileSync(path, "utf8").trim() || undefined; } catch { return undefined; } }
-function saveCursor(path: string, value: string | undefined): void { if (!value) return; mkdirSync(dirname(path), { recursive: true }); const temporary = `${path}.${process.pid}.tmp`; writeFileSync(temporary, `${value}\n`, { mode: 0o600 }); renameSync(temporary, path); }
+function preparePrivateOutput(path: string): void {
+  const directory = dirname(path);
+  const existed = existsSync(directory);
+  mkdirSync(directory, { recursive: true, mode: 0o700 });
+  if (!existed || basename(directory) === ".agent-bridge") securePrivatePath(directory, "directory");
+  else verifyPrivatePathAccess(directory, "directory");
+  if (existsSync(path)) verifyPrivatePathAccess(path, "file");
+}
+
+function saveCursor(path: string, value: string | undefined): void {
+  if (!value) return;
+  preparePrivateOutput(path);
+  const temporary = `${path}.${process.pid}.tmp`;
+  try {
+    writeFileSync(temporary, `${value}\n`, { mode: 0o600 });
+    securePrivatePath(temporary, "file");
+    renameSync(temporary, path);
+    verifyPrivatePathAccess(path, "file");
+  } catch (error) {
+    rmSync(temporary, { force: true });
+    throw error;
+  }
+}
 function watchCursorPath(path: string, project: string | undefined): string {
   if (!project) return path;
   const scope = createHash("sha256").update(project).digest("hex").slice(0, 16);
@@ -171,15 +194,16 @@ async function initialize(options: Options): Promise<void> {
   for (const value of Object.values(values)) {
     if (value?.includes("\n") || value?.includes("\r")) throw new Error("config values cannot contain newlines");
   }
-  mkdirSync(dirname(configPath), { recursive: true });
+  preparePrivateOutput(configPath);
   const temporary = `${configPath}.${process.pid}.tmp`;
-  writeFileSync(
-    temporary,
-    Object.entries(values).filter((entry): entry is [string, string] => Boolean(entry[1])).map(([key, value]) => `${key}=${value}`).join("\n") + "\n",
-    { mode: 0o600 },
-  );
   let config: ClientConfig;
   try {
+    writeFileSync(
+      temporary,
+      Object.entries(values).filter((entry): entry is [string, string] => Boolean(entry[1])).map(([key, value]) => `${key}=${value}`).join("\n") + "\n",
+      { mode: 0o600 },
+    );
+    securePrivatePath(temporary, "file");
     config = resolveClientConfig(
       {
         HOME: home,
@@ -195,6 +219,7 @@ async function initialize(options: Options): Promise<void> {
       await runtime.close();
     }
     renameSync(temporary, configPath);
+    verifyPrivatePathAccess(configPath, "file");
   } catch (error) {
     rmSync(temporary, { force: true });
     throw error;
@@ -268,6 +293,7 @@ function draft(options: Options, positionals: string[]): MessageDraft {
 
 async function localDemo(): Promise<void> {
   const directory = mkdtempSync(join(tmpdir(), "agent-bridge-demo-")); const databasePath = join(directory, "demo.sqlite3");
+  securePrivatePath(directory, "directory");
   const base = { provider: "local" as const, databasePath, edgeDatabasePath: join(directory, "edge.sqlite3"), cursorPath: join(directory, "cursor"), configPath: join(directory, "config"), credential: undefined, url: undefined };
   let sender: Awaited<ReturnType<typeof createClientRuntime>> | undefined;
   let worker: Awaited<ReturnType<typeof createClientRuntime>> | undefined;

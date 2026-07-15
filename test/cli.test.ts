@@ -1,4 +1,4 @@
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { existsSync, fstatSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
@@ -7,7 +7,7 @@ import { spawn, spawnSync } from "node:child_process";
 import { createServer } from "node:http";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { SQLiteEdgeStore } from "../src/sqlite-edge-store.js";
-import { securePrivatePath } from "../src/private-path.js";
+import { securePrivatePath, verifyPrivatePathAccess } from "../src/private-path.js";
 import { runDrCommand } from "../src/dr-cli.js";
 import {
   POSTGRES_NATIVE_DR_EXCLUDED_DATA_TABLES, PostgresNativeDrError, type PostgresNativeDrBundleInput,
@@ -16,14 +16,16 @@ import {
 const root = dirname(fileURLToPath(new URL("../package.json", import.meta.url)));
 const cli = join(root, "bin", "agent-bridge");
 const homes: string[] = [];
-vi.setConfig({ testTimeout: 30_000 });
+const nativeTestTimeout = process.platform === "win32" ? 90_000 : 30_000;
+const cliProcessTimeout = process.platform === "win32" ? 60_000 : 20_000;
+vi.setConfig({ testTimeout: nativeTestTimeout });
 function run(args: string[], extra: NodeJS.ProcessEnv = {}) {
   const home = mkdtempSync(join(tmpdir(), "agent-bridge-cli-")); homes.push(home);
   return runAt(home, args, extra);
 }
 function runAt(home: string, args: string[], extra: NodeJS.ProcessEnv = {}) {
   securePrivatePath(home, "directory");
-  return spawnSync(process.execPath, [cli, ...args], { encoding: "utf8", timeout: 20_000, env: { ...process.env, HOME: home, AGENT_BRIDGE_PROVIDER: "local", AGENT_BRIDGE_DB: join(home, "bridge.sqlite3"), ...extra } });
+  return spawnSync(process.execPath, [cli, ...args], { encoding: "utf8", timeout: cliProcessTimeout, env: { ...process.env, HOME: home, AGENT_BRIDGE_PROVIDER: "local", AGENT_BRIDGE_DB: join(home, "bridge.sqlite3"), ...extra } });
 }
 function runAtAsync(home: string, args: string[], extra: NodeJS.ProcessEnv = {}) {
   securePrivatePath(home, "directory");
@@ -31,6 +33,7 @@ function runAtAsync(home: string, args: string[], extra: NodeJS.ProcessEnv = {})
     const child = spawn(process.execPath, [cli, ...args], {
       env: { ...process.env, HOME: home, AGENT_BRIDGE_PROVIDER: "local", AGENT_BRIDGE_DB: join(home, "bridge.sqlite3"), ...extra },
       stdio: ["ignore", "pipe", "pipe"],
+      timeout: cliProcessTimeout,
     });
     let stdout = "";
     let stderr = "";
@@ -112,7 +115,7 @@ describe("agent-bridge CLI", () => {
       AGENT_BRIDGE_AGENT: undefined, AGENT_BRIDGE_DB: target,
     });
     expect(JSON.parse(afterApply.stdout).messages).toHaveLength(1);
-  }, 30_000);
+  }, nativeTestTimeout);
 
   it("enforces exact archive options and PostgreSQL authority", () => {
     const duplicate = run(["archive", "verify", "--file", "one", "--file", "two"]);
@@ -152,8 +155,9 @@ describe("agent-bridge CLI", () => {
     ]);
     expect(restored.status, restored.stderr).toBe(0); expect(JSON.parse(restored.stdout)).toMatchObject({ status: "ok", operation: "restore", requestId: "018f4a70-0000-7000-8000-000000000222" });
     const history = runAt(home, ["history", "--as", "reader"], { AGENT_BRIDGE_AGENT: undefined, AGENT_BRIDGE_DB: target });
+    expect(history.status, history.stderr).toBe(0);
     expect(JSON.parse(history.stdout).messages.map((message: { content: string }) => message.content)).toEqual(["native"]);
-  }, 30_000);
+  }, nativeTestTimeout);
 
   it("returns exact JSON errors for native DR command misuse", () => {
     const duplicate = run(["dr", "verify", "--provider", "local", "--bundle", "one", "--bundle", "two"]);
@@ -217,6 +221,8 @@ describe("agent-bridge CLI", () => {
       environment: { AGENT_BRIDGE_DR_SOURCE_DATABASE_URL: "postgresql://source-authority" },
       backupPostgres: fakeBackup,
       verifyPostgres: fakeVerify,
+      platform: "linux",
+      fileOperations: { syncDirectory: () => true },
     });
     expect(backedUp).toMatchObject({
       status: "ok", operation: "backup", provider: "postgres", backupId, directoryDurability: "confirmed",
@@ -243,6 +249,7 @@ describe("agent-bridge CLI", () => {
       environment: { AGENT_BRIDGE_DR_SOURCE_DATABASE_URL: "postgresql://source-authority" },
       backupPostgres: fakeBackup,
       verifyPostgres: fakeVerify,
+      platform: "linux",
       fileOperations: { syncDirectory: () => { backupSyncCalls += 1; return backupSyncCalls < 4; } },
     })).rejects.toMatchObject({
       code: "DR_CLEANUP_DURABILITY_UNKNOWN",
@@ -250,9 +257,15 @@ describe("agent-bridge CLI", () => {
     });
     expect(existsSync(cleanupBundle)).toBe(true);
     expect(existsSync(join(home, `.${cleanupBackupId}.agent-bridge-dr.postgres.stage`))).toBe(false);
+    let verifySyncCalls = 0;
     const verified = await runDrCommand([
       "verify", "--provider", "postgres", "--bundle", bundle, "--tool-directory", "/opt/postgres/17/bin",
-    ], { verifyPostgres: fakeVerify });
+    ], {
+      verifyPostgres: fakeVerify,
+      platform: "linux",
+      fileOperations: { syncDirectory: () => { verifySyncCalls += 1; return true; } },
+    });
+    expect(verifySyncCalls).toBe(1);
     expect(verified).toMatchObject({
       status: "ok", operation: "verify", provider: "postgres", backupId,
       cleanupDirectoryDurability: "confirmed",
@@ -305,6 +318,7 @@ describe("agent-bridge CLI", () => {
     ], {
       environment: { AGENT_BRIDGE_DR_TARGET_DATABASE_URL: "postgresql://target-authority" },
       restorePostgres: fakeRestore,
+      platform: "linux",
       fileOperations: { syncDirectory: () => { restoreSyncCalls += 1; return restoreSyncCalls < 3; } },
     })).rejects.toMatchObject({
       code: "DR_CLEANUP_DURABILITY_UNKNOWN",
@@ -485,7 +499,7 @@ describe("agent-bridge CLI", () => {
     ], { AGENT_BRIDGE_AGENT: undefined });
     expect(invalid.status).toBe(1);
     expect(invalid.stderr).toContain("mailbox delivery mode does not accept retry or scheduling flags");
-  }, 30_000);
+  }, nativeTestTimeout);
   it("accepts an explicit source when the environment has no identity", () => {
     const result = run(["send", "--source", "codex", "Bridge is ready"]);
     expect(result.status).toBe(0);
@@ -530,7 +544,7 @@ describe("agent-bridge CLI", () => {
     ], { AGENT_BRIDGE_AGENT: undefined });
     expect(JSON.parse(read.stdout).messages.map((message: { id: string }) => message.id))
       .toEqual([targetedId]);
-  }, 30_000);
+  }, nativeTestTimeout);
   it("rejects another principal's receipt assertion before opening storage", () => {
     const home = mkdtempSync(join(tmpdir(), "agent-bridge-cli-")); homes.push(home);
     const database = join(home, "must-not-exist.sqlite3");
@@ -543,7 +557,7 @@ describe("agent-bridge CLI", () => {
   });
   it("runs the deterministic two-client local demo", () => {
     const result = run(["demo"], { AGENT_BRIDGE_AGENT: "operator" });
-    expect(result.status).toBe(0); expect(JSON.parse(result.stdout)).toMatchObject({ status: "ok", principals: ["demo-sender", "demo-worker"], acknowledged: true });
+    expect(result.status, result.stderr).toBe(0); expect(JSON.parse(result.stdout)).toMatchObject({ status: "ok", principals: ["demo-sender", "demo-worker"], acknowledged: true });
   });
   it("does not treat an unacknowledged filter as caller identity", () => {
     const result = run(["get", "--unacked-by", "worker"], { AGENT_BRIDGE_AGENT: undefined });
@@ -607,7 +621,7 @@ describe("agent-bridge CLI", () => {
       AGENT_BRIDGE_AGENT: "worker",
       AGENT_BRIDGE_WORKSPACE: "acme",
     });
-    expect(result.status).toBe(0);
+    expect(result.status, result.stderr).toBe(0);
     expect(JSON.parse(result.stdout)).toMatchObject({ online: false, pushed: 0 });
   });
   it("rejects a missing target value instead of routing to a true literal", () => {
@@ -668,8 +682,11 @@ describe("agent-bridge CLI", () => {
     const database = join(home, ".agent-bridge", "bridge.sqlite3");
     const result = spawnSync(process.execPath, [cli,
       "init", "--provider", "local",
-    ], { encoding: "utf8", env: { ...process.env, HOME: home, AGENT_BRIDGE_CONFIG: config } });
+    ], { encoding: "utf8", timeout: cliProcessTimeout, env: { ...process.env, HOME: home, AGENT_BRIDGE_CONFIG: config } });
     expect(result.status).toBe(0);
+    verifyPrivatePathAccess(join(home, ".agent-bridge"), "directory");
+    verifyPrivatePathAccess(config, "file");
+    verifyPrivatePathAccess(database, "file");
     if (process.platform !== "win32") expect(statSync(config).mode & 0o777).toBe(0o600);
     expect(readFileSync(config, "utf8")).not.toContain("AGENT_BRIDGE_AGENT");
     if (process.platform !== "win32") {
@@ -687,7 +704,7 @@ describe("agent-bridge CLI", () => {
     const result = spawnSync(process.execPath, [cli,
       "init", "--force", "--provider", "gateway",
       "--url", "http://127.0.0.1:1", "--token", "bad-token",
-    ], { encoding: "utf8", env: { ...process.env, HOME: home, AGENT_BRIDGE_CONFIG: config } });
+    ], { encoding: "utf8", timeout: cliProcessTimeout, env: { ...process.env, HOME: home, AGENT_BRIDGE_CONFIG: config } });
     expect(result.status).toBe(1);
     expect(readFileSync(config, "utf8")).toBe(previous);
   });
@@ -926,6 +943,7 @@ describe("agent-bridge CLI", () => {
   });
   it("keeps watch cursors independent between projects", () => {
     const home = mkdtempSync(join(tmpdir(), "agent-bridge-cli-")); homes.push(home);
+    const cursor = join(home, "cursor");
     expect(runAt(home, [
       "send", "--source", "codex", "--project", "beta", "beta one",
     ]).status).toBe(0);
@@ -934,13 +952,15 @@ describe("agent-bridge CLI", () => {
     ]).status).toBe(0);
     const first = runAt(home, [
       "watch", "--as", "worker", "--project", "alpha", "--polls", "1",
-    ], { AGENT_BRIDGE_AGENT: undefined });
+    ], { AGENT_BRIDGE_AGENT: undefined, AGENT_BRIDGE_CURSOR: cursor });
     expect(first.status).toBe(0);
     expect(JSON.parse(first.stdout)).toMatchObject({ project: "alpha", content: "alpha one" });
+    const alphaCursor = `${cursor}.project-${createHash("sha256").update("alpha").digest("hex").slice(0, 16)}`;
+    verifyPrivatePathAccess(alphaCursor, "file");
 
     const beta = runAt(home, [
       "watch", "--as", "worker", "--project", "beta", "--polls", "1",
-    ], { AGENT_BRIDGE_AGENT: undefined });
+    ], { AGENT_BRIDGE_AGENT: undefined, AGENT_BRIDGE_CURSOR: cursor });
     expect(beta.status).toBe(0);
     expect(JSON.parse(beta.stdout)).toMatchObject({ project: "beta", content: "beta one" });
 
@@ -949,7 +969,7 @@ describe("agent-bridge CLI", () => {
     ]).status).toBe(0);
     const second = runAt(home, [
       "watch", "--as", "worker", "--project", "alpha", "--polls", "1",
-    ], { AGENT_BRIDGE_AGENT: undefined });
+    ], { AGENT_BRIDGE_AGENT: undefined, AGENT_BRIDGE_CURSOR: cursor });
     expect(second.status).toBe(0);
     expect(JSON.parse(second.stdout)).toMatchObject({ project: "alpha", content: "alpha two" });
     expect(second.stdout).not.toContain("beta one");

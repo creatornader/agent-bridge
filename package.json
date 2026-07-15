@@ -92,7 +92,8 @@
     "contracts:generate:built": "node dist/contracts/generate.js",
     "contracts:check": "npm run build --silent && npm run contracts:check:built",
     "contracts:check:built": "node dist/contracts/generate.js --check",
-    "check": "npm run typecheck && npm run build && npm run contracts:check:built && npm run test:built"
+    "check": "npm run typecheck && npm run build && npm run contracts:check:built && npm run test:built",
+    "check:windows": "npm run typecheck && npm run build && npm run contracts:check:built && vitest run --maxWorkers=2 --testTimeout=90000"
   },
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.12.1",

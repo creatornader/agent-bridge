@@ -3,7 +3,7 @@ import {
   closeSync, constants, existsSync, fstatSync, fsyncSync, linkSync, lstatSync, openSync, unlinkSync, type Stats,
 } from "node:fs";
 import { createRequire } from "node:module";
-import { dirname, resolve } from "node:path";
+import { dirname, join, resolve } from "node:path";
 import { Worker } from "node:worker_threads";
 import type { DatabaseSync as Database } from "node:sqlite";
 import { NativeDrBundleError, NativeDrBundleReader, writeNativeDrBundle, type NativeDrBundleMetadata } from "./native-dr-bundle.js";
@@ -205,8 +205,8 @@ export async function backupLocalSqlite(
   const source = await prepareBackupSource(sourcePath); const sourceIdentity = lstatSync(source);
   const target = resolve(outputPath); const directory = dirname(target);
   preparePrivateFileLocation(target);
-  const snapshot = `${directory}/.${backupId}.agent-bridge-dr.sqlite.tmp`;
-  const bundle = `${directory}/.${backupId}.agent-bridge-dr.bundle.tmp`;
+  const snapshot = join(directory, `.${backupId}.agent-bridge-dr.sqlite.tmp`);
+  const bundle = join(directory, `.${backupId}.agent-bridge-dr.bundle.tmp`);
   const existingRecoveryPaths = [bundle, snapshot].filter(existsSync);
   if (existingRecoveryPaths.length) fail("DR_RECOVERY_REQUIRED", "a prior DR backup with this ID requires recovery", {
     backupId, output: target, outputExists: existsSync(target), published: existsSync(target) ? "unknown" : false,
@@ -282,7 +282,7 @@ export async function restoreLocalSqlite(
   const requestId = validateNativeDrId(requestIdInput); validateNativeDrTimeout(options.timeoutMs);
   const bundle = resolve(bundlePath); const metadata = verifyBundle(bundle);
   const target = resolve(targetPath); const directory = dirname(target); preparePrivateFileLocation(target);
-  const staged = `${directory}/.${requestId}.agent-bridge-dr.restore.sqlite.tmp`;
+  const staged = join(directory, `.${requestId}.agent-bridge-dr.restore.sqlite.tmp`);
   if (existsSync(staged)) fail("DR_RECOVERY_REQUIRED", "a prior DR restore with this ID requires recovery", {
     requestId, target, targetExists: existsSync(target), published: existsSync(target) ? "unknown" : false,
     recoveryPaths: [staged],
@@ -312,8 +312,29 @@ export async function restoreLocalSqlite(
       if (publishedContract !== metadata.manifest.schema.schemaContractSha256) throw new NativeDrBundleError("published SQLite schema contract does not match the manifest");
     }
     catch { fail("DR_RESTORE_INVALID", "restored database is visible but failed verification", { requestId, target, published: true, durable: true, verified: false, recoveryPaths: [staged] }); }
-    try { fileOps.unlink(staged); fileOps.syncDirectory(directory); }
-    catch { fail("DR_RECOVERY_ARTIFACT_RETAINED", "restored database is valid but a recovery artifact remains", { requestId, target, published: true, durable: true, verified: true, recoveryPaths: [staged].filter(existsSync) }); }
+    try { fileOps.unlink(staged); }
+    catch {
+      fail("DR_RECOVERY_ARTIFACT_RETAINED", "restored database is valid but a recovery artifact remains", {
+        requestId, target, published: true, durable: true, verified: true, recoveryPaths: [staged].filter(existsSync),
+      });
+    }
+    try {
+      securePrivateSqliteFiles(target);
+      if (verifyLocalDatabase(target) !== metadata.manifest.schema.schemaContractSha256) {
+        throw new NativeDrBundleError("published SQLite schema contract changed during cleanup");
+      }
+    }
+    catch {
+      fail("DR_RESTORE_INVALID", "restored database failed post-cleanup verification", {
+        requestId, target, published: true, durable: true, verified: false, recoveryPaths: [],
+      });
+    }
+    try { fileOps.syncDirectory(directory); }
+    catch {
+      fail("DR_CLEANUP_DURABILITY_UNKNOWN", "restored database is valid but staging cleanup durability is unknown", {
+        requestId, target, published: true, durable: true, verified: true, recoveryPaths: [],
+      });
+    }
     return { ...metadata, requestId };
   } catch (error) {
     if (descriptor !== undefined) { closeSync(descriptor); descriptor = undefined; }
