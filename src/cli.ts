@@ -16,6 +16,7 @@ import { LegacySupabaseError } from "./legacy-supabase-store.js";
 import { installClient, type InstallableRuntime } from "./client-installer.js";
 import { capabilityDocument, operationForCli, parseCliResponse, validateRequest } from "./contracts/registry.js";
 import { runOwnerCommand, type OwnerOptions } from "./owner-control.js";
+import { ArchiveCommandError, runArchiveCommand } from "./archive-cli.js";
 
 type Options = Record<string, string | boolean | string[]>;
 const SUPPORTED_OPTIONS = new Set([
@@ -123,7 +124,7 @@ function watchCursorPath(path: string, project: string | undefined): string {
   const scope = createHash("sha256").update(project).digest("hex").slice(0, 16);
   return `${path}.project-${scope}`;
 }
-function help(): void { process.stdout.write(`agent-bridge: provider-neutral agent messaging\n\nCommands:\n  init, doctor, status, capabilities, pending, migrate, reconcile-legacy-projects, sync, demo, join, presence\n  send (post), inbox (get), sent, history, acknowledge, claim, extend, ack, nack, watch\n  deliveries, dead-letters, delivery-events, cancel, requeue\n  owner <provision|inventory|rotate|revoke>\n  clients install <codex|claude-code|claude-desktop> --identity <name>\n`); }
+function help(): void { process.stdout.write(`agent-bridge: provider-neutral agent messaging\n\nCommands:\n  init, doctor, status, capabilities, pending, migrate, reconcile-legacy-projects, sync, demo, join, presence\n  send (post), inbox (get), sent, history, acknowledge, claim, extend, ack, nack, watch\n  deliveries, dead-letters, delivery-events, cancel, requeue\n  owner <provision|inventory|rotate|revoke>\n  archive <export|verify|import>\n  clients install <codex|claude-code|claude-desktop> --identity <name>\n`); }
 function rejectUnknownOptions(options: Options): void {
   const unknown = Object.keys(options).filter((key) => !SUPPORTED_OPTIONS.has(key));
   if (unknown.length) throw new Error(`unknown option: --${unknown[0]}`);
@@ -287,6 +288,10 @@ async function localDemo(): Promise<void> {
 }
 
 export async function runCli(argv = process.argv.slice(2)): Promise<void> {
+  if (argv[0] === "archive") {
+    output(await runArchiveCommand(argv.slice(1), process.env));
+    return;
+  }
   const { command: raw, options, positionals } = parse(argv); const command = ({ post: "send", get: "inbox", receipt: "acknowledge" } as Record<string, string>)[raw] ?? raw;
   if (["help", "-h", "--help"].includes(command)) { help(); return; }
   rejectUnknownOptions(options);
@@ -559,6 +564,18 @@ export async function runCli(argv = process.argv.slice(2)): Promise<void> {
 
 export function formatCliError(error: unknown, argv = process.argv.slice(2)): string {
   const message = error instanceof Error ? error.message : String(error);
+  if (argv[0] === "archive") {
+    return JSON.stringify({
+      schemaVersion: 1,
+      status: "error",
+      operation: argv[1] ?? null,
+      error: {
+        code: error instanceof ArchiveCommandError ? error.code : "ARCHIVE_COMMAND_ERROR",
+        message: error instanceof ArchiveCommandError ? error.message : "archive command failed",
+        ...(error instanceof ArchiveCommandError && error.details ? { details: error.details } : {}),
+      },
+    }) + "\n";
+  }
   if (argv[0] === "owner") {
     return JSON.stringify({
       schemaVersion: 1,

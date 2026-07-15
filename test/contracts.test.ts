@@ -62,6 +62,7 @@ describe("canonical v2 contract registry", () => {
     expect(validateRequest("publish_message", { id: uuidv7, type: "note", content: "ok" })).toMatchObject({ id: uuidv7 });
     expect(() => validateRequest("publish_message", { id: "018f4a70-0000-4000-8000-000000000123", type: "note", content: "ok" })).toThrow();
     expect(validateMessageDraft({ id: uuidv7, type: "note", content: "ok" }).id).toBe(uuidv7);
+    expect(validateMessageDraft({ id: uuidv7.toUpperCase(), type: "note", content: "ok" }).id).toBe(uuidv7);
     expect(validateMessageDraft({ id: "018f4a70-0000-8000-8000-000000000123", type: "note", content: "ok" }).id)
       .toBe("018f4a70-0000-8000-8000-000000000123");
     expect(() => validateRequest("publish_message", { workspace: "client-space", type: "note", content: "ok" })).toThrow();

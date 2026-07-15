@@ -35,6 +35,97 @@ function runAtAsync(home: string, args: string[], extra: NodeJS.ProcessEnv = {})
 afterEach(() => { for (const home of homes.splice(0)) rmSync(home, { recursive: true, force: true }); });
 
 describe("agent-bridge CLI", () => {
+  it("exports, verifies, dry-runs, and applies a local portable archive", () => {
+    const home = mkdtempSync(join(tmpdir(), "agent-bridge-cli-")); homes.push(home);
+    const source = join(home, "source.sqlite3");
+    const target = join(home, "target.sqlite3");
+    const archive = join(home, "workspace.ndjson");
+    expect(runAt(home, ["send", "--source", "sender", "portable"], {
+      AGENT_BRIDGE_AGENT: undefined, AGENT_BRIDGE_DB: source,
+    }).status).toBe(0);
+    expect(runAt(home, ["status", "--as", "bootstrap"], {
+      AGENT_BRIDGE_AGENT: undefined, AGENT_BRIDGE_DB: target,
+    }).status).toBe(0);
+
+    const exported = runAt(home, [
+      "archive", "export", "--provider", "local", "--workspace", "default",
+      "--db", source, "--output", archive,
+      "--request-id", "00000000-0000-4000-8000-0000000000AA",
+    ], {
+      AGENT_BRIDGE_URL: "https://remote-must-not-be-used.invalid",
+      AGENT_BRIDGE_KEY: "legacy-key-must-not-be-used",
+      AGENT_BRIDGE_TOKEN: "gateway-token-must-not-be-used",
+      AGENT_BRIDGE_ARCHIVE_DATABASE_URL: "postgres://remote-must-not-be-used.invalid/database",
+    });
+    expect(exported.status).toBe(0);
+    expect(JSON.parse(exported.stdout)).toMatchObject({
+      schemaVersion: 1, status: "ok", operation: "export", provider: "local",
+      requestId: "00000000-0000-4000-8000-0000000000aa", replayed: false,
+      reconciled: false, workspace: "default", messages: 1, receipts: 0,
+    });
+    if (process.platform !== "win32") expect(statSync(archive).mode & 0o077).toBe(0);
+
+    const verified = runAt(home, ["archive", "verify", "--file", archive]);
+    expect(verified.status).toBe(0);
+    expect(JSON.parse(verified.stdout)).toMatchObject({
+      schemaVersion: 1, status: "ok", operation: "verify",
+      exportRequestId: "00000000-0000-4000-8000-0000000000aa",
+      workspace: "default", messages: 1, receipts: 0,
+    });
+
+    const dryRun = runAt(home, [
+      "archive", "import", "--provider", "local", "--db", target,
+      "--file", archive, "--workspace", "default",
+      "--request-id", "00000000-0000-4000-8000-000000000001",
+    ]);
+    expect(dryRun.status).toBe(0);
+    expect(JSON.parse(dryRun.stdout)).toMatchObject({
+      status: "ok", operation: "import", apply: false,
+      exportRequestId: "00000000-0000-4000-8000-0000000000aa",
+      messages: { created: 1, replayed: 0 },
+    });
+    const afterDryRun = runAt(home, ["history", "--as", "reader"], {
+      AGENT_BRIDGE_AGENT: undefined, AGENT_BRIDGE_DB: target,
+    });
+    expect(JSON.parse(afterDryRun.stdout).messages).toHaveLength(0);
+
+    const applied = runAt(home, [
+      "archive", "import", "--provider", "local", "--db", target,
+      "--file", archive, "--apply",
+      "--request-id", "00000000-0000-4000-8000-000000000002",
+    ]);
+    expect(applied.status).toBe(0);
+    expect(JSON.parse(applied.stdout)).toMatchObject({
+      status: "ok", operation: "import", apply: true,
+      exportRequestId: "00000000-0000-4000-8000-0000000000aa",
+      messages: { created: 1, replayed: 0 },
+    });
+    const afterApply = runAt(home, ["history", "--as", "reader"], {
+      AGENT_BRIDGE_AGENT: undefined, AGENT_BRIDGE_DB: target,
+    });
+    expect(JSON.parse(afterApply.stdout).messages).toHaveLength(1);
+  }, 30_000);
+
+  it("enforces exact archive options and PostgreSQL authority", () => {
+    const duplicate = run(["archive", "verify", "--file", "one", "--file", "two"]);
+    expect(duplicate.status).toBe(1);
+    expect(JSON.parse(duplicate.stderr)).toMatchObject({
+      schemaVersion: 1,
+      status: "error",
+      operation: "verify",
+      error: { code: "DUPLICATE_OPTION", message: "--file may only be provided once" },
+    });
+    const positional = run(["archive", "verify", "unexpected", "--file", "one"]);
+    expect(positional.status).toBe(1);
+    expect(JSON.parse(positional.stderr).error.code).toBe("INVALID_ARGUMENT");
+    const wrongAuthority = run([
+      "archive", "export", "--provider", "postgres", "--workspace", "default",
+      "--output", "archive.ndjson", "--db", "postgres://forbidden",
+    ], { AGENT_BRIDGE_ARCHIVE_DATABASE_URL: "postgres://archive-authority" });
+    expect(wrongAuthority.status).toBe(1);
+    expect(JSON.parse(wrongAuthority.stderr).error.code).toBe("INVALID_OPTION");
+  });
+
   it("uses exact owner and installer command contracts", () => {
     const owner = run(["owner", "inventory", "extra"]);
     expect(owner.status).toBe(1);
