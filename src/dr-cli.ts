@@ -564,6 +564,7 @@ async function verifyPostgresBundle(
     bundle, recoveryPaths: [stage],
   });
   const platform = dependencies.platform ?? process.platform;
+  const operations = fileOperations(dependencies);
   let stageIdentity: Stats | undefined; let extracted: ExtractedPostgresBundle | undefined;
   let verificationCompleted = false;
   try {
@@ -584,7 +585,7 @@ async function verifyPostgresBundle(
         backupId: metadata.manifest.backupId, recoveryPaths: recoveryPaths([stage]),
       });
     }
-    const durable = syncDirectory(directory, platform);
+    const durable = operations.syncDirectory(directory);
     if (!durable && platform !== "win32") {
       fail("DR_CLEANUP_DURABILITY_UNKNOWN", "PostgreSQL verification cleanup durability is unproved", {
         backupId: metadata.manifest.backupId, cleanupDurability: "unproved", platform,
@@ -595,7 +596,7 @@ async function verifyPostgresBundle(
     if (extracted) closeExtractedPostgresBundle(extracted);
     if (verificationCompleted) throw commandErrorWithRecovery(error, {}, [stage]);
     removeOwnedDirectory(stage, stageIdentity);
-    try { syncDirectory(directory, platform); } catch { /* primary error remains authoritative */ }
+    try { operations.syncDirectory(directory); } catch { /* primary error remains authoritative */ }
     throw commandErrorWithRecovery(error, {}, [stage]);
   }
 }

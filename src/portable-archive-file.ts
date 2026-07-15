@@ -83,7 +83,7 @@ export class PortableArchiveFile implements PortableArchiveImportPasses {
     verifyPrivatePathAccess(target, "file");
     const before = lstatSync(target);
     const noFollow = typeof constants.O_NOFOLLOW === "number" ? constants.O_NOFOLLOW : 0;
-    this.descriptor = openSync(target, constants.O_RDONLY | noFollow);
+    this.descriptor = openSync(target, constants.O_RDWR | noFollow);
     try {
       this.identity = fstatSync(this.descriptor);
       const after = lstatSync(target);

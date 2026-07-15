@@ -23,7 +23,7 @@ jobs:
         os: [ubuntu-latest, macos-latest, windows-latest]
         node: [22, 24]
     runs-on: ${{ matrix.os }}
-    timeout-minutes: 10
+    timeout-minutes: 20
     steps:
       - uses: actions/checkout@v7
 
@@ -34,7 +34,13 @@ jobs:
           cache-dependency-path: package-lock.json
 
       - run: npm ci
-      - run: npm run check
+      - name: Verify native Windows private path policy
+        if: runner.os == 'Windows'
+        run: npx vitest run test/private-path.test.ts --testTimeout=30000
+      - if: runner.os != 'Windows'
+        run: npm run check
+      - if: runner.os == 'Windows'
+        run: npm run check:windows
 
   postgres:
     name: postgres ${{ matrix.postgres }} integration

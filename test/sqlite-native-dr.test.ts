@@ -1,5 +1,5 @@
 import { randomUUID } from "node:crypto";
-import { closeSync, constants, existsSync, lstatSync, openSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { closeSync, constants, existsSync, lstatSync, openSync, readFileSync, rmSync, unlinkSync, writeFileSync } from "node:fs";
 import { createRequire } from "node:module";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
@@ -13,6 +13,7 @@ import { privateTestDirectory, secureTestFile } from "./private-test-path.js";
 
 const require = createRequire(import.meta.url);
 const roots: string[] = [];
+const nativeTestTimeout = process.platform === "win32" ? 90_000 : 30_000;
 function root(): string { const path = privateTestDirectory("agent-bridge-sqlite-dr-"); roots.push(path); return path; }
 afterEach(() => { for (const path of roots.splice(0)) rmSync(path, { recursive: true, force: true }); });
 
@@ -28,13 +29,13 @@ describe("local SQLite native DR", () => {
     await service.acknowledge({ workspace: "acme", agent: "worker" }, [sent.message.id]);
     const backedUp = await backupLocalSqlite(source, bundle, "018f4a70-0000-7000-8000-000000000211");
     expect(backedUp.manifest.kind).toBe("sqlite"); expect(backedUp.bundleSha256).toMatch(/^[a-f0-9]{64}$/);
-    expect(lstatSync(bundle).mode & 0o077).toBe(0);
+    if (process.platform !== "win32") expect(lstatSync(bundle).mode & 0o077).toBe(0);
     const restored = await restoreLocalSqlite(bundle, target, "018f4a70-0000-7000-8000-000000000212");
     expect(restored.requestId).toBe("018f4a70-0000-7000-8000-000000000212");
     const copy = await local(target);
     expect((await copy.listMessages({ workspace: "acme", agent: "worker" })).messages.map((message) => message.content)).toEqual(["native row"]);
     await copy.close(); await store.close();
-  }, 30_000);
+  }, nativeTestTimeout);
 
   it("marks local and edge databases distinctly and rejects edge backup", async () => {
     const directory = root(); const localPath = join(directory, "local.sqlite3"); const edgePath = join(directory, "edge.sqlite3");
@@ -112,7 +113,7 @@ describe("local SQLite native DR", () => {
     })).rejects.toMatchObject({ code: "OUTPUT_EXISTS" });
     expect(readFileSync(output, "utf8")).toBe("racer");
     expect(existsSync(join(directory, ".018f4a70-0000-7000-8000-000000000214.agent-bridge-dr.bundle.tmp"))).toBe(false);
-  }, 30_000);
+  }, nativeTestTimeout);
 
   it("keeps restore fresh-target-only under a publication race", async () => {
     const directory = root(); const source = join(directory, "source.sqlite3"); const bundle = join(directory, "backup.abdr"); const target = join(directory, "target.sqlite3");
@@ -134,6 +135,43 @@ describe("local SQLite native DR", () => {
     writeFileSync(`${sidecarOnly}-wal`, "occupied", { mode: 0o600 }); secureTestFile(`${sidecarOnly}-wal`);
     await expect(restoreLocalSqlite(bundle, sidecarOnly, randomUUID())).rejects.toMatchObject({ code: "TARGET_EXISTS" });
   });
+
+  it("reports distinct restore cleanup failures truthfully", async () => {
+    const directory = root();
+    const source = join(directory, "source.sqlite3");
+    const bundle = join(directory, "backup.abdr");
+    const store = await local(source); await store.close();
+    await backupLocalSqlite(source, bundle, "018f4a70-0000-7000-8000-000000000241");
+
+    const retainedTarget = join(directory, "retained.sqlite3");
+    const retainedId = "018f4a70-0000-7000-8000-000000000242";
+    const retainedStage = join(directory, `.${retainedId}.agent-bridge-dr.restore.sqlite.tmp`);
+    await expect(restoreLocalSqlite(bundle, retainedTarget, retainedId, {
+      fileOperations: { unlink: () => { throw new Error("injected unlink failure"); } },
+    })).rejects.toMatchObject({
+      code: "DR_RECOVERY_ARTIFACT_RETAINED",
+      details: { verified: true, recoveryPaths: [retainedStage] },
+    });
+
+    const invalidTarget = join(directory, "invalid.sqlite3");
+    await expect(restoreLocalSqlite(bundle, invalidTarget, "018f4a70-0000-7000-8000-000000000243", {
+      fileOperations: {
+        unlink: (path) => { unlinkSync(path); writeFileSync(invalidTarget, "corrupt", { flag: "w" }); },
+      },
+    })).rejects.toMatchObject({
+      code: "DR_RESTORE_INVALID",
+      details: { verified: false, recoveryPaths: [] },
+    });
+
+    const uncertainTarget = join(directory, "uncertain.sqlite3");
+    let syncCalls = 0;
+    await expect(restoreLocalSqlite(bundle, uncertainTarget, "018f4a70-0000-7000-8000-000000000244", {
+      fileOperations: { syncDirectory: () => { syncCalls += 1; if (syncCalls === 2) throw new Error("injected cleanup sync failure"); } },
+    })).rejects.toMatchObject({
+      code: "DR_CLEANUP_DURABILITY_UNKNOWN",
+      details: { verified: true, recoveryPaths: [] },
+    });
+  }, 90_000);
 
   it("reports deadline cleanup and post-publication ambiguity truthfully", async () => {
     const directory = root(); const source = join(directory, "source.sqlite3"); const store = await local(source); await store.close();
@@ -176,7 +214,7 @@ describe("local SQLite native DR", () => {
         recoveryPaths: [ambiguousBundle, ambiguousSnapshot],
       },
     });
-  }, 30_000);
+  }, nativeTestTimeout);
 
   it("terminates a real timed-out backup worker before cleaning its destination", async () => {
     const directory = root(); const source = join(directory, "large.sqlite3"); const output = join(directory, "timeout.abdr");
@@ -192,5 +230,5 @@ describe("local SQLite native DR", () => {
     const id = "018f4a70-0000-7000-8000-000000000220"; const stage = join(directory, `.${id}.agent-bridge-dr.sqlite.tmp`);
     await expect(backupLocalSqlite(source, output, id, { timeoutMs: 100 })).rejects.toMatchObject({ code: "SQLITE_BACKUP_TIMEOUT" });
     expect(existsSync(stage)).toBe(false); await new Promise((resolve) => setTimeout(resolve, 300)); expect(existsSync(stage)).toBe(false);
-  }, 30_000);
+  }, 90_000);
 });

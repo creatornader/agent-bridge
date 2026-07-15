@@ -117,7 +117,7 @@ export class SQLiteBridgeStore implements BridgeStore {
     if (this.databasePath === ":memory:") return;
     for (const path of [this.databasePath, `${this.databasePath}-wal`, `${this.databasePath}-shm`]) {
       if (!existsSync(path)) continue;
-      if (this.preexistingFiles.has(path)) verifyPrivatePathAccess(path, "file");
+      if (path === this.databasePath && this.preexistingFiles.has(path)) verifyPrivatePathAccess(path, "file");
       else securePrivatePath(path, "file");
     }
   }

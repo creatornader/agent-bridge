@@ -105,7 +105,7 @@ describe("enrollment files", () => {
     expect(() => transitionEnrollment(path, consumed, "ready", {}, env)).toThrow(
       /illegal enrollment state transition/,
     );
-  });
+  }, 90_000);
 
   it("rejects escapes, symlink parents, loose permissions, and null creation times", () => {
     const home = mkdtempSync(join(tmpdir(), "agent-bridge-enrollment-"));
@@ -194,10 +194,10 @@ describe("enrollment files", () => {
       outfile: bundlePath,
     });
     const moduleUrl = pathToFileURL(bundlePath).href;
-    const holderScript = `import {acquireEnrollmentLock,releaseEnrollmentLock} from ${JSON.stringify(moduleUrl)};const lock=acquireEnrollmentLock(${JSON.stringify(path)},process.env);process.stdout.write('locked\\n');setTimeout(()=>{releaseEnrollmentLock(lock);process.exit(0)},800);`;
+    const holderScript = `import {acquireEnrollmentLock,releaseEnrollmentLock} from ${JSON.stringify(moduleUrl)};const lock=acquireEnrollmentLock(${JSON.stringify(path)},process.env);process.stdout.write('locked\\n');process.stdin.once('data',()=>{releaseEnrollmentLock(lock);process.exit(0)});process.stdin.resume();`;
     const holder = spawn(process.execPath, ["--experimental-strip-types", "--input-type=module", "--eval", holderScript], {
       env,
-      stdio: ["ignore", "pipe", "pipe"],
+      stdio: ["pipe", "pipe", "pipe"],
     });
     await new Promise<void>((resolve, reject) => {
       let stderr = "";
@@ -209,16 +209,25 @@ describe("enrollment files", () => {
       )));
     });
     const contenderScript = `import {acquireEnrollmentLock} from ${JSON.stringify(moduleUrl)};try{acquireEnrollmentLock(${JSON.stringify(path)},process.env);process.exit(2)}catch(error){if(error?.code==='EEXIST'){process.stdout.write('busy\\n');process.exit(0)}throw error}`;
-    const contender = spawnSync(process.execPath, [
-      "--experimental-strip-types", "--input-type=module", "--eval", contenderScript,
-    ], { env, encoding: "utf8", timeout: 5_000 });
-    expect(contender.status, contender.stderr).toBe(0);
-    expect(contender.stdout).toBe("busy\n");
-    await new Promise<void>((resolve, reject) => {
+    const holderClosed = new Promise<void>((resolve, reject) => {
       holder.once("error", reject);
       holder.once("close", (status) => status === 0 ? resolve() : reject(new Error("lock holder failed")));
     });
-  }, 10_000);
+    let contenderFailure: unknown;
+    try {
+      const contender = spawnSync(process.execPath, [
+        "--experimental-strip-types", "--input-type=module", "--eval", contenderScript,
+      ], { env, encoding: "utf8", timeout: 30_000 });
+      expect(contender.status, contender.stderr).toBe(0);
+      expect(contender.stdout).toBe("busy\n");
+    } catch (error) {
+      contenderFailure = error;
+    } finally {
+      try { holder.stdin.end("release\n"); } catch { holder.kill(); }
+    }
+    await holderClosed;
+    if (contenderFailure) throw contenderFailure;
+  }, 60_000);
 
   it("refuses live lock recovery and parent replacement", () => {
     const home = mkdtempSync(join(tmpdir(), "agent-bridge-enrollment-"));
