@@ -37,12 +37,14 @@ function windowsScript(kind: PrivatePathKind, apply: boolean): string {
     : "System.Security.AccessControl.FileSecurity";
   return [
     "$p=$env:AGENT_BRIDGE_PRIVATE_PATH",
-    "$sid=[System.Security.Principal.WindowsIdentity]::GetCurrent().User",
+    "$identity=[System.Security.Principal.WindowsIdentity]::GetCurrent()",
+    "$sid=$identity.User",
+    "$tokenOwner=$identity.Owner",
     "$beforeItem=Get-Item -Force -LiteralPath $p",
     "if(($beforeItem.Attributes -band [System.IO.FileAttributes]::ReparsePoint) -ne 0){exit 25}",
     "$before=Get-Acl -LiteralPath $p",
     "$beforeOwner=$before.GetOwner([System.Security.Principal.SecurityIdentifier]).Value",
-    "if($beforeOwner -ne $sid.Value){exit 24}",
+    "if($beforeOwner -ne $sid.Value -and ($null -eq $tokenOwner -or $beforeOwner -ne $tokenOwner.Value)){exit 24}",
     ...(apply ? [
       `$acl=New-Object ${security}`,
       "$acl.SetOwner($sid)",

@@ -747,11 +747,12 @@ npm pack
 Set `AGENT_BRIDGE_TEST_DATABASE_URL` to run the live PostgreSQL contract and migration
 tests. CI runs Node 22 and 24 on Linux, macOS, and Windows. PostgreSQL 15 through 18 each
 pack and install the npm tarball, register a least-privilege operator, and exercise
-owner provision, inventory, rotation, and revocation. Enrollment roots, components,
-files, locks, and persistent credential backends require the current Windows SID as
-owner before the code applies or accepts a protected current-user-only DACL. Node file
-identity checks and native Windows reparse attributes must also agree before and after
-policy validation; symlinks, junctions, and other reparse objects fail closed. Windows
+owner provision, inventory, rotation, and revocation. Before applying a Windows DACL,
+private paths must be owned by the current account SID or the active token's default
+owner SID. The final owner and sole protected FullControl rule must use the account SID.
+Verification-only paths must already satisfy that final policy. Node file identity
+checks and native Windows reparse attributes must also agree before and after policy
+validation; symlinks, junctions, and other reparse objects fail closed. Windows
 CI covers static and fault behavior for this policy. Native Windows ACL race and
 durability behavior has not yet been proved on a dedicated Windows host.
 

@@ -6,6 +6,7 @@ import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { createAgentBridgeServer, configFromEnv } from "../src/server.js";
+import { privateTestDirectory } from "./private-test-path.js";
 
 describe("createAgentBridgeServer", () => {
   it("rejects plaintext non-loopback legacy providers without a configured agent", () => {
@@ -228,7 +229,7 @@ describe("createAgentBridgeServer", () => {
   });
 
   it("exposes manual gateway sync through MCP while offline", async () => {
-    const root = mkdtempSync(join(tmpdir(), "agent-bridge-mcp-edge-"));
+    const root = privateTestDirectory("agent-bridge-mcp-edge-");
     vi.spyOn(globalThis, "fetch").mockRejectedValue(new Error("offline"));
     const server = createAgentBridgeServer({
       provider: "gateway",
@@ -263,7 +264,7 @@ describe("createAgentBridgeServer", () => {
   });
 
   it("connect starts replay, reconnect commits queued work, and close stays bounded", async () => {
-    const root = mkdtempSync(join(tmpdir(), "agent-bridge-mcp-replay-"));
+    const root = privateTestDirectory("agent-bridge-mcp-replay-");
     let online = false;
     const published: any[] = [];
     const protocolHeaders = {
@@ -317,7 +318,7 @@ describe("createAgentBridgeServer", () => {
   });
 
   it("aborts an active gateway HTTP request and closes the MCP factory within a bound", async () => {
-    const root = mkdtempSync(join(tmpdir(), "agent-bridge-mcp-close-"));
+    const root = privateTestDirectory("agent-bridge-mcp-close-");
     let requestSignal: AbortSignal | null = null;
     vi.spyOn(globalThis, "fetch").mockImplementation((_input, init) =>
       new Promise<Response>((_resolve, reject) => {

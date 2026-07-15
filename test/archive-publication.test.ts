@@ -1,5 +1,4 @@
-import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, renameSync, rmSync, unlinkSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { chmodSync, existsSync, mkdirSync, readFileSync, readdirSync, renameSync, rmSync, unlinkSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import { ArchiveCommandError, publishArchive, reconcileActiveExport, runArchiveCommand, verifyCompletedExport } from "../src/archive-cli.js";
@@ -8,6 +7,7 @@ import {
   canonicalJson, decodePortableArchive, encodePortableArchive, PORTABLE_ARCHIVE_MAX_BYTES, streamPortableArchive,
   type PortableArchiveExportSession, type PortableArchiveMessage,
 } from "../src/archive.js";
+import { privateTestDirectory, secureTestFile } from "./private-test-path.js";
 
 const directories: string[] = [];
 afterEach(() => { for (const directory of directories.splice(0)) rmSync(directory, { recursive: true, force: true }); });
@@ -35,7 +35,11 @@ function session(
     async abandon(code) { events.push(`abandon:${code}`); if (failAbandon) throw new Error("audit abandonment unavailable"); }, close() {},
   };
 }
-function root(): string { const value = mkdtempSync(join(tmpdir(), "agent-bridge-publication-")); directories.push(value); return value; }
+function root(): string { const value = privateTestDirectory("agent-bridge-publication-"); directories.push(value); return value; }
+function writePrivateFile(path: string, data: string | NodeJS.ArrayBufferView): void {
+  writeFileSync(path, data, { mode: 0o600 });
+  secureTestFile(path);
+}
 
 describe("archive publication", () => {
   it("publishes no-replace atomically under a race", async () => {
@@ -131,7 +135,7 @@ describe("archive publication", () => {
   it("restores the original force target when post-rename durability fails", async () => {
     const directory = root(); const target = join(directory, "archive.ndjson"); const events: string[] = [];
     const original = encode({ workspace: "acme", messages: [{ ...message, content: "original" }], receipts: [] });
-    writeFileSync(target, original, { mode: 0o600 });
+    writePrivateFile(target, original);
     let syncs = 0;
     await expect(publishArchive(target, true, session(events), "acme", {
       requestId: "018f4a70-0000-7000-8000-000000000037",
@@ -144,7 +148,7 @@ describe("archive publication", () => {
 
   it("preserves the backup and leaves the audit started when restoration fails", async () => {
     const directory = root(); const target = join(directory, "archive.ndjson"); const events: string[] = [];
-    writeFileSync(target, encode({ workspace: "acme", messages: [{ ...message, content: "original" }], receipts: [] }), { mode: 0o600 });
+    writePrivateFile(target, encode({ workspace: "acme", messages: [{ ...message, content: "original" }], receipts: [] }));
     let syncs = 0; let renames = 0;
     const result = publishArchive(target, true, session(events), "acme", {
       requestId: "018f4a70-0000-7000-8000-000000000038",
@@ -163,7 +167,7 @@ describe("archive publication", () => {
 
   it("reports a retained backup after the replacement is durable", async () => {
     const directory = root(); const target = join(directory, "archive.ndjson"); const events: string[] = [];
-    writeFileSync(target, encode({ workspace: "acme", messages: [{ ...message, content: "original" }], receipts: [] }), { mode: 0o600 });
+    writePrivateFile(target, encode({ workspace: "acme", messages: [{ ...message, content: "original" }], receipts: [] }));
     await expect(publishArchive(target, true, session(events), "acme", {
       requestId: "018f4a70-0000-7000-8000-000000000039",
       fileOperations: { unlink(path) { if (path.endsWith(".backup")) throw new Error("backup unlink failed"); unlinkSync(path); } },
@@ -178,7 +182,7 @@ describe("archive publication", () => {
 
   it("reports unknown backup deletion durability without naming it as retained", async () => {
     const directory = root(); const target = join(directory, "archive.ndjson"); const events: string[] = [];
-    writeFileSync(target, encode({ workspace: "acme", messages: [{ ...message, content: "original" }], receipts: [] }), { mode: 0o600 });
+    writePrivateFile(target, encode({ workspace: "acme", messages: [{ ...message, content: "original" }], receipts: [] }));
     let syncs = 0;
     await expect(publishArchive(target, true, session(events), "acme", {
       requestId: "018f4a70-0000-7000-8000-000000000045",
@@ -207,7 +211,7 @@ describe("archive publication", () => {
 
   it("removes force backups on the clean path", async () => {
     const directory = root(); const target = join(directory, "archive.ndjson"); const events: string[] = [];
-    writeFileSync(target, encode({ workspace: "acme", messages: [{ ...message, content: "original" }], receipts: [] }), { mode: 0o600 });
+    writePrivateFile(target, encode({ workspace: "acme", messages: [{ ...message, content: "original" }], receipts: [] }));
     await publishArchive(target, true, session(events), "acme", { requestId: "018f4a70-0000-7000-8000-000000000040" });
     expect(events).toEqual(["complete"]);
     expect(readdirSync(directory)).toEqual(["archive.ndjson"]);
@@ -219,10 +223,10 @@ describe("archive publication", () => {
       { workspace: "acme", messages: [message], receipts: [] },
       "018f4a70-0000-7000-8000-000000000041",
     );
-    writeFileSync(target, bytes, { mode: 0o600 });
+    writePrivateFile(target, bytes);
     const recoveryPrefix = join(directory, ".018f4a70-0000-7000-8000-000000000041.agent-bridge-archive");
-    writeFileSync(`${recoveryPrefix}.tmp`, "stale", { mode: 0o600 });
-    writeFileSync(`${recoveryPrefix}.backup`, "stale", { mode: 0o600 });
+    writePrivateFile(`${recoveryPrefix}.tmp`, "stale");
+    writePrivateFile(`${recoveryPrefix}.backup`, "stale");
     const metadata = await reconcileActiveExport(
       target, "018f4a70-0000-7000-8000-000000000041", "acme", session(events),
     );
@@ -235,7 +239,7 @@ describe("archive publication", () => {
   it("leaves replayed active requests started when the retained file is missing or mismatched", async () => {
     const directory = root(); const missing = join(directory, "missing.ndjson"); const missingEvents: string[] = [];
     const missingRecovery = join(directory, ".018f4a70-0000-7000-8000-000000000042.agent-bridge-archive.tmp");
-    writeFileSync(missingRecovery, "partial", { mode: 0o600 });
+    writePrivateFile(missingRecovery, "partial");
     await expect(reconcileActiveExport(
       missing, "018f4a70-0000-7000-8000-000000000042", "acme", session(missingEvents),
     )).rejects.toMatchObject({
@@ -249,7 +253,7 @@ describe("archive publication", () => {
       { workspace: "other", messages: [message], receipts: [] },
       "018f4a70-0000-7000-8000-000000000043",
     );
-    writeFileSync(mismatch, bytes, { mode: 0o600 });
+    writePrivateFile(mismatch, bytes);
     await expect(reconcileActiveExport(
       mismatch, "018f4a70-0000-7000-8000-000000000043", "acme", session(mismatchEvents),
     )).rejects.toMatchObject({ code: "ARCHIVE_RECONCILIATION_FILE_MISMATCH", details: { auditStatus: "started" } });
@@ -263,7 +267,7 @@ describe("archive publication", () => {
       { workspace: "acme", messages: [message], receipts: [] },
       "018f4a70-0000-7000-8000-000000000047",
     );
-    writeFileSync(target, bytes, { mode: 0o600 });
+    writePrivateFile(target, bytes);
     await expect(reconcileActiveExport(
       target, "018f4a70-0000-7000-8000-000000000048", "acme", session(events),
     )).rejects.toMatchObject({ code: "ARCHIVE_RECONCILIATION_FILE_MISMATCH", details: { auditStatus: "started" } });
@@ -274,7 +278,7 @@ describe("archive publication", () => {
   it("keeps a replayed active request started when a recovery artifact has the wrong type", async () => {
     const directory = root(); const target = join(directory, "archive.ndjson"); const events: string[] = [];
     const requestId = "018f4a70-0000-7000-8000-000000000049";
-    writeFileSync(target, encode({ workspace: "acme", messages: [message], receipts: [] }, requestId), { mode: 0o600 });
+    writePrivateFile(target, encode({ workspace: "acme", messages: [message], receipts: [] }, requestId));
     const artifact = join(directory, `.${requestId}.agent-bridge-archive.backup`);
     mkdirSync(artifact, { mode: 0o700 });
     await expect(reconcileActiveExport(target, requestId, "acme", session(events)))
@@ -289,10 +293,10 @@ describe("archive publication", () => {
       { workspace: "acme", messages: [message], receipts: [] },
       "018f4a70-0000-7000-8000-000000000044",
     );
-    writeFileSync(target, bytes, { mode: 0o600 });
+    writePrivateFile(target, bytes);
     const recoveryPrefix = join(dirname(target), ".018f4a70-0000-7000-8000-000000000044.agent-bridge-archive");
-    writeFileSync(`${recoveryPrefix}.tmp`, "stale", { mode: 0o600 });
-    writeFileSync(`${recoveryPrefix}.backup`, "stale", { mode: 0o600 });
+    writePrivateFile(`${recoveryPrefix}.tmp`, "stale");
+    writePrivateFile(`${recoveryPrefix}.backup`, "stale");
     const archive = decodePortableArchive(bytes);
     expect(verifyCompletedExport(target, "018f4a70-0000-7000-8000-000000000044", {
       exportRequestId: archive.exportRequestId, workspace: "acme", digest: archive.digest, messageCount: 1, receiptCount: 0,
@@ -307,7 +311,7 @@ describe("archive publication", () => {
       { workspace: "acme", messages: [message], receipts: [] },
       "018f4a70-0000-7000-8000-00000000004a",
     );
-    writeFileSync(target, wrongId, { mode: 0o600 });
+    writePrivateFile(target, wrongId);
     const wrongArchive = decodePortableArchive(wrongId);
     expect(() => verifyCompletedExport(target, "018f4a70-0000-7000-8000-000000000044", {
       exportRequestId: "018f4a70-0000-7000-8000-000000000044",
