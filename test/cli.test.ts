@@ -825,7 +825,10 @@ describe("agent-bridge CLI", () => {
     const home = mkdtempSync(join(tmpdir(), "agent-bridge-cli-")); homes.push(home);
     const database = join(home, "not-a-database");
     mkdirSync(database);
-    const result = runAt(home, [command], { AGENT_BRIDGE_DB: database });
+    const result = runAt(home, [command], {
+      AGENT_BRIDGE_AGENT: "worker",
+      AGENT_BRIDGE_DB: database,
+    });
     expect(result.status).toBe(1);
     expect(result.stderr).not.toContain("Error:");
     const payload = JSON.parse(result.stdout);
@@ -833,6 +836,7 @@ describe("agent-bridge CLI", () => {
     expect(payload).toMatchObject({
       status: "failed",
       localHealthy: false,
+      agent: "worker",
       checks: [{ name: "local-store", status: "failed" }],
     });
   });
