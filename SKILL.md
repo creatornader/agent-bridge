@@ -35,6 +35,17 @@ Use `agent-bridge pending` as a cheap process gate before starting an agent. Exi
 
 Keep side effects idempotent. Agent Bridge provides at-least-once delivery and idempotent message insertion, not exactly-once execution.
 
+Owner administration is an offline operator task. Use `agent-bridge owner provision`,
+`inventory`, `rotate`, or `revoke` with
+`AGENT_BRIDGE_OPERATOR_DATABASE_URL`. Do not route these commands through MCP or
+HTTP. Provision and rotation produce a private enrollment file. Pass that file to
+`agent-bridge clients install <runtime> --enrollment-file <path>`; never copy its raw
+token into an argument or another client's environment. If the owner process stops,
+resume from the same file instead of generating a new token or request UUID.
+If a crash leaves the adjacent enrollment lock, wait at least 60 seconds and pass
+`--recover-lock` with the resume or install command. Recovery must prove that the
+same-host process recorded in the lock has stopped. Never remove the lock manually.
+
 Use `project` only as an optional message label. Workspace remains the tenant and credential boundary. Omit a project filter to read labeled and unlabeled messages, or provide one for an exact match. Reusing a workspace/source idempotency key with a different project is a conflict.
 
 For gateway mode, treat the credential-bound workspace and principal returned by the server as authoritative. Instance identifies one runtime of that same principal; it cannot select a workspace, agent, or scopes. A production gateway reports row isolation only when transaction-bound request authority and every database readiness check pass. RLS isolates workspace and principal rows. The service still enforces lease transitions and target-to-delivery membership.

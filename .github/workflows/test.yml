@@ -94,3 +94,4 @@ jobs:
           npm install ../creatornader-agent-bridge-*.tgz
           node --input-type=module -e "import { BridgeService, SQLiteBridgeStore } from '@creatornader/agent-bridge'; if (typeof BridgeService !== 'function' || typeof SQLiteBridgeStore !== 'function') process.exit(1)"
           ./node_modules/.bin/agent-bridge demo
+          ./node_modules/.bin/agent-bridge owner help

@@ -1,7 +1,7 @@
 #!/usr/bin/env node
-import { runCli } from "../dist/cli.js";
+import { formatCliError, runCli } from "../dist/cli.js";
 
 runCli().catch((error) => {
-  process.stderr.write(`Error: ${error instanceof Error ? error.message : String(error)}\n`);
+  process.stderr.write(formatCliError(error));
   process.exitCode = 1;
 });

@@ -426,10 +426,10 @@ end
 $$;
 
 create or replace function agent_bridge.control_rotate_credential(
-  requested_request_id uuid, requested_predecessor_id uuid, requested_token_hash char(64),
-  requested_label text, requested_scope_set_name text, requested_expires_at timestamptz,
-  requested_grace_until timestamptz
-) returns table(credential_id uuid,replayed boolean)
+  requested_request_id uuid, requested_predecessor_id uuid, requested_workspace_id text,
+  requested_principal text, requested_token_hash char(64), requested_label text,
+  requested_scope_set_name text, requested_expires_at timestamptz, requested_grace_until timestamptz
+) returns table(credential_id uuid,workspace_id text,principal text,replayed boolean)
 language plpgsql security definer set search_path = '' as $$
 declare
   canonical_fingerprint char(64);
@@ -443,6 +443,12 @@ declare
 begin
   perform agent_bridge.assert_control_actor('operator');
   if requested_request_id is null or requested_predecessor_id is null
+    or requested_workspace_id is null or requested_workspace_id<>btrim(requested_workspace_id)
+    or length(requested_workspace_id) not between 1 and 128
+    or requested_workspace_id ~ '[[:cntrl:]]'
+    or requested_principal is null or requested_principal<>btrim(requested_principal)
+    or length(requested_principal) not between 1 and 128
+    or requested_principal ~ '[[:cntrl:]]'
     or requested_token_hash is null
     or requested_token_hash::text !~ '^[0-9a-f]{64}$'
     or (requested_label is not null and (
@@ -458,7 +464,7 @@ begin
     pg_catalog.hashtextextended(requested_request_id::text,1646705660)
   );
   canonical_fingerprint := pg_catalog.encode(pg_catalog.sha256(pg_catalog.convert_to(pg_catalog.jsonb_build_array(requested_predecessor_id,
-    requested_token_hash::text,requested_label,requested_scope_set_name,
+    requested_workspace_id,requested_principal,requested_token_hash::text,requested_label,requested_scope_set_name,
     case when requested_expires_at is null then null else
       trunc(extract(epoch from requested_expires_at)*1000000)::numeric end,
     case when requested_grace_until is null then null else
@@ -467,14 +473,19 @@ begin
   if found then
     if prior.operation<>'rotate' or prior.fingerprint<>canonical_fingerprint then
       raise exception 'request id was already used with different content'; end if;
-    return query select (prior.result->>'credential_id')::uuid,true; return;
+    return query select (prior.result->>'credential_id')::uuid,prior.result->>'workspace_id',
+      prior.result->>'principal',true;
+    return;
   end if;
-  select credential.workspace_id,credential.agent_id,credential.expires_at
-    into predecessor_workspace_id,predecessor_agent_id,predecessor_expires_at
+  select credential.workspace_id,credential.agent_id,credential.expires_at,agent.principal
+    into predecessor_workspace_id,predecessor_agent_id,predecessor_expires_at,principal_value
   from agent_bridge.credentials credential join agent_bridge.agents agent
     on agent.id=credential.agent_id and agent.workspace_id=credential.workspace_id
   join agent_bridge.workspaces workspace on workspace.id=credential.workspace_id
-  where credential.id=requested_predecessor_id and credential.revoked_at is null
+  where credential.id=requested_predecessor_id
+    and credential.workspace_id=requested_workspace_id
+    and agent.principal=requested_principal
+    and credential.revoked_at is null
     and (credential.expires_at is null or credential.expires_at>clock_timestamp())
     and agent.disabled_at is null
     and workspace.disabled_at is null
@@ -482,8 +493,6 @@ begin
       where successor.replaces_credential_id=credential.id)
   for update of credential;
   if not found then raise exception 'predecessor credential is not active and replaceable'; end if;
-  select agent.principal into principal_value from agent_bridge.agents agent
-    where agent.id=predecessor_agent_id and agent.workspace_id=predecessor_workspace_id;
   if (requested_expires_at is not null and requested_expires_at<=clock_timestamp())
     or (requested_grace_until is not null and predecessor_expires_at is not null
       and requested_grace_until>predecessor_expires_at)
@@ -504,11 +513,12 @@ begin
   perform set_config('agent_bridge.lifecycle_authorized','',true);
   insert into agent_bridge.control_requests(request_id,operation,fingerprint,actor,result)
     values(requested_request_id,'rotate',canonical_fingerprint,session_user,
-      jsonb_build_object('credential_id',successor_id));
+      jsonb_build_object('credential_id',successor_id,'workspace_id',predecessor_workspace_id,
+        'principal',principal_value));
   insert into agent_bridge.control_events(request_id,operation,outcome,actor,workspace_id,principal,
     credential_id,related_credential_id) values(requested_request_id,'rotate','succeeded',session_user,
     predecessor_workspace_id,principal_value,successor_id,requested_predecessor_id);
-  return query select successor_id,false;
+  return query select successor_id,predecessor_workspace_id,principal_value,false;
 exception when unique_violation then
   raise exception using errcode='23505',message='credential rotation conflicts with existing state';
 end
@@ -1212,7 +1222,7 @@ begin
     'reject_control_ledger_mutation()',
     'control_provision(uuid,text,text,text,text,text,character,text,text,timestamp with time zone)',
     'control_credential_inventory(text,timestamp with time zone,uuid,integer)',
-    'control_rotate_credential(uuid,uuid,character,text,text,timestamp with time zone,timestamp with time zone)',
+    'control_rotate_credential(uuid,uuid,text,text,character,text,text,timestamp with time zone,timestamp with time zone)',
     'control_revoke_credential(uuid,uuid,text)','owner_control_catalog_definition()',
     'owner_control_plane_ready()'
   ] loop execute format('alter function agent_bridge.%s owner to %I',role_name,owner_role); end loop;
@@ -1267,7 +1277,7 @@ begin
     execute format('revoke all on sequence agent_bridge.control_events_sequence_seq,agent_bridge.control_membership_events_sequence_seq from %I',role_name);
   end loop;
   foreach role_name in array array[runtime_role,data_owner_role,context_reader_role,event_writer_role] loop
-    execute format('revoke execute on function agent_bridge.control_provision(uuid,text,text,text,text,text,character,text,text,timestamp with time zone),agent_bridge.control_credential_inventory(text,timestamp with time zone,uuid,integer),agent_bridge.control_rotate_credential(uuid,uuid,character,text,text,timestamp with time zone,timestamp with time zone),agent_bridge.control_revoke_credential(uuid,uuid,text),agent_bridge.owner_control_catalog_definition(),agent_bridge.owner_control_plane_ready() from %I',role_name);
+    execute format('revoke execute on function agent_bridge.control_provision(uuid,text,text,text,text,text,character,text,text,timestamp with time zone),agent_bridge.control_credential_inventory(text,timestamp with time zone,uuid,integer),agent_bridge.control_rotate_credential(uuid,uuid,text,text,character,text,text,timestamp with time zone,timestamp with time zone),agent_bridge.control_revoke_credential(uuid,uuid,text),agent_bridge.owner_control_catalog_definition(),agent_bridge.owner_control_plane_ready() from %I',role_name);
   end loop;
 
   execute format('grant usage on schema agent_bridge to %I,%I,%I',owner_role,operator_role,auditor_role);
@@ -1288,7 +1298,7 @@ begin
   execute format('grant execute on function agent_bridge.credential_security_prerequisite_definition() to %I',owner_role);
   execute format('grant execute on function agent_bridge.owner_control_catalog_definition() to %I',owner_role);
   execute format('grant execute on function agent_bridge.control_provision(uuid,text,text,text,text,text,character,text,text,timestamp with time zone) to %I',operator_role);
-  execute format('grant execute on function agent_bridge.control_rotate_credential(uuid,uuid,character,text,text,timestamp with time zone,timestamp with time zone) to %I',operator_role);
+  execute format('grant execute on function agent_bridge.control_rotate_credential(uuid,uuid,text,text,character,text,text,timestamp with time zone,timestamp with time zone) to %I',operator_role);
   execute format('grant execute on function agent_bridge.control_revoke_credential(uuid,uuid,text) to %I',operator_role);
   execute format('grant execute on function agent_bridge.control_credential_inventory(text,timestamp with time zone,uuid,integer) to %I,%I',operator_role,auditor_role);
   execute format('grant execute on function agent_bridge.owner_control_plane_ready() to %I',runtime_role);
@@ -1298,7 +1308,7 @@ begin
     if exists(select 1 from pg_roles where rolname=role_name) then
       execute format('revoke all on agent_bridge.control_requests,agent_bridge.control_events,agent_bridge.owner_control_attestations,agent_bridge.control_membership_events from %I',role_name);
       execute format('revoke all on sequence agent_bridge.control_events_sequence_seq,agent_bridge.control_membership_events_sequence_seq from %I',role_name);
-      execute format('revoke execute on function agent_bridge.control_provision(uuid,text,text,text,text,text,character,text,text,timestamp with time zone),agent_bridge.control_credential_inventory(text,timestamp with time zone,uuid,integer),agent_bridge.control_rotate_credential(uuid,uuid,character,text,text,timestamp with time zone,timestamp with time zone),agent_bridge.control_revoke_credential(uuid,uuid,text),agent_bridge.owner_control_catalog_definition(),agent_bridge.owner_control_plane_ready() from %I',role_name);
+      execute format('revoke execute on function agent_bridge.control_provision(uuid,text,text,text,text,text,character,text,text,timestamp with time zone),agent_bridge.control_credential_inventory(text,timestamp with time zone,uuid,integer),agent_bridge.control_rotate_credential(uuid,uuid,text,text,character,text,text,timestamp with time zone,timestamp with time zone),agent_bridge.control_revoke_credential(uuid,uuid,text),agent_bridge.owner_control_catalog_definition(),agent_bridge.owner_control_plane_ready() from %I',role_name);
     end if;
   end loop;
   foreach role_name in array array[current_user,owner_role] loop
@@ -1543,7 +1553,7 @@ begin
     ('agent_bridge.reject_control_ledger_mutation()','owner',false,'v',false),
     ('agent_bridge.control_provision(uuid,text,text,text,text,text,character,text,text,timestamp with time zone)','owner',true,'v',false),
     ('agent_bridge.control_credential_inventory(text,timestamp with time zone,uuid,integer)','owner',true,'s',false),
-    ('agent_bridge.control_rotate_credential(uuid,uuid,character,text,text,timestamp with time zone,timestamp with time zone)','owner',true,'v',false),
+    ('agent_bridge.control_rotate_credential(uuid,uuid,text,text,character,text,text,timestamp with time zone,timestamp with time zone)','owner',true,'v',false),
     ('agent_bridge.control_revoke_credential(uuid,uuid,text)','owner',true,'v',false),
     ('agent_bridge.owner_control_catalog_definition()','owner',false,'s',true),
     ('agent_bridge.owner_control_plane_ready()','owner',true,'s',false),
@@ -1585,7 +1595,7 @@ begin
           'agent_bridge.reject_control_ledger_mutation()'::regprocedure,
           'agent_bridge.control_provision(uuid,text,text,text,text,text,character,text,text,timestamp with time zone)'::regprocedure,
           'agent_bridge.control_credential_inventory(text,timestamp with time zone,uuid,integer)'::regprocedure,
-          'agent_bridge.control_rotate_credential(uuid,uuid,character,text,text,timestamp with time zone,timestamp with time zone)'::regprocedure,
+          'agent_bridge.control_rotate_credential(uuid,uuid,text,text,character,text,text,timestamp with time zone,timestamp with time zone)'::regprocedure,
           'agent_bridge.control_revoke_credential(uuid,uuid,text)'::regprocedure,
           'agent_bridge.owner_control_catalog_definition()'::regprocedure,
           'agent_bridge.owner_control_plane_ready()'::regprocedure
