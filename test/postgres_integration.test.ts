@@ -4136,6 +4136,7 @@ integration("PostgreSQL BridgeStore integration", () => {
       `GRANT EXECUTE ON FUNCTION agent_bridge.control_revoke_credential(uuid,uuid,text) TO ${names.auditor}`,
       `GRANT SELECT(token_hash) ON agent_bridge.credentials TO ${names.owner}`,
       `GRANT SELECT ON agent_bridge.messages TO ${names.operator}`,
+      `GRANT SELECT(content) ON agent_bridge.messages TO ${names.operator}`,
       `GRANT INSERT ON agent_bridge.control_events TO ${names.operator}`,
       `GRANT USAGE ON SEQUENCE agent_bridge.control_events_sequence_seq TO ${names.operator}`,
       `GRANT ${names.dataOwner} TO ${names.operator}`,
