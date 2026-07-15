@@ -263,7 +263,7 @@ export function writeNativeDrBundle(
     const output = resolve(outputPath); verifyPrivatePathAccess(dirname(output), "directory"); verifyPrivatePathAccess(output, "file");
     const openedOutput = fstatSync(outputDescriptor); const namedOutput = lstatSync(output);
     if (!openedOutput.isFile() || namedOutput.isSymbolicLink() || !sameFile(openedOutput, namedOutput) || openedOutput.size !== 0) {
-      throw new NativeDrBundleError("DR output descriptor does not match its private staging path");
+      throw new NativeDrBundleError("DR output file identity changed during staging");
     }
     validateNativeDrAggregateSize(
       sources.map((source) => source.identity.size),
