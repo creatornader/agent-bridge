@@ -70,6 +70,16 @@ Do not treat the archive digest as encryption or authentication. Archives contai
 messages and read receipts but exclude deliveries, events, presence, credentials,
 control records, and security state.
 
+Native DR is also an offline operator task. Use `agent-bridge dr backup|verify|restore`
+for one complete SQLite or PostgreSQL authority. Local DR accepts the SQLite authority,
+not the gateway edge store. PostgreSQL backup and restore authority come only from
+`AGENT_BRIDGE_DR_SOURCE_DATABASE_URL` and
+`AGENT_BRIDGE_DR_TARGET_DATABASE_URL`. PostgreSQL restore needs a fresh same-name,
+same-major database, a superuser, an explicit request ID, and
+`--accept-source-sql-risk`. Never activate the source and restored target together.
+Treat the bundle as private database material; its hashes do not encrypt or authenticate
+the source.
+
 Use `project` only as an optional message label. Workspace remains the tenant and credential boundary. Omit a project filter to read labeled and unlabeled messages, or provide one for an exact match. Reusing a workspace/source idempotency key with a different project is a conflict.
 
 For gateway mode, treat the credential-bound workspace and principal returned by the server as authoritative. Instance identifies one runtime of that same principal; it cannot select a workspace, agent, or scopes. A production gateway reports row isolation only when transaction-bound request authority and every database readiness check pass. RLS isolates workspace and principal rows. The service still enforces lease transitions and target-to-delivery membership.

@@ -1,5 +1,5 @@
 import { execFile } from "node:child_process";
-import { mkdtempSync, rmSync } from "node:fs";
+import { rmSync } from "node:fs";
 import { createRequire } from "node:module";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -15,6 +15,7 @@ import type {
   RetryPolicy,
 } from "../src/bridge-domain.js";
 import { cursorScope, decodeCursor, encodeCursor } from "../src/bridge-domain.js";
+import { privateTestDirectory, secureTestFile } from "./private-test-path.js";
 import type {
   BridgeDiagnostics,
   BridgeStore,
@@ -25,6 +26,7 @@ import type {
 } from "../src/bridge-store.js";
 import { edgeMessageFingerprint, edgeScopeKey, SQLiteEdgeStore, stableIdempotency } from "../src/sqlite-edge-store.js";
 import { SQLiteBridgeStore } from "../src/sqlite-bridge-store.js";
+import { EDGE_SQLITE_SCHEMA_CONTRACTS, sqliteSchemaContractHash } from "../src/sqlite-database-contract.js";
 import { SyncingBridgeStore } from "../src/syncing-bridge-store.js";
 
 const directories: string[] = [];
@@ -116,7 +118,7 @@ class SwitchableRemote implements BridgeStore {
 }
 
 function directory(): string {
-  const path = mkdtempSync(join(tmpdir(), "agent-bridge-edge-"));
+  const path = privateTestDirectory("agent-bridge-edge-");
   directories.push(path);
   return path;
 }
@@ -877,7 +879,7 @@ describe("offline SQLite synchronization", () => {
       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`)
       .run(scopeKey, message.id, "1", "0000000000000000001", principal.workspace,
         principal.agent, message.type, null, message.createdAt, null, JSON.stringify(message));
-    legacy.close();
+    legacy.close(); secureTestFile(path);
 
     const upgraded = edge(path, principal);
     await upgraded.initialize();
@@ -886,6 +888,11 @@ describe("offline SQLite synchronization", () => {
       content: "durable offline work",
     }]);
     await upgraded.close();
+    const verified = new DatabaseSync(path, { readOnly: true });
+    expect(sqliteSchemaContractHash(verified)).toBe(EDGE_SQLITE_SCHEMA_CONTRACTS.find(
+      (contract) => contract.id === "current-upgraded-project-column",
+    )!.sha256);
+    verified.close();
   });
 
   it("resets the old inbox cursor and backfills prior sent targeted messages", async () => {
@@ -947,7 +954,7 @@ describe("offline SQLite synchronization", () => {
         UNIQUE(scope_key, sequence_key)
       );
     `);
-    legacy.close();
+    legacy.close(); secureTestFile(path);
 
     const sqliteModule = pathToFileURL(join(process.cwd(), "dist/sqlite.js")).href;
     const script = `
@@ -970,6 +977,9 @@ describe("offline SQLite synchronization", () => {
       name: string;
     }>;
     expect(columns.filter((column) => column.name === "project")).toHaveLength(1);
+    expect(sqliteSchemaContractHash(upgraded)).toBe(EDGE_SQLITE_SCHEMA_CONTRACTS.find(
+      (contract) => contract.id === "current-upgraded-project-column",
+    )!.sha256);
     upgraded.close();
   }, 15_000);
 });

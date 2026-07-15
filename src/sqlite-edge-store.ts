@@ -1,7 +1,6 @@
 import { createHash, randomUUID } from "node:crypto";
-import { chmodSync, existsSync, mkdirSync } from "node:fs";
+import { existsSync, lstatSync } from "node:fs";
 import { createRequire } from "node:module";
-import { dirname } from "node:path";
 import type { DatabaseSync as Database, SQLInputValue } from "node:sqlite";
 import {
   cursorScope,
@@ -13,6 +12,8 @@ import {
 } from "./bridge-domain.js";
 import type { MessagePage, MessageQuery } from "./bridge-store.js";
 import { retrySqliteBusy } from "./sqlite-retry.js";
+import { preparePrivateSqliteLocation, securePrivatePath, verifyPrivatePathAccess } from "./private-path.js";
+import { assertEdgeUpgradeCandidate, installEdgeMarkers } from "./sqlite-database-contract.js";
 
 const require = createRequire(import.meta.url);
 function openDatabase(path: string): Database {
@@ -199,27 +200,35 @@ function parseMessage(value: unknown): BridgeMessage {
 
 export class SQLiteEdgeStore {
   private readonly db: Database;
+  private readonly databasePath: string;
+  private readonly preexistingFiles: ReadonlySet<string>;
   private readonly key: string;
   private initialized = false;
   private initialization?: Promise<void>;
 
   constructor(private readonly path: string, private readonly scope: EdgeScope, private readonly busyTimeoutMs = 2_000) {
-    if (path !== ":memory:") mkdirSync(dirname(path), { recursive: true, mode: 0o700 });
-    this.db = openDatabase(path);
-    this.db.exec(`PRAGMA busy_timeout = ${Math.max(1, Math.trunc(this.busyTimeoutMs))}`);
-    this.restrictFiles();
+    const selected = preparePrivateSqliteLocation(path, true);
+    this.databasePath = selected;
+    this.preexistingFiles = new Set(selected === ":memory:" ? [] : [selected, `${selected}-wal`, `${selected}-shm`].filter(existsSync));
+    const before = selected === ":memory:" || !existsSync(selected) ? undefined : lstatSync(selected);
+    this.db = openDatabase(selected);
+    try {
+      this.db.exec(`PRAGMA busy_timeout = ${Math.max(1, Math.trunc(this.busyTimeoutMs))}`);
+      this.restrictFiles();
+      if (before) {
+        const after = lstatSync(selected);
+        if (after.dev !== before.dev || after.ino !== before.ino) throw new Error("SQLite edge database path identity changed while opening");
+      }
+    } catch (error) { this.db.close(); throw error; }
     this.key = edgeScopeKey(scope);
   }
 
   private restrictFiles(): void {
-    if (this.path === ":memory:") return;
-    for (const path of [this.path, `${this.path}-wal`, `${this.path}-shm`]) {
+    if (this.databasePath === ":memory:") return;
+    for (const path of [this.databasePath, `${this.databasePath}-wal`, `${this.databasePath}-shm`]) {
       if (!existsSync(path)) continue;
-      try {
-        chmodSync(path, 0o600);
-      } catch (error) {
-        if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
-      }
+      if (this.preexistingFiles.has(path)) verifyPrivatePathAccess(path, "file");
+      else securePrivatePath(path, "file");
     }
   }
 
@@ -241,6 +250,7 @@ export class SQLiteEdgeStore {
   }
 
   private async initializeOnce(): Promise<void> {
+    assertEdgeUpgradeCandidate(this.db);
     await retrySqliteBusy(() => this.db.exec(schema), this.busyTimeoutMs);
     await retrySqliteBusy(() => this.db.exec("BEGIN IMMEDIATE"), this.busyTimeoutMs);
     try {
@@ -262,6 +272,7 @@ export class SQLiteEdgeStore {
       if (!outboxColumns.some((column) => column.name === "blocked_at")) {
         this.db.exec("ALTER TABLE edge_outbox ADD COLUMN blocked_at TEXT");
       }
+      installEdgeMarkers(this.db);
       this.db.exec("COMMIT");
     } catch (error) {
       this.db.exec("ROLLBACK");

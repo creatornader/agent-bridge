@@ -1,4 +1,5 @@
-import { chmodSync, lstatSync } from "node:fs";
+import { chmodSync, existsSync, lstatSync, mkdirSync } from "node:fs";
+import { dirname, resolve } from "node:path";
 import { spawnSync, type SpawnSyncReturns } from "node:child_process";
 
 export type PrivatePathKind = "file" | "directory";
@@ -120,4 +121,38 @@ export function verifyPrivatePathAccess(
 ): void {
   if (dependencies.platform === "win32") windowsPrivatePath(path, kind, false, dependencies);
   else posixPrivatePath(path, kind, false);
+}
+
+/** Prepare an immediate parent and reject link-like file locations before use. */
+export function preparePrivateFileLocation(path: string, createParent = false): string {
+  const target = resolve(path);
+  const parent = dirname(target);
+  const parentExisted = existsSync(parent);
+  if (createParent && !parentExisted) mkdirSync(parent, { recursive: true, mode: 0o700 });
+  if (!existsSync(parent)) throw new PrivatePathError("private path parent does not exist");
+  if (!parentExisted) securePrivatePath(parent, "directory");
+  verifyPrivatePathAccess(parent, "directory");
+  if (existsSync(target)) verifyPrivatePathAccess(target, "file");
+  return target;
+}
+
+/** Apply and verify owner-only policy for a SQLite database and live sidecars. */
+export function securePrivateSqliteFiles(path: string): void {
+  if (path === ":memory:") return;
+  const target = resolve(path);
+  verifyPrivatePathAccess(dirname(target), "directory");
+  for (const candidate of [target, `${target}-wal`, `${target}-shm`]) {
+    if (!existsSync(candidate)) continue;
+    securePrivatePath(candidate, "file");
+    verifyPrivatePathAccess(candidate, "file");
+  }
+}
+
+export function preparePrivateSqliteLocation(path: string, createParent = false): string {
+  if (path === ":memory:") return path;
+  const target = preparePrivateFileLocation(path, createParent);
+  for (const candidate of [`${target}-wal`, `${target}-shm`]) {
+    if (existsSync(candidate)) verifyPrivatePathAccess(candidate, "file");
+  }
+  return target;
 }

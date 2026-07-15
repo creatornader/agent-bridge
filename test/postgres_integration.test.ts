@@ -18,6 +18,7 @@ import { reconcileLegacyProjects } from "../src/legacy-project-reconciliation.js
 import {
   loadMigrationPlan,
   migrationsReady,
+  NATIVE_DR_ADVISORY_LOCK_KEY,
   runMigrations,
   runtimeSchemaReady,
 } from "../src/migrations.js";
@@ -36,6 +37,10 @@ import { SQLiteBridgeStore } from "../src/sqlite-bridge-store.js";
 const databaseUrl = process.env.AGENT_BRIDGE_TEST_DATABASE_URL;
 const integration = databaseUrl ? describe : describe.skip;
 const pool = databaseUrl ? new pg.Pool({ connectionString: databaseUrl, max: 8 }) : undefined;
+
+function quotePostgresIdentifier(value: string): string {
+  return `"${value.replaceAll('"', '""')}"`;
+}
 
 async function withTemporaryDatabase(
   run: (database: pg.Pool) => Promise<void>,
@@ -257,6 +262,7 @@ integration("PostgreSQL BridgeStore integration", () => {
     const workspaceId = `archive-authority-${randomUUID()}`;
     const login = `bridge_archive_login_${randomUUID().replaceAll("-", "")}`;
     const intruder = `bridge_archive_intruder_${randomUUID().replaceAll("-", "")}`;
+    const unrelatedSuperuser = `bridge_archive_admin_${randomUUID().replaceAll("-", "")}`;
     const password = randomUUID();
     const importRequest = randomUUID();
     const sourceExportRequest = randomUUID();
@@ -282,6 +288,7 @@ integration("PostgreSQL BridgeStore integration", () => {
       await pool!.query("INSERT INTO agent_bridge.workspaces(id,name) VALUES($1,$1)", [workspaceId]);
       await pool!.query(`CREATE ROLE ${login} LOGIN PASSWORD '${password}'`);
       await pool!.query(`CREATE ROLE ${intruder} LOGIN PASSWORD '${randomUUID()}'`);
+      await pool!.query(`CREATE ROLE ${unrelatedSuperuser} SUPERUSER NOLOGIN`);
       await pool!.query(
         "SELECT * FROM agent_bridge.register_archive_member($1,$2::name)", [randomUUID(), login],
       );
@@ -791,6 +798,7 @@ integration("PostgreSQL BridgeStore integration", () => {
       await pool!.query(`REVOKE ALL ON agent_bridge.archive_operations FROM ${intruder}`).catch(() => {});
       await pool!.query(`DROP ROLE IF EXISTS ${login}`).catch(() => {});
       await pool!.query(`DROP ROLE IF EXISTS ${intruder}`).catch(() => {});
+      await pool!.query(`DROP ROLE IF EXISTS ${unrelatedSuperuser}`).catch(() => {});
       rmSync(directory, { recursive: true, force: true });
     }
   }, 30_000);
@@ -1824,23 +1832,29 @@ integration("PostgreSQL BridgeStore integration", () => {
 
   it("isolates runtime roles across databases on one PostgreSQL cluster", async () => {
     const primaryRole = await runtimeRole(pool!);
-    await withTemporaryDatabase(async (otherDatabase) => {
-      await runMigrations(
-        otherDatabase,
-        fileURLToPath(new URL("../sql/migrations", import.meta.url)),
-      );
-      expect(await runtimeRole(otherDatabase)).not.toBe(primaryRole);
-      const client = await otherDatabase.connect();
-      try {
-        await client.query(`SET ROLE ${primaryRole}`);
-        await expect(
-          client.query("SELECT * FROM agent_bridge.messages LIMIT 1"),
-        ).rejects.toThrow(/permission denied/);
-      } finally {
-        await client.query("RESET ROLE");
-        client.release();
-      }
-    });
+    const otherSuperuser = `bridge_cluster_admin_${randomUUID().replaceAll("-", "")}`;
+    await pool!.query(`CREATE ROLE ${otherSuperuser} SUPERUSER NOLOGIN`);
+    try {
+      await withTemporaryDatabase(async (otherDatabase) => {
+        await runMigrations(
+          otherDatabase,
+          fileURLToPath(new URL("../sql/migrations", import.meta.url)),
+        );
+        expect(await runtimeRole(otherDatabase)).not.toBe(primaryRole);
+        const client = await otherDatabase.connect();
+        try {
+          await client.query(`SET ROLE ${primaryRole}`);
+          await expect(
+            client.query("SELECT * FROM agent_bridge.messages LIMIT 1"),
+          ).rejects.toThrow(/permission denied/);
+        } finally {
+          await client.query("RESET ROLE");
+          client.release();
+        }
+      });
+    } finally {
+      await pool!.query(`DROP ROLE IF EXISTS ${otherSuperuser}`);
+    }
   });
 
   it("runs two installed clients through gateway-main and the restricted login", async () => {
@@ -2002,6 +2016,372 @@ integration("PostgreSQL BridgeStore integration", () => {
       "UPDATE agent_bridge.schema_migrations SET checksum=$1 WHERE version=3",
       [recorded.rows[0]!.checksum],
     );
+  });
+
+  it("records the portable membership attestation as the final migration state", async () => {
+    const directory = fileURLToPath(new URL("../sql/migrations", import.meta.url));
+    const plan = await loadMigrationPlan(directory);
+    expect(plan.at(-1)).toMatchObject({ version: 16, name: "native_dr_fence" });
+    expect(await migrationsReady(pool!, plan)).toBe(true);
+    expect((await pool!.query<{ version: number; name: string }>(
+      "SELECT version,name FROM agent_bridge.schema_migrations ORDER BY version DESC LIMIT 1",
+    )).rows).toEqual([{ version: 16, name: "native_dr_fence" }]);
+    expect((await pool!.query<{ name: string }>(
+      `SELECT name FROM agent_bridge.owner_control_attestations
+       WHERE name='owner-control-v4'`,
+    )).rows).toEqual([{ name: "owner-control-v4" }]);
+    expect((await pool!.query<{ name: string }>(
+      `SELECT name FROM agent_bridge.portable_archive_attestations
+       WHERE name='portable-archive-v3'`,
+    )).rows).toEqual([{ name: "portable-archive-v3" }]);
+  });
+
+  it("excludes membership grantors from portable attestations but keeps them in diagnostics", async () => {
+    const names = await controlRoles(pool!);
+    const archiveRole = `agent_bridge_archive_operator_${names.runtime.slice(-16)}`;
+    const catalog = await pool!.query<{
+      schemaOwner: string;
+      major: number;
+      controlGrantor: string;
+      archiveGrantor: string;
+      rawControl: string;
+      portableControl: string;
+      rawArchive: string;
+      portableArchive: string;
+      ownerReady: boolean;
+      archiveReady: boolean;
+    }>(`WITH names AS (
+      SELECT pg_get_userbyid(namespace.nspowner) AS schema_owner
+      FROM pg_namespace namespace WHERE namespace.nspname='agent_bridge'
+    ), definitions AS (SELECT
+      agent_bridge.owner_control_catalog_definition() raw_control,
+      agent_bridge.owner_control_attestation_definition() portable_control,
+      agent_bridge.portable_archive_catalog_definition() raw_archive,
+      agent_bridge.portable_archive_attestation_definition() portable_archive
+    ) SELECT
+      names.schema_owner AS "schemaOwner",
+      current_setting('server_version_num')::integer/10000 AS major,
+      control_grantor.rolname AS "controlGrantor",
+      archive_grantor.rolname AS "archiveGrantor",
+      definitions.raw_control AS "rawControl",
+      definitions.portable_control AS "portableControl",
+      definitions.raw_archive AS "rawArchive",
+      definitions.portable_archive AS "portableArchive",
+      agent_bridge.owner_control_plane_ready() AS "ownerReady",
+      agent_bridge.portable_archive_ready() AS "archiveReady"
+    FROM names CROSS JOIN definitions
+    JOIN pg_roles schema_owner_role ON schema_owner_role.rolname=names.schema_owner
+    JOIN pg_auth_members control_membership ON control_membership.member=schema_owner_role.oid
+    JOIN pg_roles control_granted ON control_granted.oid=control_membership.roleid
+      AND control_granted.rolname=$1
+    JOIN pg_roles control_grantor ON control_grantor.oid=control_membership.grantor
+    JOIN pg_auth_members archive_membership ON archive_membership.member=schema_owner_role.oid
+    JOIN pg_roles archive_granted ON archive_granted.oid=archive_membership.roleid
+      AND archive_granted.rolname=$2
+    JOIN pg_roles archive_grantor ON archive_grantor.oid=archive_membership.grantor`, [names.owner, archiveRole]);
+    const row = catalog.rows[0]!;
+    const record = (definition: string, kind: string, identity: string) =>
+      definition.split("\u001e").find((entry) =>
+        entry.startsWith(`${kind}\u001f${identity}\u001f`)
+      )?.split("\u001f")[2];
+    const controlEdge = `${names.owner}->${row.schemaOwner}`;
+    const archiveEdge = `${archiveRole}->${row.schemaOwner}`;
+    const rawControlMembership = row.rawControl.split("\u001e").find((entry) =>
+      entry.startsWith(`membership\u001f${names.owner}->`)
+    )?.split("\u001f")[2];
+    const rawArchiveMembership = row.rawArchive.split("\u001e").find((entry) =>
+      entry.startsWith(`owner_membership\u001f${archiveRole}->`)
+    )?.split("\u001f")[2];
+    const rawMembershipOptions = row.major === 15 ? "true::" : "true:true:true";
+    expect(rawControlMembership).toBe(
+      `${row.controlGrantor}:${rawMembershipOptions}`,
+    );
+    expect(record(row.portableControl, "membership", controlEdge)).toBe("true:true:true");
+    expect(rawArchiveMembership).toBe(
+      `${row.archiveGrantor}:${rawMembershipOptions}`,
+    );
+    expect(record(row.portableArchive, "owner_membership", archiveEdge)).toBe("true:true:true");
+    expect(row).toMatchObject({ ownerReady: true, archiveReady: true });
+    expect(await runtimeSchemaReady(pool!, { allowPrivilegedCaller: true })).toBe(true);
+  });
+
+  it("canonicalizes owner ACLs while retaining non-owner privilege semantics", async () => {
+    const definitions = async () => (await pool!.query<{
+      owner: string;
+      portable: string;
+    }>(`SELECT agent_bridge.owner_control_attestation_definition() AS owner,
+      agent_bridge.portable_archive_attestation_definition() AS portable`)).rows[0]!;
+    const schemaOwner = (await pool!.query<{ owner: string }>(
+      `SELECT pg_catalog.pg_get_userbyid(namespace.nspowner) AS owner
+       FROM pg_catalog.pg_namespace namespace WHERE namespace.nspname='agent_bridge'`,
+    )).rows[0]!.owner;
+    const owner = quotePostgresIdentifier(schemaOwner);
+    const outsider = `bridge_acl_${randomUUID().replaceAll("-", "")}`;
+    const outsiderIdentifier = quotePostgresIdentifier(outsider);
+    const sequence = "agent_bridge.archive_operations_sequence_seq";
+    const archiveSequences = [
+      "agent_bridge.archive_import_records_sequence_seq",
+      "agent_bridge.archive_membership_events_sequence_seq",
+      "agent_bridge.archive_operation_batches_sequence_seq",
+      "agent_bridge.archive_operations_sequence_seq",
+    ].join(",");
+    const baseline = await definitions();
+    try {
+      await pool!.query(`REVOKE SELECT,UPDATE ON SEQUENCE ${archiveSequences} FROM ${owner}`);
+      await pool!.query(`GRANT SELECT(workspace) ON agent_bridge.archive_operations TO ${owner}`);
+      expect(await definitions()).toEqual(baseline);
+
+      await pool!.query(`ALTER DEFAULT PRIVILEGES FOR ROLE ${owner}
+        REVOKE EXECUTE ON FUNCTIONS FROM ${owner}`);
+      expect(await definitions()).toEqual(baseline);
+
+      await pool!.query(`CREATE ROLE ${outsiderIdentifier} NOLOGIN`);
+      await pool!.query(`GRANT SELECT ON SEQUENCE ${sequence} TO ${outsiderIdentifier}`);
+      const nonOwnerGrant = await definitions();
+      expect(nonOwnerGrant.portable).not.toBe(baseline.portable);
+      await pool!.query(`GRANT SELECT ON SEQUENCE ${sequence} TO ${outsiderIdentifier} WITH GRANT OPTION`);
+      const grantOption = await definitions();
+      expect(grantOption.portable).not.toBe(nonOwnerGrant.portable);
+      await pool!.query(`REVOKE ALL ON SEQUENCE ${sequence} FROM ${outsiderIdentifier}`);
+      expect(await definitions()).toEqual(baseline);
+
+      await pool!.query(`ALTER DEFAULT PRIVILEGES FOR ROLE ${owner} IN SCHEMA agent_bridge
+        GRANT SELECT ON TABLES TO PUBLIC`);
+      const publicDefault = await definitions();
+      expect(publicDefault.owner).not.toBe(baseline.owner);
+      expect(publicDefault.portable).not.toBe(baseline.portable);
+      await pool!.query(`ALTER DEFAULT PRIVILEGES FOR ROLE ${owner} IN SCHEMA agent_bridge
+        REVOKE ALL ON TABLES FROM PUBLIC`);
+      expect(await definitions()).toEqual(baseline);
+
+      await pool!.query(`ALTER DEFAULT PRIVILEGES FOR ROLE ${owner} IN SCHEMA agent_bridge
+        GRANT SELECT ON TABLES TO ${outsiderIdentifier}`);
+      const roleDefault = await definitions();
+      expect(roleDefault.owner).not.toBe(baseline.owner);
+      expect(roleDefault.portable).not.toBe(baseline.portable);
+      await pool!.query(`ALTER DEFAULT PRIVILEGES FOR ROLE ${owner} IN SCHEMA agent_bridge
+        GRANT SELECT ON TABLES TO ${outsiderIdentifier} WITH GRANT OPTION`);
+      const roleGrantOption = await definitions();
+      expect(roleGrantOption.owner).not.toBe(roleDefault.owner);
+      expect(roleGrantOption.portable).not.toBe(roleDefault.portable);
+      await pool!.query(`ALTER DEFAULT PRIVILEGES FOR ROLE ${owner} IN SCHEMA agent_bridge
+        REVOKE ALL ON TABLES FROM ${outsiderIdentifier}`);
+      expect(await definitions()).toEqual(baseline);
+    } finally {
+      await pool!.query(`ALTER DEFAULT PRIVILEGES FOR ROLE ${owner} IN SCHEMA agent_bridge
+        REVOKE ALL ON TABLES FROM PUBLIC`).catch(() => undefined);
+      await pool!.query(`ALTER DEFAULT PRIVILEGES FOR ROLE ${owner} IN SCHEMA agent_bridge
+        REVOKE ALL ON TABLES FROM ${outsiderIdentifier}`).catch(() => undefined);
+      await pool!.query(`ALTER DEFAULT PRIVILEGES FOR ROLE ${owner}
+        GRANT EXECUTE ON FUNCTIONS TO ${owner}`).catch(() => undefined);
+      await pool!.query(`REVOKE ALL ON SEQUENCE ${sequence} FROM ${outsiderIdentifier}`).catch(() => undefined);
+      await pool!.query(`DROP ROLE IF EXISTS ${outsiderIdentifier}`).catch(() => undefined);
+      await pool!.query(`REVOKE SELECT(workspace) ON agent_bridge.archive_operations FROM ${owner}`).catch(() => undefined);
+      await pool!.query(`GRANT SELECT,UPDATE,USAGE ON SEQUENCE ${archiveSequences} TO ${owner}`).catch(() => undefined);
+    }
+    expect(await definitions()).toEqual(baseline);
+    expect(await runtimeSchemaReady(pool!, { allowPrivilegedCaller: true })).toBe(true);
+  });
+
+  it("fences membership mutations while ordinary message writes remain available", async () => {
+    const controlLogin = `bridge_dr_control_${randomUUID().replaceAll("-", "")}`;
+    const archiveLogin = `bridge_dr_archive_${randomUUID().replaceAll("-", "")}`;
+    const fence = await pool!.connect();
+    let control: Promise<pg.QueryResult> | undefined;
+    let archive: Promise<pg.QueryResult> | undefined;
+    let controlRevoke: Promise<pg.QueryResult> | undefined;
+    let archiveRevoke: Promise<pg.QueryResult> | undefined;
+    await pool!.query(`CREATE ROLE ${controlLogin} LOGIN`);
+    await pool!.query(`CREATE ROLE ${archiveLogin} LOGIN`);
+    try {
+      await fence.query("SELECT pg_advisory_lock($1::bigint)", [NATIVE_DR_ADVISORY_LOCK_KEY]);
+      let controlSettled = false;
+      let archiveSettled = false;
+      control = pool!.query(
+        "SELECT * FROM agent_bridge.register_control_member($1,$2,'operator')",
+        [randomUUID(), controlLogin],
+      ).finally(() => { controlSettled = true; });
+      archive = pool!.query(
+        "SELECT * FROM agent_bridge.register_archive_member($1,$2::name)",
+        [randomUUID(), archiveLogin],
+      ).finally(() => { archiveSettled = true; });
+      await new Promise((resolve) => setTimeout(resolve, 75));
+      expect(controlSettled).toBe(false);
+      expect(archiveSettled).toBe(false);
+
+      const workspaceId = `dr-fence-${randomUUID()}`;
+      await pool!.query("INSERT INTO agent_bridge.workspaces(id,name) VALUES($1,$1)", [workspaceId]);
+      const traffic = await new BridgeService(new PostgresBridgeStore(pool!)).publish(
+        { workspace: workspaceId, agent: "publisher" },
+        {
+          type: "work",
+          content: "ordinary traffic remains available",
+          targets: ["recipient"],
+          deliveryPolicy: { mode: "leased" },
+        },
+      );
+      expect((await pool!.query(
+        "SELECT 1 FROM agent_bridge.deliveries WHERE message_id=$1",
+        [traffic.message.id],
+      )).rowCount).toBe(1);
+
+      await fence.query("SELECT pg_advisory_unlock($1::bigint)", [NATIVE_DR_ADVISORY_LOCK_KEY]);
+      await expect(control).resolves.toBeTruthy();
+      await expect(archive).resolves.toBeTruthy();
+
+      await fence.query("SELECT pg_advisory_lock($1::bigint)", [NATIVE_DR_ADVISORY_LOCK_KEY]);
+      let controlRevokeSettled = false;
+      let archiveRevokeSettled = false;
+      controlRevoke = pool!.query(
+        "SELECT * FROM agent_bridge.revoke_control_member($1,$2,'operator')",
+        [randomUUID(), controlLogin],
+      ).finally(() => { controlRevokeSettled = true; });
+      archiveRevoke = pool!.query(
+        "SELECT * FROM agent_bridge.revoke_archive_member($1,$2::name)",
+        [randomUUID(), archiveLogin],
+      ).finally(() => { archiveRevokeSettled = true; });
+      await new Promise((resolve) => setTimeout(resolve, 75));
+      expect(controlRevokeSettled).toBe(false);
+      expect(archiveRevokeSettled).toBe(false);
+      await fence.query("SELECT pg_advisory_unlock($1::bigint)", [NATIVE_DR_ADVISORY_LOCK_KEY]);
+      await expect(controlRevoke).resolves.toBeTruthy();
+      await expect(archiveRevoke).resolves.toBeTruthy();
+    } finally {
+      await fence.query("SELECT pg_advisory_unlock($1::bigint)", [NATIVE_DR_ADVISORY_LOCK_KEY]).catch(() => {});
+      await Promise.allSettled(
+        [control, archive, controlRevoke, archiveRevoke].filter(Boolean) as Promise<pg.QueryResult>[],
+      );
+      fence.release();
+      await pool!.query(
+        "SELECT * FROM agent_bridge.revoke_control_member($1,$2,'operator')",
+        [randomUUID(), controlLogin],
+      ).catch(() => {});
+      await pool!.query(
+        "SELECT * FROM agent_bridge.revoke_archive_member($1,$2::name)",
+        [randomUUID(), archiveLogin],
+      ).catch(() => {});
+      await pool!.query(`DROP ROLE IF EXISTS ${controlLogin}`).catch(() => {});
+      await pool!.query(`DROP ROLE IF EXISTS ${archiveLogin}`).catch(() => {});
+    }
+  });
+
+  it("leaves no membership or ledger residue when the DR fence times out", async () => {
+    const controlLogin = `bridge_dr_timeout_control_${randomUUID().replaceAll("-", "")}`;
+    const archiveLogin = `bridge_dr_timeout_archive_${randomUUID().replaceAll("-", "")}`;
+    const controlRequestId = randomUUID();
+    const archiveRequestId = randomUUID();
+    const fence = await pool!.connect();
+    const contender = await pool!.connect();
+    await pool!.query(`CREATE ROLE ${controlLogin} LOGIN`);
+    await pool!.query(`CREATE ROLE ${archiveLogin} LOGIN`);
+    try {
+      await fence.query("SELECT pg_advisory_lock($1::bigint)", [NATIVE_DR_ADVISORY_LOCK_KEY]);
+      await contender.query("SET lock_timeout='75ms'");
+      await expect(contender.query(
+        "SELECT * FROM agent_bridge.register_control_member($1,$2,'operator')",
+        [controlRequestId, controlLogin],
+      )).rejects.toThrow(/lock timeout/);
+      await expect(contender.query(
+        "SELECT * FROM agent_bridge.register_archive_member($1,$2::name)",
+        [archiveRequestId, archiveLogin],
+      )).rejects.toThrow(/lock timeout/);
+      expect((await pool!.query(
+        `SELECT request_id FROM agent_bridge.control_membership_events WHERE request_id=$1
+         UNION ALL
+         SELECT request_id FROM agent_bridge.archive_membership_events WHERE request_id=$2`,
+        [controlRequestId, archiveRequestId],
+      )).rowCount).toBe(0);
+      const names = await controlRoles(pool!);
+      const archiveRole = `agent_bridge_archive_operator_${names.runtime.slice(-16)}`;
+      expect((await pool!.query(
+        `SELECT 1 FROM pg_auth_members membership
+         JOIN pg_roles granted ON granted.oid=membership.roleid
+         JOIN pg_roles member ON member.oid=membership.member
+         WHERE (granted.rolname=$1 AND member.rolname=$2)
+            OR (granted.rolname=$3 AND member.rolname=$4)`,
+        [names.operator, controlLogin, archiveRole, archiveLogin],
+      )).rowCount).toBe(0);
+    } finally {
+      await contender.query("RESET lock_timeout").catch(() => {});
+      contender.release();
+      await fence.query("SELECT pg_advisory_unlock($1::bigint)", [NATIVE_DR_ADVISORY_LOCK_KEY]).catch(() => {});
+      fence.release();
+      await pool!.query(`DROP ROLE IF EXISTS ${controlLogin}`).catch(() => {});
+      await pool!.query(`DROP ROLE IF EXISTS ${archiveLogin}`).catch(() => {});
+    }
+  });
+
+  it("fences migration execution until the native DR lock is released", async () => {
+    await withTemporaryDatabase(async (upgrade) => {
+      const directory = fileURLToPath(new URL("../sql/migrations", import.meta.url));
+      const plan = await loadMigrationPlan(directory);
+      for (const migration of plan.slice(0, 15)) {
+        await upgrade.query(
+          migration.source.split("__AGENT_BRIDGE_MIGRATION_CHECKSUM__").join(migration.checksum),
+        );
+      }
+      const fence = await upgrade.connect();
+      try {
+        await fence.query("SELECT pg_advisory_lock($1::bigint)", [NATIVE_DR_ADVISORY_LOCK_KEY]);
+        let settled = false;
+        const migration = runMigrations(upgrade, directory).finally(() => { settled = true; });
+        await new Promise((resolve) => setTimeout(resolve, 75));
+        expect(settled).toBe(false);
+        expect((await fence.query(
+          "SELECT 1 FROM agent_bridge.schema_migrations WHERE version=16",
+        )).rowCount).toBe(0);
+        await fence.query("SELECT pg_advisory_unlock($1::bigint)", [NATIVE_DR_ADVISORY_LOCK_KEY]);
+        await expect(migration).resolves.toHaveLength(16);
+      } finally {
+        await fence.query("SELECT pg_advisory_unlock($1::bigint)", [NATIVE_DR_ADVISORY_LOCK_KEY]).catch(() => {});
+        fence.release();
+      }
+    });
+  });
+
+  it("rejects reserved relevant role names without blocking unrelated cluster roles", async () => {
+    const directory = fileURLToPath(new URL("../sql/migrations", import.meta.url));
+    const plan = await loadMigrationPlan(directory);
+    const migration = plan[15]!;
+    const migrationSql = migration.source.split("__AGENT_BRIDGE_MIGRATION_CHECKSUM__").join(migration.checksum);
+    expect(migration).toMatchObject({ version: 16, name: "native_dr_fence" });
+
+    await withTemporaryDatabase(async (upgrade) => {
+      for (const prerequisite of plan.slice(0, 15)) {
+        await upgrade.query(prerequisite.source.split("__AGENT_BRIDGE_MIGRATION_CHECKSUM__").join(prerequisite.checksum));
+      }
+      await upgrade.query('CREATE ROLE "PUBLIC" NOLOGIN');
+      try {
+        await expect(upgrade.query(migrationSql)).resolves.toBeDefined();
+      } finally {
+        await upgrade.query('DROP ROLE IF EXISTS "PUBLIC"');
+      }
+    });
+
+    await withTemporaryDatabase(async (upgrade) => {
+      for (const prerequisite of plan.slice(0, 15)) {
+        await upgrade.query(prerequisite.source.split("__AGENT_BRIDGE_MIGRATION_CHECKSUM__").join(prerequisite.checksum));
+      }
+      const cases = [
+        { roleName: "PUBLIC", grant: (role: string) => `GRANT SELECT (content) ON agent_bridge.messages TO ${role}` },
+        { roleName: `bridge:reserved_${randomUUID()}`, grant: (role: string) => `GRANT SELECT ON agent_bridge.messages TO ${role}` },
+        { roleName: `bridge${String.fromCharCode(30)}reserved_${randomUUID()}`, grant: (role: string) => `GRANT SELECT ON agent_bridge.messages TO ${role}` },
+        { roleName: `bridge${String.fromCharCode(31)}reserved_${randomUUID()}`, grant: (role: string) => `GRANT SELECT ON agent_bridge.messages TO ${role}` },
+      ];
+      for (const { roleName, grant } of cases) {
+        const role = quotePostgresIdentifier(roleName);
+        await upgrade.query(`CREATE ROLE ${role} NOLOGIN`);
+        try {
+          await upgrade.query(grant(role));
+          await expect(upgrade.query(migrationSql)).rejects.toThrow(/reserved Agent Bridge role name/);
+        } finally {
+          await upgrade.query("ROLLBACK");
+          await upgrade.query(`REVOKE ALL ON agent_bridge.messages FROM ${role}`);
+          await upgrade.query(`REVOKE SELECT (content) ON agent_bridge.messages FROM ${role}`);
+          await upgrade.query(`DROP ROLE ${role}`);
+        }
+      }
+    });
   });
 
   it("detects request-authority privilege and definer drift", async () => {
@@ -2348,9 +2728,11 @@ integration("PostgreSQL BridgeStore integration", () => {
       const rowIsolationMigration = plan[12]!;
       const ownerControlPlaneMigration = plan[13]!;
       const portableArchiveMigration = plan[14]!;
+      const nativeDrFenceMigration = plan[15]!;
       expect(rowIsolationMigration).toMatchObject({ version: 13, name: "row_isolation" });
       expect(ownerControlPlaneMigration).toMatchObject({ version: 14, name: "owner_control_plane" });
       expect(portableArchiveMigration).toMatchObject({ version: 15, name: "portable_archives" });
+      expect(nativeDrFenceMigration).toMatchObject({ version: 16, name: "native_dr_fence" });
 
       const workspaceId = "upgrade-row-isolation";
       const messageId = "018f4a70-0000-7000-8000-000000000201";
@@ -2451,6 +2833,11 @@ integration("PostgreSQL BridgeStore integration", () => {
         portableArchiveMigration.source
           .split("__AGENT_BRIDGE_MIGRATION_CHECKSUM__")
           .join(portableArchiveMigration.checksum),
+      );
+      await upgrade.query(
+        nativeDrFenceMigration.source
+          .split("__AGENT_BRIDGE_MIGRATION_CHECKSUM__")
+          .join(nativeDrFenceMigration.checksum),
       );
       expect(await migrationsReady(upgrade, plan)).toBe(true);
       expect(await runtimeSchemaReady(upgrade, { allowPrivilegedCaller: true })).toBe(true);
@@ -3098,6 +3485,7 @@ integration("PostgreSQL BridgeStore integration", () => {
   it("registers operator and auditor logins as the exact allowed membership graph", async () => {
     const names = await controlRoles(pool!);
     const login = `bridge_control_login_${randomUUID().replaceAll("-", "")}`;
+    const unrelatedSuperuser = `bridge_control_admin_${randomUUID().replaceAll("-", "")}`;
     const password = randomUUID().replaceAll("-", "");
     const loginUrl = new URL(databaseUrl!);
     loginUrl.username = login;
@@ -3107,6 +3495,7 @@ integration("PostgreSQL BridgeStore integration", () => {
       "SELECT session_user::text AS actor",
     )).rows[0]!.actor;
     await pool!.query(`CREATE ROLE ${login} LOGIN PASSWORD '${password}'`);
+    await pool!.query(`CREATE ROLE ${unrelatedSuperuser} SUPERUSER NOLOGIN`);
     try {
       await expect(pool!.query(
         "SELECT * FROM agent_bridge.register_control_member($1,$2,$3)",
@@ -3174,6 +3563,7 @@ integration("PostgreSQL BridgeStore integration", () => {
       await loginPool.end().catch(() => {});
       await pool!.query(`REVOKE ${names.operator},${names.auditor} FROM ${login}`).catch(() => {});
       await pool!.query(`DROP ROLE IF EXISTS ${login}`);
+      await pool!.query(`DROP ROLE IF EXISTS ${unrelatedSuperuser}`);
     }
   });
 

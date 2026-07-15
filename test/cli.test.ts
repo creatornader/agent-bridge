@@ -1,4 +1,5 @@
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { randomUUID } from "node:crypto";
+import { existsSync, fstatSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -6,6 +7,11 @@ import { spawn, spawnSync } from "node:child_process";
 import { createServer } from "node:http";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { SQLiteEdgeStore } from "../src/sqlite-edge-store.js";
+import { securePrivatePath } from "../src/private-path.js";
+import { runDrCommand } from "../src/dr-cli.js";
+import {
+  POSTGRES_NATIVE_DR_EXCLUDED_DATA_TABLES, PostgresNativeDrError, type PostgresNativeDrBundleInput,
+} from "../src/postgres-native-dr.js";
 
 const root = dirname(fileURLToPath(new URL("../package.json", import.meta.url)));
 const cli = join(root, "bin", "agent-bridge");
@@ -16,9 +22,11 @@ function run(args: string[], extra: NodeJS.ProcessEnv = {}) {
   return runAt(home, args, extra);
 }
 function runAt(home: string, args: string[], extra: NodeJS.ProcessEnv = {}) {
+  securePrivatePath(home, "directory");
   return spawnSync(process.execPath, [cli, ...args], { encoding: "utf8", timeout: 20_000, env: { ...process.env, HOME: home, AGENT_BRIDGE_PROVIDER: "local", AGENT_BRIDGE_DB: join(home, "bridge.sqlite3"), ...extra } });
 }
 function runAtAsync(home: string, args: string[], extra: NodeJS.ProcessEnv = {}) {
+  securePrivatePath(home, "directory");
   return new Promise<{ status: number | null; stdout: string; stderr: string }>((resolve, reject) => {
     const child = spawn(process.execPath, [cli, ...args], {
       env: { ...process.env, HOME: home, AGENT_BRIDGE_PROVIDER: "local", AGENT_BRIDGE_DB: join(home, "bridge.sqlite3"), ...extra },
@@ -124,6 +132,287 @@ describe("agent-bridge CLI", () => {
     ], { AGENT_BRIDGE_ARCHIVE_DATABASE_URL: "postgres://archive-authority" });
     expect(wrongAuthority.status).toBe(1);
     expect(JSON.parse(wrongAuthority.stderr).error.code).toBe("INVALID_OPTION");
+  });
+
+  it("backs up, verifies, and restores a local native DR bundle", () => {
+    const home = mkdtempSync(join(tmpdir(), "agent-bridge-cli-")); homes.push(home); securePrivatePath(home, "directory");
+    const source = join(home, "source.sqlite3"); const bundle = join(home, "backup.abdr"); const target = join(home, "target.sqlite3");
+    expect(runAt(home, ["send", "--source", "sender", "native"], { AGENT_BRIDGE_AGENT: undefined, AGENT_BRIDGE_DB: source }).status).toBe(0);
+    const backedUp = runAt(home, [
+      "dr", "backup", "--provider", "local", "--source", source, "--output", bundle,
+      "--backup-id", "018f4a70-0000-7000-8000-000000000221", "--timeout-ms", "30000",
+    ]);
+    expect(backedUp.status, backedUp.stderr).toBe(0);
+    expect(JSON.parse(backedUp.stdout)).toMatchObject({ status: "ok", operation: "backup", provider: "local", backupId: "018f4a70-0000-7000-8000-000000000221" });
+    const verified = runAt(home, ["dr", "verify", "--provider", "local", "--bundle", bundle]);
+    expect(verified.status, verified.stderr).toBe(0); expect(JSON.parse(verified.stdout)).toMatchObject({ status: "ok", operation: "verify", backupId: "018f4a70-0000-7000-8000-000000000221" });
+    const restored = runAt(home, [
+      "dr", "restore", "--provider", "local", "--bundle", bundle, "--target", target,
+      "--request-id", "018f4a70-0000-7000-8000-000000000222",
+    ]);
+    expect(restored.status, restored.stderr).toBe(0); expect(JSON.parse(restored.stdout)).toMatchObject({ status: "ok", operation: "restore", requestId: "018f4a70-0000-7000-8000-000000000222" });
+    const history = runAt(home, ["history", "--as", "reader"], { AGENT_BRIDGE_AGENT: undefined, AGENT_BRIDGE_DB: target });
+    expect(JSON.parse(history.stdout).messages.map((message: { content: string }) => message.content)).toEqual(["native"]);
+  }, 30_000);
+
+  it("returns exact JSON errors for native DR command misuse", () => {
+    const duplicate = run(["dr", "verify", "--provider", "local", "--bundle", "one", "--bundle", "two"]);
+    expect(JSON.parse(duplicate.stderr)).toMatchObject({ status: "error", operation: "verify", error: { code: "DUPLICATE_OPTION" } });
+    const postgres = run(["dr", "backup", "--provider", "postgres", "--source", "postgresql://forbidden", "--output", "two"]);
+    expect(JSON.parse(postgres.stderr)).toMatchObject({ error: { code: "INVALID_OPTION" } });
+    const localTool = run(["dr", "verify", "--provider", "local", "--bundle", "one", "--tool-directory", "/tmp"]);
+    expect(JSON.parse(localTool.stderr)).toMatchObject({ error: { code: "INVALID_OPTION" } });
+  });
+
+  it("backs up, verifies, and restores PostgreSQL through env-only authority", async () => {
+    const home = mkdtempSync(join(tmpdir(), "agent-bridge-cli-")); homes.push(home); securePrivatePath(home, "directory");
+    const bundle = join(home, "postgres.abdr");
+    const backupId = "018f4a70-0000-7000-8000-000000000231";
+    const requestId = "018f4a70-0000-7000-8000-000000000232";
+    const schema = {
+      databaseName: "agent_bridge",
+      serverVersionNum: 170005,
+      serverMajor: 17,
+      schemaVersion: 16,
+      migrations: [{ version: 16, name: "native_dr_fence", checksum: "a".repeat(64) }],
+      tableCounts: {
+        "agent_bridge.deliveries": "1", "agent_bridge.delivery_events": "1",
+        ...Object.fromEntries(POSTGRES_NATIVE_DR_EXCLUDED_DATA_TABLES.map((table) => [table, "0"])),
+      },
+      excludedDataTables: [...POSTGRES_NATIVE_DR_EXCLUDED_DATA_TABLES],
+      claimedDeliveryCount: "1",
+      pgDumpVersion: "pg_dump (PostgreSQL) 17.5",
+      roleInventorySha256: "b".repeat(64),
+      readinessAttestations: {
+        securitySchemaSha256: "c".repeat(64), rowIsolationSha256: "d".repeat(64),
+        ownerControlSha256: "e".repeat(64), portableArchiveSha256: "f".repeat(64),
+      },
+    };
+    const fakeBackup = async (options: Parameters<typeof import("../src/postgres-native-dr.js").backupPostgresNativeDr>[0]) => {
+      expect(options.environment?.AGENT_BRIDGE_DR_SOURCE_DATABASE_URL).toBe("postgresql://source-authority");
+      expect(options.toolDirectory).toBe("/opt/postgres/17/bin");
+      expect(options.backupId).toMatch(/^018f4a70-0000-7000-8000-00000000023[159]$/);
+      const dumpPath = join(options.stagingDirectory, "postgres-database.dump");
+      const rolesPath = join(options.stagingDirectory, "postgres-roles.json");
+      writeFileSync(dumpPath, "custom dump", { mode: 0o600 }); securePrivatePath(dumpPath, "file");
+      writeFileSync(rolesPath, "{}\n", { mode: 0o600 }); securePrivatePath(rolesPath, "file");
+      return {
+        backupId: options.backupId!, createdAt: "2026-07-15T00:00:00.000Z", kind: "postgres", schema,
+        entries: [{ name: "postgres/database.dump", path: dumpPath }, { name: "postgres/roles.json", path: rolesPath }],
+      } satisfies PostgresNativeDrBundleInput;
+    };
+    const fakeVerify = async (options: Parameters<typeof import("../src/postgres-native-dr.js").verifyPostgresNativeDrArtifacts>[0]) => {
+      expect(fstatSync(options.artifactAnchors.dump.descriptor).isFile()).toBe(true);
+      expect(fstatSync(options.artifactAnchors.roles.descriptor).isFile()).toBe(true);
+      expect(options.toolDirectory).toBe("/opt/postgres/17/bin");
+      return {
+        schema: options.schema, roleInventory: {} as never, artifactAnchors: options.artifactAnchors,
+        dumpTocVerified: true as const, dumpToc: "",
+      };
+    };
+    const backedUp = await runDrCommand([
+      "backup", "--provider", "postgres", "--output", bundle, "--backup-id", backupId,
+      "--tool-directory", "/opt/postgres/17/bin",
+    ], {
+      environment: { AGENT_BRIDGE_DR_SOURCE_DATABASE_URL: "postgresql://source-authority" },
+      backupPostgres: fakeBackup,
+      verifyPostgres: fakeVerify,
+    });
+    expect(backedUp).toMatchObject({
+      status: "ok", operation: "backup", provider: "postgres", backupId, directoryDurability: "confirmed",
+    });
+    const windowsBackupId = "018f4a70-0000-7000-8000-000000000235";
+    const windowsBundle = join(home, "postgres-win.abdr");
+    const windowsBackup = await runDrCommand([
+      "backup", "--provider", "postgres", "--output", windowsBundle, "--backup-id", windowsBackupId,
+      "--tool-directory", "/opt/postgres/17/bin",
+    ], {
+      environment: { AGENT_BRIDGE_DR_SOURCE_DATABASE_URL: "postgresql://source-authority" },
+      backupPostgres: fakeBackup, verifyPostgres: fakeVerify, platform: "win32",
+    });
+    expect(windowsBackup).toMatchObject({
+      status: "ok", backupId: windowsBackupId, directoryDurability: "unavailable", platform: "win32",
+    });
+    let backupSyncCalls = 0;
+    const cleanupBackupId = "018f4a70-0000-7000-8000-000000000239";
+    const cleanupBundle = join(home, "postgres-cleanup.abdr");
+    await expect(runDrCommand([
+      "backup", "--provider", "postgres", "--output", cleanupBundle, "--backup-id", cleanupBackupId,
+      "--tool-directory", "/opt/postgres/17/bin",
+    ], {
+      environment: { AGENT_BRIDGE_DR_SOURCE_DATABASE_URL: "postgresql://source-authority" },
+      backupPostgres: fakeBackup,
+      verifyPostgres: fakeVerify,
+      fileOperations: { syncDirectory: () => { backupSyncCalls += 1; return backupSyncCalls < 4; } },
+    })).rejects.toMatchObject({
+      code: "DR_CLEANUP_DURABILITY_UNKNOWN",
+      details: { backupId: cleanupBackupId, cleanupDurability: "unproved" },
+    });
+    expect(existsSync(cleanupBundle)).toBe(true);
+    expect(existsSync(join(home, `.${cleanupBackupId}.agent-bridge-dr.postgres.stage`))).toBe(false);
+    const verified = await runDrCommand([
+      "verify", "--provider", "postgres", "--bundle", bundle, "--tool-directory", "/opt/postgres/17/bin",
+    ], { verifyPostgres: fakeVerify });
+    expect(verified).toMatchObject({
+      status: "ok", operation: "verify", provider: "postgres", backupId,
+      cleanupDirectoryDurability: "confirmed",
+    });
+    const windowsVerified = await runDrCommand([
+      "verify", "--provider", "postgres", "--bundle", bundle, "--tool-directory", "/opt/postgres/17/bin",
+    ], { verifyPostgres: fakeVerify, platform: "win32" });
+    expect(windowsVerified).toMatchObject({
+      status: "ok", backupId, cleanupDirectoryDurability: "unavailable", platform: "win32",
+    });
+    await expect(runDrCommand(["verify", "--provider", "local", "--bundle", bundle]))
+      .rejects.toMatchObject({ code: "PROVIDER_MISMATCH" });
+    let restoreCalled = false;
+    const fakeRestore = async (options: Parameters<typeof import("../src/postgres-native-dr.js").restorePostgresNativeDr>[0]) => {
+      restoreCalled = true;
+      expect(options.environment?.AGENT_BRIDGE_DR_TARGET_DATABASE_URL).toBe("postgresql://target-authority");
+      expect(options.acceptSourceSqlRisk).toBe(true);
+      expect(options.toolDirectory).toBe("/opt/postgres/17/bin");
+      expect(readFileSync(options.dumpPath, "utf8")).toBe("custom dump");
+      expect(readFileSync(options.rolesPath, "utf8")).toBe("{}\n");
+      expect(options.schema).toEqual(schema);
+      expect(fstatSync(options.artifactAnchors.dump.descriptor).isFile()).toBe(true);
+      expect(fstatSync(options.artifactAnchors.roles.descriptor).isFile()).toBe(true);
+      return {
+        databaseName: "agent_bridge", normalizedClaimedDeliveries: "1", tableCounts: schema.tableCounts,
+        readiness: { security: true as const, rowIsolation: true as const, ownerControl: true as const, portableArchive: true as const },
+      };
+    };
+    const restored = await runDrCommand([
+      "restore", "--provider", "postgres", "--bundle", bundle, "--request-id", requestId,
+      "--accept-source-sql-risk", "--tool-directory", "/opt/postgres/17/bin",
+    ], {
+      environment: { AGENT_BRIDGE_DR_TARGET_DATABASE_URL: "postgresql://target-authority" },
+      platform: "win32",
+      restorePostgres: fakeRestore,
+    });
+    expect(restoreCalled).toBe(true);
+    expect(restored).toMatchObject({
+      status: "ok", operation: "restore", provider: "postgres", requestId, backupId,
+      databaseName: "agent_bridge", normalizedClaimedDeliveries: "1",
+      cleanupDirectoryDurability: "unavailable", platform: "win32",
+    });
+    expect(existsSync(join(home, `.${requestId}.agent-bridge-dr.postgres-restore.stage`))).toBe(false);
+
+    let restoreSyncCalls = 0;
+    const cleanupRequestId = "018f4a70-0000-7000-8000-000000000236";
+    await expect(runDrCommand([
+      "restore", "--provider", "postgres", "--bundle", bundle, "--request-id", cleanupRequestId,
+      "--accept-source-sql-risk", "--tool-directory", "/opt/postgres/17/bin",
+    ], {
+      environment: { AGENT_BRIDGE_DR_TARGET_DATABASE_URL: "postgresql://target-authority" },
+      restorePostgres: fakeRestore,
+      fileOperations: { syncDirectory: () => { restoreSyncCalls += 1; return restoreSyncCalls < 3; } },
+    })).rejects.toMatchObject({
+      code: "DR_CLEANUP_DURABILITY_UNKNOWN",
+      details: { requestId: cleanupRequestId, targetRestored: true, cleanupDurability: "unproved" },
+    });
+    expect(existsSync(join(home, `.${cleanupRequestId}.agent-bridge-dr.postgres-restore.stage`))).toBe(false);
+
+    const failureCases = [
+      { requestId: "018f4a70-0000-7000-8000-000000000237", targetMutated: false, restoreCompleted: false, retained: false },
+      { requestId: "018f4a70-0000-7000-8000-000000000238", targetMutated: true, restoreCompleted: false, retained: true },
+      { requestId: "018f4a70-0000-7000-8000-00000000023a", targetMutated: true, restoreCompleted: true, retained: true },
+    ] as const;
+    for (const failure of failureCases) {
+      const failureStage = join(home, `.${failure.requestId}.agent-bridge-dr.postgres-restore.stage`);
+      await expect(runDrCommand([
+        "restore", "--provider", "postgres", "--bundle", bundle, "--request-id", failure.requestId,
+        "--accept-source-sql-risk",
+      ], {
+        restorePostgres: async () => {
+          throw new PostgresNativeDrError("INJECTED_RESTORE_FAILURE", "injected restore failure", {
+            targetMutated: failure.targetMutated, restoreCompleted: failure.restoreCompleted,
+          });
+        },
+      })).rejects.toMatchObject({
+        code: "INJECTED_RESTORE_FAILURE",
+        details: {
+          requestId: failure.requestId,
+          targetMutated: failure.targetMutated,
+          restoreCompleted: failure.restoreCompleted,
+          ...(failure.retained ? { recoveryPaths: [failureStage] } : {}),
+        },
+      });
+      expect(existsSync(failureStage)).toBe(failure.retained);
+      if (failure.retained) rmSync(failureStage, { recursive: true, force: true });
+    }
+  });
+
+  it("enforces PostgreSQL DR authority, risk, and crash-recovery contracts", async () => {
+    const home = mkdtempSync(join(tmpdir(), "agent-bridge-cli-")); homes.push(home); securePrivatePath(home, "directory");
+    const output = join(home, "ambiguous.abdr");
+    const backupId = "018f4a70-0000-7000-8000-000000000233";
+    const bundleStage = join(home, `.${backupId}.agent-bridge-dr.bundle.tmp`);
+    const providerStage = join(home, `.${backupId}.agent-bridge-dr.postgres.stage`);
+    const schema = {
+      databaseName: "agent_bridge", serverVersionNum: 170005, serverMajor: 17, schemaVersion: 16,
+      migrations: [{ version: 16, name: "native_dr_fence", checksum: "a".repeat(64) }],
+      tableCounts: {
+        "agent_bridge.deliveries": "0", "agent_bridge.delivery_events": "0",
+        ...Object.fromEntries(POSTGRES_NATIVE_DR_EXCLUDED_DATA_TABLES.map((table) => [table, "0"])),
+      },
+      excludedDataTables: [...POSTGRES_NATIVE_DR_EXCLUDED_DATA_TABLES], claimedDeliveryCount: "0",
+      pgDumpVersion: "pg_dump (PostgreSQL) 17.5", roleInventorySha256: "b".repeat(64),
+      readinessAttestations: {
+        securitySchemaSha256: "c".repeat(64), rowIsolationSha256: "d".repeat(64),
+        ownerControlSha256: "e".repeat(64), portableArchiveSha256: "f".repeat(64),
+      },
+    };
+    const fakeBackup = async (options: Parameters<typeof import("../src/postgres-native-dr.js").backupPostgresNativeDr>[0]) => {
+      const dumpPath = join(options.stagingDirectory, "postgres-database.dump");
+      const rolesPath = join(options.stagingDirectory, "postgres-roles.json");
+      writeFileSync(dumpPath, "dump", { mode: 0o600 }); securePrivatePath(dumpPath, "file");
+      writeFileSync(rolesPath, "{}\n", { mode: 0o600 }); securePrivatePath(rolesPath, "file");
+      return {
+        backupId: options.backupId!, createdAt: "2026-07-15T00:00:00.000Z", kind: "postgres", schema,
+        entries: [{ name: "postgres/database.dump", path: dumpPath }, { name: "postgres/roles.json", path: rolesPath }],
+      } satisfies PostgresNativeDrBundleInput;
+    };
+    const fakeVerify = async (options: Parameters<typeof import("../src/postgres-native-dr.js").verifyPostgresNativeDrArtifacts>[0]) => ({
+      schema: options.schema, roleInventory: {} as never, artifactAnchors: options.artifactAnchors,
+      dumpTocVerified: true as const, dumpToc: "",
+    });
+    await expect(runDrCommand([
+      "backup", "--provider", "postgres", "--source", "postgresql://forbidden", "--output", output,
+      "--backup-id", backupId,
+    ], { backupPostgres: fakeBackup })).rejects.toMatchObject({ code: "INVALID_OPTION" });
+    await expect(runDrCommand(["backup", "--provider", "postgres", "--output", output], { backupPostgres: fakeBackup }))
+      .rejects.toMatchObject({ code: "MISSING_OPTION", message: "--backup-id is required" });
+    await expect(runDrCommand([
+      "restore", "--provider", "postgres", "--bundle", output, "--request-id", randomUUID(),
+    ])).rejects.toMatchObject({ code: "SOURCE_SQL_RISK_NOT_ACCEPTED" });
+    await expect(runDrCommand([
+      "restore", "--provider", "postgres", "--bundle", output, "--target", "postgresql://forbidden",
+      "--request-id", randomUUID(), "--accept-source-sql-risk",
+    ])).rejects.toMatchObject({ code: "INVALID_OPTION" });
+    await expect(runDrCommand([
+      "backup", "--provider", "postgres", "--output", output, "--backup-id", backupId,
+    ], {
+      backupPostgres: fakeBackup,
+      verifyPostgres: fakeVerify,
+      fileOperations: { afterPublish: () => { throw new Error("injected durability failure"); } },
+    })).rejects.toMatchObject({
+      code: "DR_PUBLICATION_AMBIGUOUS",
+      details: { backupId, output, published: true, recoveryPaths: [bundleStage, providerStage] },
+    });
+    expect(existsSync(output)).toBe(true);
+    await expect(runDrCommand([
+      "backup", "--provider", "postgres", "--output", output, "--backup-id", backupId,
+    ], { backupPostgres: fakeBackup })).rejects.toMatchObject({
+      code: "DR_RECOVERY_REQUIRED",
+      details: { outputExists: true, published: "unknown", recoveryPaths: [bundleStage, providerStage] },
+    });
+    const requestId = "018f4a70-0000-7000-8000-000000000234";
+    const restoreStage = join(home, `.${requestId}.agent-bridge-dr.postgres-restore.stage`);
+    mkdirSync(restoreStage, { mode: 0o700 }); securePrivatePath(restoreStage, "directory");
+    await expect(runDrCommand([
+      "restore", "--provider", "postgres", "--bundle", output, "--request-id", requestId,
+      "--accept-source-sql-risk",
+    ])).rejects.toMatchObject({ code: "DR_RECOVERY_REQUIRED", details: { requestId, recoveryPaths: [restoreStage] } });
   });
 
   it("uses exact owner and installer command contracts", () => {
@@ -597,7 +886,7 @@ describe("agent-bridge CLI", () => {
   it("accepts a star as a project label", () => {
     const home = mkdtempSync(join(tmpdir(), "agent-bridge-cli-")); homes.push(home);
     const sent = runAt(home, ["send", "--source", "codex", "--project", "*", "star project"]);
-    expect(sent.status).toBe(0);
+    expect(sent.status, sent.stderr).toBe(0);
     expect(JSON.parse(sent.stdout).message.project).toBe("*");
     const history = runAt(home, ["history", "--as", "worker", "--project", "*"], {
       AGENT_BRIDGE_AGENT: undefined,
@@ -827,11 +1116,11 @@ describe("agent-bridge CLI", () => {
     }
   });
   it("reports cached gateway candidates as available but not authoritative", async () => {
-    const home = mkdtempSync(join(tmpdir(), "agent-bridge-cli-")); homes.push(home);
+    const home = mkdtempSync(join(tmpdir(), "agent-bridge-cli-")); homes.push(home); securePrivatePath(home, "directory");
     const endpoint = "http://127.0.0.1:1";
     const principal = { workspace: "acme", agent: "worker" };
     const path = join(home, ".agent-bridge", "edge.sqlite3");
-    mkdirSync(dirname(path), { recursive: true });
+    mkdirSync(dirname(path), { recursive: true, mode: 0o700 }); securePrivatePath(dirname(path), "directory");
     const edge = new SQLiteEdgeStore(path, { endpoint, principal });
     await edge.initialize();
     await edge.cacheLatest([{

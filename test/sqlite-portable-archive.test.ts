@@ -7,13 +7,14 @@ import { BridgeService } from "../src/bridge-service.js";
 import { decodePortableArchive, encodePortableArchive, exportPortableArchive, importPortableArchive } from "../src/archive.js";
 import { SQLiteBridgeStore } from "../src/sqlite-bridge-store.js";
 import { SQLitePortableArchiveStore } from "../src/sqlite-portable-archive-store.js";
+import { privateTestDirectory } from "./private-test-path.js";
 
 const require = createRequire(import.meta.url);
 const directories: string[] = [];
 afterEach(() => { for (const directory of directories.splice(0)) rmSync(directory, { recursive: true, force: true }); });
 
 async function database(name: string): Promise<string> {
-  const directory = mkdtempSync(join(tmpdir(), `agent-bridge-archive-${name}-`)); directories.push(directory);
+  const directory = privateTestDirectory(`agent-bridge-archive-${name}-`); directories.push(directory);
   const path = join(directory, "bridge.sqlite3");
   const store = new SQLiteBridgeStore(path); await store.initialize(); await store.close(); return path;
 }
@@ -158,7 +159,7 @@ describe("SQLite portable archives", () => {
     expect(counts(targetPath).messages).toBe(1); target.close();
     expect(changed.length).toBeGreaterThan(0);
 
-    const directory = mkdtempSync(join(tmpdir(), "agent-bridge-edge-")); directories.push(directory);
+    const directory = privateTestDirectory("agent-bridge-edge-"); directories.push(directory);
     const edge = join(directory, "edge.sqlite3");
     const { DatabaseSync } = require("node:sqlite") as typeof import("node:sqlite");
     const db = new DatabaseSync(edge); db.exec("CREATE TABLE edge_outbox(id TEXT); CREATE TABLE bridge_messages(id TEXT); CREATE TABLE bridge_receipts(id TEXT)"); db.close();

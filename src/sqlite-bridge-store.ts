@@ -1,11 +1,13 @@
 import { randomUUID } from "node:crypto";
-import { chmodSync, existsSync } from "node:fs";
+import { existsSync, lstatSync } from "node:fs";
 import { createRequire } from "node:module";
 import type { DatabaseSync as Database, SQLInputValue } from "node:sqlite";
 import { DeliveryStateConflictError, cursorScope, decodeCursor, decodeScopedCursor, encodeCursor, encodeScopedCursor, scopedCursorScope, validateDeliveryCursorPosition, validateEventCursorPosition, type AgentPresence, type BridgeDelivery, type BridgeDeliveryEvent, type BridgeMessage, type BridgePrincipal } from "./bridge-domain.js";
 import type { BridgeDiagnostics, BridgeStore, ClaimOptions, DeliveryQuery, InsertMessageResult, MessagePage, MessageQuery } from "./bridge-store.js";
 import { assertIdempotentReplay } from "./idempotency.js";
 import { retrySqliteBusy } from "./sqlite-retry.js";
+import { preparePrivateSqliteLocation, securePrivatePath, verifyPrivatePathAccess } from "./private-path.js";
+import { assertLocalUpgradeCandidate, installLocalAuthorityMarkers } from "./sqlite-database-contract.js";
 
 type Row = Record<string, unknown>;
 const require = createRequire(import.meta.url);
@@ -92,18 +94,31 @@ function deliveryEvent(row: Row): BridgeDeliveryEvent { return { sequence: Strin
 
 export class SQLiteBridgeStore implements BridgeStore {
   private readonly db: Database;
+  private readonly databasePath: string;
+  private readonly preexistingFiles: ReadonlySet<string>;
   private initialized = false;
   private initialization?: Promise<void>;
-  constructor(private readonly path = ":memory:", private readonly busyTimeoutMs = 2_000) { this.db = openDatabase(path); this.db.exec(`PRAGMA busy_timeout = ${Math.max(1, Math.trunc(this.busyTimeoutMs))}`); this.restrictFiles(); }
-  private restrictFiles(): void {
-    if (this.path === ":memory:") return;
-    for (const path of [this.path, `${this.path}-wal`, `${this.path}-shm`]) {
-      if (!existsSync(path)) continue;
-      try {
-        chmodSync(path, 0o600);
-      } catch (error) {
-        if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+  constructor(private readonly path = ":memory:", private readonly busyTimeoutMs = 2_000) {
+    const selected = preparePrivateSqliteLocation(path);
+    this.databasePath = selected;
+    this.preexistingFiles = new Set(selected === ":memory:" ? [] : [selected, `${selected}-wal`, `${selected}-shm`].filter(existsSync));
+    const before = selected === ":memory:" || !existsSync(selected) ? undefined : lstatSync(selected);
+    this.db = openDatabase(selected);
+    try {
+      this.db.exec(`PRAGMA busy_timeout = ${Math.max(1, Math.trunc(this.busyTimeoutMs))}`);
+      this.restrictFiles();
+      if (before) {
+        const after = lstatSync(selected);
+        if (after.dev !== before.dev || after.ino !== before.ino) throw new Error("SQLite database path identity changed while opening");
       }
+    } catch (error) { this.db.close(); throw error; }
+  }
+  private restrictFiles(): void {
+    if (this.databasePath === ":memory:") return;
+    for (const path of [this.databasePath, `${this.databasePath}-wal`, `${this.databasePath}-shm`]) {
+      if (!existsSync(path)) continue;
+      if (this.preexistingFiles.has(path)) verifyPrivatePathAccess(path, "file");
+      else securePrivatePath(path, "file");
     }
   }
   async initialize(): Promise<void> {
@@ -124,6 +139,7 @@ export class SQLiteBridgeStore implements BridgeStore {
     const parts = String(versionRow.version).split(".").map(Number);
     const encoded = (parts[0] ?? 0) * 1_000_000 + (parts[1] ?? 0) * 1_000 + (parts[2] ?? 0);
     if (encoded < 3_051_003) throw new Error("SQLite 3.51.3 or newer is required");
+    assertLocalUpgradeCandidate(this.db);
     await retrySqliteBusy(() => this.db.exec(schema), this.busyTimeoutMs);
     await retrySqliteBusy(() => this.db.exec("BEGIN IMMEDIATE"), this.busyTimeoutMs);
     try {
@@ -274,7 +290,11 @@ export class SQLiteBridgeStore implements BridgeStore {
             )
           )
         ) BEGIN SELECT RAISE(ABORT,'invalid delivery policy'); END`);
+      this.db.exec(`CREATE TRIGGER IF NOT EXISTS bridge_messages_domain_insert BEFORE INSERT ON bridge_messages
+        WHEN NOT (json_valid(NEW.targets) AND json_type(NEW.targets)='array' AND NEW.priority IN ('info','high','urgent'))
+        BEGIN SELECT RAISE(ABORT,'invalid message domain'); END`);
       this.db.exec("CREATE INDEX IF NOT EXISTS bridge_messages_project ON bridge_messages(workspace, project, sequence)");
+      installLocalAuthorityMarkers(this.db);
       this.db.exec("COMMIT");
     } catch (error) {
       this.db.exec("ROLLBACK");
