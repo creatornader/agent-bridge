@@ -273,9 +273,11 @@ Enrollment deletion and lock release report durability separately. A failure bef
 unlink leaves a retained consumed file. A failure after unlink reports unknown directory
 durability and never reports a retained path. On Windows, enrollment roots, every path
 component, enrollment files, temporary files, locks, and credential backends must be
-owned by the current SID. The process does not take ownership of an existing object. It
-then applies and verifies one protected current-SID FullControl rule. Node identity and
-file-type checks run before and after the native policy check. Native reparse attributes
+owned by the current account SID or the active token's default owner SID before the
+process applies policy. The process rejects every other owner, sets the account SID as
+owner, and verifies one protected account-SID FullControl rule. Verification-only paths
+must already satisfy that final policy. Node identity and file-type checks run before
+and after the native policy check. Native reparse attributes
 reject symlinks, junctions, and other reparse objects before and after DACL work.
 
 The schema owner is the trusted offline role administrator. It holds all three control roles with the admin option and registers eligible login roles through `register_control_member`; `revoke_control_member` removes them. Those functions are not available through HTTP or MCP. Each call is idempotent by request UUID and appends the database session actor to the membership ledger. Runtime readiness compares the active registry with the full `pg_has_role` closure and the direct `pg_auth_members` edges. It rejects unregistered operator or auditor holders, every external owner holder, missing registered grants, unsafe login attributes, extra roles inherited by a registered member, and roles that inherit a registered member. Direct edges must retain their expected grantor, admin, inherit, and set options. Only the schema owner is exempt from the broad closure check because a PostgreSQL superuser reports membership across roles. A direct `GRANT` is never a valid deployment shortcut.

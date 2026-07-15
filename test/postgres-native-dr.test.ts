@@ -1,7 +1,6 @@
 import {
-  chmodSync, closeSync, constants, fstatSync, mkdtempSync, openSync, readFileSync, rmSync, writeFileSync,
+  chmodSync, closeSync, constants, fstatSync, openSync, readFileSync, rmSync, writeFileSync,
 } from "node:fs";
-import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import { createBoundedToolOutput } from "../src/bounded-tool-output.js";
@@ -26,9 +25,15 @@ import {
   verifyPostgresNativeDrArtifacts,
 } from "../src/postgres-native-dr.js";
 import { canonicalJson } from "../src/portable-archive-format.js";
+import { privateTestDirectory, secureTestFile } from "./private-test-path.js";
 
 const directories: string[] = [];
 const descriptors: number[] = [];
+function pgDirectory(): string {
+  const path = privateTestDirectory("agent-bridge-pg-dr-");
+  directories.push(path);
+  return path;
+}
 afterEach(() => {
   for (const descriptor of descriptors.splice(0)) closeSync(descriptor);
   for (const directory of directories.splice(0)) rmSync(directory, { recursive: true, force: true });
@@ -80,7 +85,7 @@ describe("PostgreSQL native DR process boundary", () => {
   });
 
   it("keeps credentials out of child arguments and the inherited environment", () => {
-    const directory = mkdtempSync(join(tmpdir(), "agent-bridge-pg-dr-")); directories.push(directory);
+    const directory = pgDirectory();
     const databaseUrl = new URL(
       "postgresql://db.example:6543/agent_bridge?sslmode=verify-full&sslrootcert=%2Fprivate%2Froot.crt",
     );
@@ -100,7 +105,7 @@ describe("PostgreSQL native DR process boundary", () => {
   });
 
   it("rejects connection parameters outside the SSL allowlist", () => {
-    const directory = mkdtempSync(join(tmpdir(), "agent-bridge-pg-dr-")); directories.push(directory);
+    const directory = pgDirectory();
     const databaseUrl = new URL(
       "postgresql://db.example/agent_bridge?options=-c%20search_path%3Dpublic",
     );
@@ -111,7 +116,7 @@ describe("PostgreSQL native DR process boundary", () => {
   });
 
   it("normalizes IPv6 brackets while preserving service values and escaping pgpass fields", () => {
-    const directory = mkdtempSync(join(tmpdir(), "agent-bridge-pg-dr-")); directories.push(directory);
+    const directory = pgDirectory();
     const databaseUrl = new URL(
       "postgresql://[2001:db8::1]:5432/db%3Aname?sslrootcert=C%3A%5Ccerts%5C%23root.crt",
     );
@@ -327,12 +332,13 @@ describe("PostgreSQL native DR orchestration", () => {
   };
 
   it("seals canonical PostgreSQL artifacts and detects in-place dump replacement", async () => {
-    const directory = mkdtempSync(join(tmpdir(), "agent-bridge-pg-dr-")); directories.push(directory);
+    const directory = pgDirectory();
     const dumpPath = join(directory, "database.dump");
     const rolesPath = join(directory, "roles.json");
     const rolesText = canonicalPostgresRoleInventory(roleInventory);
     writeFileSync(dumpPath, "custom dump", { mode: 0o600 });
     writeFileSync(rolesPath, rolesText, { mode: 0o600 });
+    secureTestFile(dumpPath); secureTestFile(rolesPath);
     const artifactAnchors = anchorsFor(dumpPath, rolesPath);
     const toolInputs: Array<{ args: string[]; inputFileDescriptor?: number }> = [];
     const verified = await verifyPostgresNativeDrArtifacts({
@@ -368,12 +374,13 @@ describe("PostgreSQL native DR orchestration", () => {
   });
 
   it("rejects a forbidden TOC entry beyond the former 1 MiB capture boundary", async () => {
-    const directory = mkdtempSync(join(tmpdir(), "agent-bridge-pg-dr-")); directories.push(directory);
+    const directory = pgDirectory();
     const dumpPath = join(directory, "database.dump");
     const rolesPath = join(directory, "roles.json");
     const rolesText = canonicalPostgresRoleInventory(roleInventory);
     writeFileSync(dumpPath, "custom dump", { mode: 0o600 });
     writeFileSync(rolesPath, rolesText, { mode: 0o600 });
+    secureTestFile(dumpPath); secureTestFile(rolesPath);
     const validEntry = "3; 1259 1 TABLE agent_bridge messages owner\n";
     const validPrefix = "1; 2615 1 SCHEMA - agent_bridge owner\n2; 0 0 ACL - SCHEMA agent_bridge owner\n"
       + validEntry.repeat(Math.ceil((1024 * 1024) / Buffer.byteLength(validEntry)));
@@ -392,12 +399,13 @@ describe("PostgreSQL native DR orchestration", () => {
   });
 
   it("rejects an explicitly truncated TOC before validating its prefix", async () => {
-    const directory = mkdtempSync(join(tmpdir(), "agent-bridge-pg-dr-")); directories.push(directory);
+    const directory = pgDirectory();
     const dumpPath = join(directory, "database.dump");
     const rolesPath = join(directory, "roles.json");
     const rolesText = canonicalPostgresRoleInventory(roleInventory);
     writeFileSync(dumpPath, "custom dump", { mode: 0o600 });
     writeFileSync(rolesPath, rolesText, { mode: 0o600 });
+    secureTestFile(dumpPath); secureTestFile(rolesPath);
     await expect(verifyPostgresNativeDrArtifacts({
       dumpPath,
       rolesPath,
@@ -423,12 +431,13 @@ describe("PostgreSQL native DR orchestration", () => {
   });
 
   it("fails immediately when another restore holds the target fence", async () => {
-    const directory = mkdtempSync(join(tmpdir(), "agent-bridge-pg-dr-")); directories.push(directory);
+    const directory = pgDirectory();
     const dumpPath = join(directory, "database.dump");
     const rolesPath = join(directory, "roles.json");
     const rolesText = canonicalPostgresRoleInventory(roleInventory);
     writeFileSync(dumpPath, "custom dump", { mode: 0o600 });
     writeFileSync(rolesPath, rolesText, { mode: 0o600 });
+    secureTestFile(dumpPath); secureTestFile(rolesPath);
     const target = new FakePostgresDrClient((sql) => sql.includes("pg_try_advisory_lock") ? [{ acquired: false }] : []);
     const schema = schemaFor(rolesText);
     await expect(restorePostgresNativeDr({
@@ -443,12 +452,13 @@ describe("PostgreSQL native DR orchestration", () => {
   });
 
   it("preserves restore failure details when credential cleanup also fails", async () => {
-    const directory = mkdtempSync(join(tmpdir(), "agent-bridge-pg-dr-")); directories.push(directory);
+    const directory = pgDirectory();
     const dumpPath = join(directory, "database.dump");
     const rolesPath = join(directory, "roles.json");
     const rolesText = canonicalPostgresRoleInventory(roleInventory);
     writeFileSync(dumpPath, "custom dump", { mode: 0o600 });
     writeFileSync(rolesPath, rolesText, { mode: 0o600 });
+    secureTestFile(dumpPath); secureTestFile(rolesPath);
     const target = new FakePostgresDrClient((sql) => sql.includes("pg_try_advisory_lock") ? [{ acquired: false }] : []);
     const schema = schemaFor(rolesText);
     await expect(restorePostgresNativeDr({
@@ -471,12 +481,13 @@ describe("PostgreSQL native DR orchestration", () => {
   });
 
   it("keeps a failed target offline and reports residual role shells", async () => {
-    const directory = mkdtempSync(join(tmpdir(), "agent-bridge-pg-dr-")); directories.push(directory);
+    const directory = pgDirectory();
     const dumpPath = join(directory, "database.dump");
     const rolesPath = join(directory, "roles.json");
     const rolesText = canonicalPostgresRoleInventory(roleInventory);
     writeFileSync(dumpPath, "custom dump", { mode: 0o600 });
     writeFileSync(rolesPath, rolesText, { mode: 0o600 });
+    secureTestFile(dumpPath); secureTestFile(rolesPath);
     const target = new FakePostgresDrClient((sql) => {
       if (sql.includes("pg_try_advisory_lock")) return [{ acquired: true }];
       if (sql.includes("to_regnamespace")) return [{ databaseName: "agent_bridge", serverVersionNum: "170005", schemaExists: false, databaseFresh: true }];
@@ -512,7 +523,7 @@ describe("PostgreSQL native DR orchestration", () => {
   });
 
   it("holds the fence across a snapshot dump and keeps source authority out of child calls", async () => {
-    const directory = mkdtempSync(join(tmpdir(), "agent-bridge-pg-dr-")); directories.push(directory);
+    const directory = pgDirectory();
     const source = new FakePostgresDrClient((sql) => {
       if (sql.includes("pg_export_snapshot")) return [{ snapshot: "00000001-00000001-1" }];
       if (sql.includes("current_setting('server_version_num')")) return [{ databaseName: "agent_bridge", serverVersionNum: "170005" }];
@@ -543,7 +554,11 @@ describe("PostgreSQL native DR orchestration", () => {
         childCalls.push({ command, args, environment });
         if (args[0] === "--version") return { stdout: `${command.includes("dump") ? "pg_dump" : "pg_restore"} (PostgreSQL) 17.5\n`, stderr: "", exitCode: 0 };
         const output = args.find((argument) => argument.startsWith("--file="));
-        if (output) writeFileSync(output.slice("--file=".length), "custom dump");
+        if (output) {
+          const path = output.slice("--file=".length);
+          writeFileSync(path, "custom dump");
+          secureTestFile(path);
+        }
         return { stdout: command.includes("restore") ? "1; 2615 1 SCHEMA - agent_bridge owner\n2; 0 0 ACL - SCHEMA agent_bridge owner\n" : "", stderr: "", exitCode: 0 };
       },
       randomId: () => "00000000-0000-4000-8000-000000000001",
@@ -567,7 +582,7 @@ describe("PostgreSQL native DR orchestration", () => {
   });
 
   it("reports credential residue when backup cleanup fails", async () => {
-    const directory = mkdtempSync(join(tmpdir(), "agent-bridge-pg-dr-")); directories.push(directory);
+    const directory = pgDirectory();
     const source = new FakePostgresDrClient((sql) => {
       if (sql.includes("pg_advisory_lock")) throw new PostgresNativeDrError("INJECTED_BACKUP_FAILURE", "injected");
       return [];
@@ -589,7 +604,7 @@ describe("PostgreSQL native DR orchestration", () => {
   });
 
   it("reports completed backup outputs when credential cleanup blocks publication", async () => {
-    const directory = mkdtempSync(join(tmpdir(), "agent-bridge-pg-dr-")); directories.push(directory);
+    const directory = pgDirectory();
     const answer = (sql: string): unknown[] => {
       if (sql.includes("pg_export_snapshot")) return [{ snapshot: "00000001-00000001-1" }];
       if (sql.includes("current_setting('server_version_num')")) return [{ databaseName: "agent_bridge", serverVersionNum: "170005" }];
@@ -615,7 +630,11 @@ describe("PostgreSQL native DR orchestration", () => {
         runTool: async (command, args) => {
           if (args[0] === "--version") return { stdout: `${command.includes("dump") ? "pg_dump" : "pg_restore"} (PostgreSQL) 17.5\n`, stderr: "", exitCode: 0 };
           const output = args.find((argument) => argument.startsWith("--file="));
-          if (output) writeFileSync(output.slice("--file=".length), "custom dump");
+          if (output) {
+            const path = output.slice("--file=".length);
+            writeFileSync(path, "custom dump");
+            secureTestFile(path);
+          }
           return { stdout: command.includes("restore") ? "1; 2615 1 SCHEMA - agent_bridge owner\n2; 0 0 ACL - SCHEMA agent_bridge owner\n" : "", stderr: "", exitCode: 0 };
         },
         randomId: () => "00000000-0000-4000-8000-000000000001",
@@ -638,12 +657,13 @@ describe("PostgreSQL native DR orchestration", () => {
   });
 
   it("reports a completed restore when credential cleanup fails", async () => {
-    const directory = mkdtempSync(join(tmpdir(), "agent-bridge-pg-dr-")); directories.push(directory);
+    const directory = pgDirectory();
     const dumpPath = join(directory, "database.dump");
     const rolesPath = join(directory, "roles.json");
     const rolesText = canonicalPostgresRoleInventory(roleInventory);
     writeFileSync(dumpPath, "custom dump", { mode: 0o600 });
     writeFileSync(rolesPath, rolesText, { mode: 0o600 });
+    secureTestFile(dumpPath); secureTestFile(rolesPath);
     chmodSync(dumpPath, 0o600); chmodSync(rolesPath, 0o600);
     const targetCounts: Record<string, string> = {
       "agent_bridge.deliveries": "2",

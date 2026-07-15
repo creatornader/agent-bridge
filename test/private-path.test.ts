@@ -33,7 +33,7 @@ function directoryIdentity(symbolic = false, inode = 20) {
 }
 
 describe("private path policy", () => {
-  it("checks the Windows owner SID before applying and after verifying the DACL", () => {
+  it("accepts the user or token owner before binding a Windows path to the user SID", () => {
     let script = "";
     securePrivatePath("C:\\private\\credential.config", "file", {
       platform: "win32",
@@ -43,8 +43,11 @@ describe("private path policy", () => {
       },
       inspect: () => fileIdentity(),
     });
+    expect(script).toContain("$tokenOwner=$identity.Owner");
     expect(script).toContain("$before.GetOwner([System.Security.Principal.SecurityIdentifier])");
+    expect(script).toContain("$beforeOwner -ne $sid.Value -and ($null -eq $tokenOwner -or $beforeOwner -ne $tokenOwner.Value)");
     expect(script.indexOf("$beforeOwner -ne $sid.Value")).toBeLessThan(script.indexOf("Set-Acl"));
+    expect(script).toContain("$acl.SetOwner($sid)");
     expect(script).toContain("$check.GetOwner([System.Security.Principal.SecurityIdentifier])");
     expect(script).toContain("AreAccessRulesProtected");
     expect(script).toContain("FullControl");
