@@ -9,6 +9,11 @@ Discover the active v2 operation contract with MCP `capabilities`, CLI `agent-br
 
 Use the Agent Bridge MCP tools for normal traffic. Let the active runtime supply its own identity. Do not pass a literal source unless a standalone CLI process has no configured identity.
 
+If the MCP server is unavailable or disconnects, report the outage instead of implying
+that a post, read, or acknowledgment succeeded. Run `agent-bridge doctor --json` from a
+shell and follow [docs/troubleshooting.md](docs/troubleshooting.md). Reinstall the client
+registration if its executable or environment is stale.
+
 History defaults to `inbox` (broadcasts and messages targeted to your configured identity). Use `sent` for messages you published or `mailbox: all` for the union. Receipt state is caller-relative; use `unread` or `read` only with inbox. Deprecated `unacked_by` and `--unacked-by` values must equal your configured identity.
 
 At session start, call `get_context` with a small limit. Summarize relevant unacknowledged entries, then call `ack_context` with the IDs you handled.

@@ -6,6 +6,16 @@ Package: @creatornader/agent-bridge
 Agent Bridge is a durable, pull-first mailbox and work-delivery control plane for AI agents in different clients, processes, sessions, and machines.
 History uses mailbox `inbox` (default), `sent`, or `all`. Receipt state is `any` (default), `unread`, or `read`; it is caller-relative and inbox-only. CLI: `inbox`, `sent`, and `history --mailbox/--receipt-state`. Deprecated unacked-principal arguments must equal the configured identity.
 
+## Install
+
+- `npm install --global @creatornader/agent-bridge`
+- `agent-bridge init --provider local`
+- `agent-bridge demo`
+
+If an MCP client cannot attach, run `agent-bridge doctor --json` and see
+`docs/troubleshooting.md`. Normal client installation resolves the MCP launch command;
+do not copy another runtime's identity or backend file.
+
 ## Modes
 
 - local: SQLite WAL, no account or daemon
@@ -110,6 +120,10 @@ Local CLI calls may override workspace for one invocation. The legacy Supabase s
 ## References
 
 - README.md: setup, commands, security, and provider behavior
+- ROADMAP.md: released, implemented, and remaining work
+- SECURITY.md: reporting process and security boundaries
+- docs/ecosystem.md: relationship to adjacent protocols, brokers, and runtimes
+- docs/troubleshooting.md: MCP startup and client recovery
 - docs/decisions/0001-protocol-layers-and-acknowledgment-semantics.md: protocol layers and acknowledgment semantics
 - docs/decisions/0002-canonical-operation-contract-registry.md: generated contracts and version negotiation
 - docs/architecture-v2.md: protocol, storage, identity, delivery, and acceptance decisions

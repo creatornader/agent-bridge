@@ -1,7 +1,7 @@
 {
   "name": "@creatornader/agent-bridge",
   "version": "0.3.0",
-  "description": "Shared context MCP server for heterogeneous AI agent coordination",
+  "description": "Durable, pull-first mailbox and work-delivery control plane for AI agents across runtimes, sessions, and machines.",
   "type": "module",
   "license": "Apache-2.0",
   "author": "Nader Helmy",
@@ -28,11 +28,14 @@
     "clients",
     "schemas",
     "openapi",
+    "docs",
     "sql/migrations",
     "sql/setup.sql",
     "llms.txt",
     "SKILL.md",
     "README.md",
+    "ROADMAP.md",
+    "SECURITY.md",
     "CHANGELOG.md",
     "LICENSE"
   ],
