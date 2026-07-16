@@ -36,6 +36,11 @@ jobs:
         env:
           RELEASE_TAG: ${{ github.event_name == 'workflow_dispatch' && inputs.tag || github.ref_name }}
         run: |
+          if [[ "${GITHUB_EVENT_NAME}" == "workflow_dispatch" ]] && \
+             [[ "${GITHUB_REF_TYPE}" != "tag" || "${GITHUB_REF_NAME}" != "${RELEASE_TAG}" ]]; then
+            echo "::error::Recovery dispatch must run at tag ${RELEASE_TAG}. Use --ref ${RELEASE_TAG}."
+            exit 1
+          fi
           package_version=$(node -p "require('./package.json').version")
           test "${RELEASE_TAG}" = "v${package_version}"
       - name: Check release commit is on main
