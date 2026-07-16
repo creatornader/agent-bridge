@@ -6,6 +6,11 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and 
 
 ## [Unreleased]
 
+### Added
+
+- Add `agent-bridge --version` and `agent-bridge -V` commands that print the
+  installed package version without loading backend configuration.
+
 ### Changed
 
 - Clarify the boundary between agent harnesses, host applications, host adapters, and

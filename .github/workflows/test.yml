@@ -105,6 +105,8 @@ jobs:
           npm install ../creatornader-agent-bridge-*.tgz
           mkdir -m 700 smoke-home
           env -i HOME="$PWD/smoke-home" PATH="$PATH" TMPDIR="$RUNNER_TEMP" node --input-type=module -e "import { BridgeService, SQLiteBridgeStore } from '@creatornader/agent-bridge'; import { decodePortableArchive } from '@creatornader/agent-bridge/archive'; import { verifyNativeDrBundle } from '@creatornader/agent-bridge/dr'; if (typeof BridgeService !== 'function' || typeof SQLiteBridgeStore !== 'function' || typeof decodePortableArchive !== 'function' || typeof verifyNativeDrBundle !== 'function') process.exit(1)"
+          package_version="$(node -p "require('./node_modules/@creatornader/agent-bridge/package.json').version")"
+          test "$(env -i HOME="$PWD/smoke-home" PATH="$PATH" TMPDIR="$RUNNER_TEMP" ./node_modules/.bin/agent-bridge --version)" = "$package_version"
           env -i HOME="$PWD/smoke-home" PATH="$PATH" TMPDIR="$RUNNER_TEMP" ./node_modules/.bin/agent-bridge demo
           env -i HOME="$PWD/smoke-home" PATH="$PATH" TMPDIR="$RUNNER_TEMP" ./node_modules/.bin/agent-bridge owner help
           env -i HOME="$PWD/smoke-home" PATH="$PATH" TMPDIR="$RUNNER_TEMP" AGENT_BRIDGE_PROVIDER=local AGENT_BRIDGE_DB="$PWD/archive-source.sqlite3" ./node_modules/.bin/agent-bridge send --source pack-smoke portable

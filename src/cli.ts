@@ -149,7 +149,12 @@ function watchCursorPath(path: string, project: string | undefined): string {
   const scope = createHash("sha256").update(project).digest("hex").slice(0, 16);
   return `${path}.project-${scope}`;
 }
-function help(): void { process.stdout.write(`agent-bridge: provider-neutral agent messaging\n\nCommands:\n  init, doctor, status, capabilities, pending, migrate, reconcile-legacy-projects, sync, demo, join, presence\n  send (post), inbox (get), sent, history, acknowledge, claim, extend, ack, nack, watch\n  deliveries, dead-letters, delivery-events, cancel, requeue\n  owner <provision|inventory|rotate|revoke>\n  archive <export|verify|import>\n  dr <backup|verify|restore>\n  clients install <codex|claude-code|claude-desktop> --identity <name>\n`); }
+function packageVersion(): string {
+  const manifest = JSON.parse(readFileSync(fileURLToPath(new URL("../package.json", import.meta.url)), "utf8")) as { version?: unknown };
+  if (typeof manifest.version !== "string" || !manifest.version) throw new Error("package version is unavailable");
+  return manifest.version;
+}
+function help(): void { process.stdout.write(`agent-bridge: provider-neutral agent messaging\n\nCommands:\n  init, doctor, status, capabilities, pending, migrate, reconcile-legacy-projects, sync, demo, join, presence\n  send (post), inbox (get), sent, history, acknowledge, claim, extend, ack, nack, watch\n  deliveries, dead-letters, delivery-events, cancel, requeue\n  owner <provision|inventory|rotate|revoke>\n  archive <export|verify|import>\n  dr <backup|verify|restore>\n  clients install <codex|claude-code|claude-desktop> --identity <name>\n\nOptions:\n  -V, --version  Print the installed package version\n  -h, --help     Show this help\n`); }
 function rejectUnknownOptions(options: Options): void {
   const unknown = Object.keys(options).filter((key) => !SUPPORTED_OPTIONS.has(key));
   if (unknown.length) throw new Error(`unknown option: --${unknown[0]}`);
@@ -325,6 +330,7 @@ export async function runCli(argv = process.argv.slice(2)): Promise<void> {
     return;
   }
   const { command: raw, options, positionals } = parse(argv); const command = ({ post: "send", get: "inbox", receipt: "acknowledge" } as Record<string, string>)[raw] ?? raw;
+  if (["-V", "--version"].includes(command)) { process.stdout.write(`${packageVersion()}\n`); return; }
   if (["help", "-h", "--help"].includes(command)) { help(); return; }
   rejectUnknownOptions(options);
   if (command === "owner") {

@@ -630,6 +630,7 @@ Normal inbox and pending reads fall back to the local cache when the gateway is 
 ## CLI
 
 ```bash
+agent-bridge --version
 agent-bridge init --provider local
 agent-bridge doctor
 agent-bridge status
