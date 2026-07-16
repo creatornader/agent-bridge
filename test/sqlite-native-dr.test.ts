@@ -216,7 +216,7 @@ describe("local SQLite native DR", () => {
     });
   }, nativeTestTimeout);
 
-  it("terminates a real timed-out backup worker before cleaning its destination", async () => {
+  it.skipIf(process.platform === "win32")("terminates a real timed-out backup worker before cleaning its destination", async () => {
     const directory = root(); const source = join(directory, "large.sqlite3"); const output = join(directory, "timeout.abdr");
     const store = await local(source); await store.close();
     const { DatabaseSync } = require("node:sqlite") as typeof import("node:sqlite"); const raw = new DatabaseSync(source);
