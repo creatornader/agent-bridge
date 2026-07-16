@@ -20,11 +20,13 @@ Provider-neutral MCP server, CLI, and HTTPS gateway for messaging between AI age
 - `src/sqlite-native-dr.ts`: Local-authority SQLite backup and restore
 - `src/postgres-native-dr.ts`: PostgreSQL backup, role inventory, and restore
 - `bin/agent-bridge`: Cross-platform Node CLI launcher
+- `clients/*.json`: v1 host-adapter manifests and installation contracts
 - `sql/migrations/`: Ordered gateway schema migrations
 - `sql/setup.sql`: Legacy Supabase v1 schema
 - `docs/postmortems/2026-07-08-wrapper-source-drift.md`: Incident note for wrapper/source drift
 - `docs/decisions/0001-protocol-layers-and-acknowledgment-semantics.md`: Protocol boundary and acknowledgment semantics
 - `docs/decisions/0002-canonical-operation-contract-registry.md`: Canonical v2 contracts and version negotiation
+- `docs/decisions/0003-host-adapters-and-consumer-instance-keys.md`: Host integration layers and consumer instance-key semantics
 - `docs/architecture-v2.md`: Accepted v2 protocol, storage, security, delivery, and migration design
 - `docs/ecosystem.md`: Public product boundary and interoperability position
 - `docs/troubleshooting.md`: Public MCP and client recovery guide
@@ -69,7 +71,7 @@ Sync triggers:
 ### Architecture decisions
 
 - Agent Bridge is the durable, pull-first mailbox and work-delivery control plane. A2A and application task semantics sit above it.
-- MCP, CLI, and HTTPS are access surfaces. Optional transports may sit below the core but cannot replace authoritative cursor replay.
+- MCP, CLI, HTTPS, and the Node library are access surfaces. Harnesses, host applications, host adapters, and access surfaces are separate layers. Optional transports may sit below the core but cannot replace authoritative cursor replay.
 - Read receipts, delivery claims, lease extensions, delivery settlement, and external task completion are separate semantics.
 - agmsg is a reference for adapters, interoperability, and client experience, not the protocol authority.
 - PostgreSQL is the canonical shared store. Supabase is an optional PostgreSQL host and a named legacy adapter.
@@ -89,7 +91,9 @@ Sync triggers:
 - Exact idempotent replay deduplicates. Changed content under an existing idempotency key fails.
 - Direct fetch remains in the legacy adapter. The normal remote path uses the authenticated gateway.
 - Local and edge SQLite files use WAL, bounded busy waits, and owner-only modes where supported.
-- Runtime manifests and installers inject identity per client. They do not write one identity into shared config.
+- Host-adapter manifests and installers inject identity per installed client. The v1 manifest field named `runtime` is a compatibility key for the installation target. It does not mean a live process. Installers do not write one identity into shared config.
+- The `codex` adapter configures the profile shared by the Codex CLI and the Codex surface in the ChatGPT desktop app. Claude Code and Claude Desktop use separate adapters and registrations.
+- `AGENT_BRIDGE_INSTANCE` is an optional caller-supplied stable consumer key. Supported installers generate and persist it; direct clients may manage it themselves. The gateway does not bind it to an installer registration. Unless `AGENT_BRIDGE_CURSOR` is explicit, the key selects cursor storage. It also selects leases and instance presence. Without a key or explicit cursor path, cursor storage uses `default`. Lease ownership falls back to the principal, and presence is unavailable. It is not a PID or session. Per-process presence must be additive.
 - URL-encoded braces in PostgREST array contains filter (`%7B`/`%7D` instead of `{`/`}`): curl strips unencoded braces
 - Permissive RLS belongs only to the legacy schema. The private v2 schema denies Supabase Data API roles.
 - `ack_context` uses a Postgres RPC function (`security definer`, `set search_path`) for atomic `array_append`: avoids race conditions and reduces network calls from 2 to 1
@@ -109,6 +113,7 @@ Sync triggers:
 - Native DR preserves one complete local SQLite authority or PostgreSQL authority in a private framed bundle. It does not translate between providers, and it rejects gateway edge SQLite files. PostgreSQL backups combine a schema-only custom dump with canonical role, membership, and default-ACL state. Restore requires the same database name and major, a dedicated fresh target, superuser authority, exact-major tools, and explicit acceptance of source SQL risk. Claimed deliveries become retryable work. Partial restore failure disables target connections and reports residue. PostgreSQL source and target URLs come only from `AGENT_BRIDGE_DR_SOURCE_DATABASE_URL` and `AGENT_BRIDGE_DR_TARGET_DATABASE_URL`.
 - PostgreSQL control and archive readiness ignore the implicit membership reported for unrelated superusers. The schema-owner superuser remains the expected administrator. Registered principals must still be non-superuser logins with the exact direct membership graph.
 - Client `status` is passive and reports unknown remote reachability without claiming a connection. `doctor` performs explicit checks. It exits 0, 2, or 1 for ok, degraded, or failed. Diagnostics preserve blocked edge-outbox evidence across later successful synchronization and distinguish due, scheduled, and leased work.
+- GitHub immutable releases are enabled, and GitHub reports release `v0.3.0` as immutable. The active `Protect release tags` ruleset also blocks update and deletion of `v*` tags without bypass actors. Recovery dispatches must use the release tag as the workflow ref so provenance identifies the checked-out source commit.
 
 ### Providers
 
@@ -119,7 +124,10 @@ Sync triggers:
 ### Integration points
 
 - Any MCP-compatible client: register `agent-bridge-mcp` and inject its own `AGENT_BRIDGE_AGENT`.
-- Any CLI-driven agent: invoke `agent-bridge` with process identity or an explicit send source.
+- Codex CLI and the Codex surface in the ChatGPT desktop app: use the shared Codex profile installed by the `codex` adapter.
+- Claude Code and Claude Desktop: use their separate automated host adapters.
+- OpenClaw and generic MCP hosts: use the included operator-managed manifests.
+- Scripts, CI jobs, daemons, and services: invoke the CLI, call the HTTPS API, or embed the Node library.
 - Offline archive operators: invoke `agent-bridge archive` with a canonical local database or a restricted `AGENT_BRIDGE_ARCHIVE_DATABASE_URL`.
 - Offline recovery operators: invoke `agent-bridge dr` with a local authority path or the environment-only PostgreSQL source or target authority.
 - Shared config: `~/.agent-bridge/config` for backend location and workspace, never client identity or gateway tokens.

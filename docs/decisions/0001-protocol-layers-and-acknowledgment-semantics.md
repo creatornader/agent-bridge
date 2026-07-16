@@ -30,7 +30,7 @@ Its protocol owns:
 The surrounding layers have separate responsibilities:
 
 - A2A and application protocols sit above Agent Bridge. They own task, conversation, artifact, and domain lifecycle semantics.
-- MCP, CLI, and HTTPS are client access surfaces. They expose Agent Bridge operations without defining its stored protocol.
+- MCP, CLI, HTTPS, and the Node library are access surfaces. They expose Agent Bridge operations without defining its stored protocol.
 - Optional transports such as SLIM or NATS may sit below the core as wakeup or transport adapters. They must not replace authoritative cursor replay or durable delivery state.
 - agmsg is a reference for adapters, interoperability, and client experience. Its patterns may inform clients, but it does not define Agent Bridge identity, persistence, or delivery semantics.
 
@@ -60,7 +60,7 @@ Read receipts and delivery settlement remain independent in both directions. Rec
 
 Agent Bridge can carry A2A messages without implementing the A2A task state machine. A client that needs both task completion and delivery settlement must record both operations explicitly.
 
-MCP remains replaceable by another access adapter. A transport integration must preserve cursors, idempotency, identity binding, and delivery leases.
+MCP remains replaceable by another access surface. A host or transport integration must preserve cursors, idempotency, identity binding, and delivery leases.
 
 Push notifications and future brokers can reduce wakeup latency. Pull and replay remain the recovery path.
 

@@ -54,8 +54,9 @@ client configuration, and recovery steps.
 - Idempotency conflict detection. Exact replay deduplicates; changed content under the same key fails.
 - Scoped credentials that bind a remote workspace and agent principal.
 - SQLite outbox and inbox cache for gateway clients.
-- Leased runtime presence with instance IDs and capabilities.
-- MCP, CLI, Codex, Claude Code, and Claude Desktop integration paths.
+- Leased instance-keyed presence with capabilities.
+- MCP, CLI, HTTPS, and Node library access, plus host adapters for Codex, Claude Code,
+  Claude Desktop, OpenClaw, and generic MCP clients.
 - Canonical portable archives for messages and read receipts across local SQLite and shared PostgreSQL stores.
 - Native SQLite and PostgreSQL backup, verification, and restore.
 - Existing `post_context`, `get_context`, `ack_context`, `post`, and `get` behavior during migration.
@@ -70,30 +71,75 @@ The OpenAPI paths describe protocol 2.1. The embedded `x-agent-bridge-protocol-2
 
 ## Architecture
 
-```text
- Codex       Claude Code       Claude Desktop       scripts
-   |              |                  |                 |
-   +--------------+------------------+-----------------+
-                          MCP or CLI
-                              |
-                  process-scoped agent identity
-                              |
-             +----------------+----------------+
-             |                                 |
-       local SQLite                  SQLite edge store
-                                               |
-                                     authenticated HTTPS
-                                               |
-                                      Agent Bridge gateway
-                                               |
-                                          PostgreSQL
+```mermaid
+flowchart TB
+  subgraph execution["Agent execution"]
+    harnesses["Agent harnesses<br/>product-specific or custom"]
+    callers["Non-harness callers<br/>scripts, CI jobs, and application services"]
+  end
+
+  subgraph hosts["Host surfaces"]
+    clis["Command-line hosts<br/>Codex CLI and Claude Code CLI"]
+    desktops["Desktop hosts<br/>Codex in ChatGPT and Claude Desktop"]
+    daemons["Daemons and custom MCP hosts"]
+  end
+
+  subgraph access["Integration and access"]
+    adapter["Host adapter or MCP registration"]
+    mcp["MCP over stdio: agent-bridge-mcp"]
+    cli["CLI: agent-bridge"]
+    library["Node library"]
+    direct["Direct HTTPS client"]
+  end
+
+  harnesses --> clis
+  harnesses --> desktops
+  harnesses --> daemons
+  clis --> adapter
+  desktops --> adapter
+  daemons --> adapter
+  adapter --> mcp
+  callers --> cli
+  callers --> library
+  callers --> direct
+
+  mcp --> core["Agent Bridge client core<br/>principal plus optional consumer instance key"]
+  cli --> core
+  library --> core
+
+  core --> local["Local mode<br/>SQLite authority"]
+  core --> edge["Gateway client mode<br/>SQLite edge outbox and cache"]
+  edge -->|"HTTPS protocol 2.1"| gateway["Agent Bridge gateway"]
+  direct -->|"HTTPS protocol 2.1"| gateway
+  gateway --> postgres["PostgreSQL authority"]
 ```
+
+The diagram shows concepts, not exclusive product categories. A product may package a
+harness and a host together. A harness is the agent execution environment. A host is
+the CLI, desktop app, or daemon where it runs. A host adapter registers an access
+surface. Scripts are orthogonal callers: they can invoke the CLI, call HTTPS, or embed
+the Node library without becoming agent harnesses.
+
+| Adapter or integration | Host coverage | Access | Installation status |
+| --- | --- | --- | --- |
+| `codex` | Codex CLI and Codex in the ChatGPT desktop app through their shared profile | MCP stdio | Automated |
+| `claude-code` | Claude Code terminal harness | MCP stdio | Automated |
+| `claude-desktop` | Claude Desktop application | MCP stdio | Automated |
+| `openclaw` | OpenClaw host or daemon | MCP stdio | Manifest included; operator-managed |
+| `generic-mcp` | Any compatible stdio MCP host | MCP stdio | Manifest included; operator-managed |
+| Scripts and services | Shell jobs, CI, daemons, and application code | CLI, HTTPS, or Node library | Direct integration |
+| Hermes, Pi, and other harnesses | Depends on the host's supported interface | No interface assumed | No dedicated adapter or conformance claim yet |
+
+`agent-bridge-mcp` is a stdio server. The gateway exposes the Agent Bridge HTTPS API;
+it is not MCP over HTTP. A direct HTTPS client can bypass MCP, the CLI, and the local
+edge store, but then owns its own retry and offline behavior.
 
 Realtime notifications or hooks may wake a client, but cursored reads remain authoritative. A missed notification does not lose a message.
 
-A2A and application task semantics sit above Agent Bridge. MCP, CLI, and HTTPS are access surfaces. Optional transports such as SLIM or NATS may provide wakeups or transport below the core, but authoritative recovery still uses cursored pull. agmsg remains a reference for adapters, interoperability, and client experience.
+A2A and application task semantics sit above Agent Bridge. MCP, CLI, HTTPS, and the Node library are access surfaces. Optional transports such as SLIM or NATS may provide wakeups or transport below the core, but authoritative recovery still uses cursored pull. agmsg remains a reference for adapters, interoperability, and client experience.
 
 [ADR-0001](docs/decisions/0001-protocol-layers-and-acknowledgment-semantics.md) defines this boundary and the distinct acknowledgment meanings.
+[ADR-0003](docs/decisions/0003-host-adapters-and-consumer-instance-keys.md) defines the host layers and consumer instance-key contract.
 
 Agent Bridge is not a workflow engine, scheduler, memory system, terminal manager, or
 new universal agent protocol. See [Agent Bridge in the agent ecosystem](docs/ecosystem.md)
@@ -308,9 +354,10 @@ directory durability proof. Successful Windows commands report
 library API is available from
 `@creatornader/agent-bridge/dr`.
 
-## Install client integrations
+## Install host adapters
 
-Agent identity and gateway credentials belong to each client process, not the shared `~/.agent-bridge/config` file.
+Agent identity and gateway credentials belong to each installed client, not the shared
+`~/.agent-bridge/config` file.
 
 ```bash
 agent-bridge clients install codex --identity codex
@@ -330,11 +377,19 @@ AGENT_BRIDGE_CLIENT_TOKEN=<claude-desktop token> \
   agent-bridge clients install claude-desktop --identity claude-desktop
 ```
 
-`--token` accepts the same value, but the environment form avoids putting a credential in shell history. Each install writes an owner-only backend file under `~/.agent-bridge/clients/`. The host MCP registration receives that file path, the client identity, and a generated instance ID. Tokens are not copied into the shared config, and one client cannot reuse a token bound to another principal.
+`--token` accepts the same value, but the environment form avoids putting a credential in shell history. Each install writes an owner-only backend file under `~/.agent-bridge/clients/`. The host MCP registration receives that file path, the client identity, and a generated stable instance key. Tokens are not copied into the shared config, and one client cannot reuse a token bound to another principal.
 
-Codex and Claude Code installation uses their native MCP commands. Claude Desktop installation merges the `agent-bridge` server into its JSON config with an atomic write. Restart the client after installation.
+The `codex` adapter uses the Codex profile shared by the Codex CLI and the Codex
+surface in the ChatGPT desktop app; it does not install two independent registrations.
+Claude Code installation uses its native MCP command. Claude Desktop installation
+merges the `agent-bridge` server into its JSON config with an atomic write. Restart the
+client after installation.
 
-The runtime contracts are under [`clients/`](clients/). OpenClaw and generic MCP manifests declare the required environment variable and command but leave config mutation to the operator because their host config shapes vary.
+The v1 host-adapter manifests are under [`clients/`](clients/). Their compatibility
+field is named `runtime`, but its value identifies the installation target, not a
+unique process. OpenClaw and generic MCP manifests declare the required environment
+variables and command but leave config mutation to the operator because their host
+config shapes vary.
 
 [`SKILL.md`](SKILL.md) provides concise runtime-neutral operating instructions for agents. [`llms.txt`](llms.txt) gives tools and model crawlers a compact map of the package, modes, commands, and identity rules.
 
@@ -647,6 +702,22 @@ The acknowledgment names depend on the interface. MCP `ack_context` and CLI `ack
 ## Identity and security
 
 - `~/.agent-bridge/config` contains backend settings only. A stored `AGENT_BRIDGE_AGENT` value is ignored.
+- Workspace is the tenant boundary. Principal is the durable agent identity and message source.
+- `AGENT_BRIDGE_INSTANCE` is an optional caller-supplied stable consumer key. Supported
+  installers generate and persist one for each installed client. Direct clients should
+  do the same when they need separate consumer state or presence.
+- Unless `AGENT_BRIDGE_CURSOR` sets an explicit path, a present instance key selects
+  the cursor path. The key also selects the delivery lease owner and presence row.
+  Processes that share a key also share those resources. The gateway does not bind the
+  key to an installer registration. It is not a PID, unique live process, or
+  conversation ID.
+- When the key and explicit cursor path are both omitted, cursor storage uses
+  `default`. Delivery leases fall back to the principal, and presence operations reject
+  the request because presence requires an instance key.
+- Presence is instance-keyed in the released protocol. Per-process presence requires
+  an additive identity instead of a silent change to lease ownership or cursor paths.
+- Session and thread identifiers are message and application context. They do not
+  select credentials, workspace, principal, or delivery ownership.
 - Local clients bind identity through their process environment or an explicit CLI send argument.
 - Gateway tokens bind workspace and principal. The API ignores caller-supplied source and workspace fields.
 - Gateway clients use separate owner-only backend files and principal-bound tokens.
@@ -654,7 +725,8 @@ The acknowledgment names depend on the interface. MCP `ack_context` and CLI `ack
 - Remote HTTP must use TLS. Plain HTTP is accepted only on loopback.
 - Local config, database, WAL, and shared-memory files use owner-only permissions where the platform supports POSIX modes.
 - The private `agent_bridge` schema is denied to Supabase `anon` and `authenticated` Data API roles.
-- Expired presence rows are pruned during heartbeat and listing. Each agent is capped at 128 active instances, and each workspace is capped at 4,096.
+- Expired instance-presence rows are pruned during heartbeat and listing. Each agent
+  is capped at 128 active instance keys, and each workspace is capped at 4,096.
 - Errors expose stable codes without database URLs, tokens, or provider response bodies.
 - Delivery work is at least once, not exactly once. Consumers must make external side effects idempotent.
 
@@ -681,7 +753,7 @@ The original v1 schema remains in [`sql/setup.sql`](sql/setup.sql). Ordered gate
 `status` is a passive snapshot. It does not synchronize or probe a remote provider. An unprobed remote reports `status: "unknown"`, `connected: false`, and `remoteReachable: null`. Passive status still exits 0. `doctor` evaluates named checks and exits 0 for `ok`, 2 for `degraded`, and 1 for `failed`. Both return JSON with:
 
 - Provider and actual schema version.
-- Bound workspace, agent, and instance.
+- Bound workspace, agent, and consumer instance key.
 - Endpoint or database path.
 - Cursor and queue state.
 - Pending, claimed, retrying, and dead delivery counts, plus due versus scheduled work, expired leases, oldest-due time, and bounded queue lag.
@@ -759,11 +831,12 @@ durability behavior has not yet been proved on a dedicated Windows host.
 ## Documentation
 
 - [ROADMAP.md](ROADMAP.md): released work, unreleased implementation, and the remaining program.
-- [SECURITY.md](SECURITY.md): supported versions, private vulnerability reporting, and security boundaries.
+- [SECURITY.md](SECURITY.md): supported versions, release integrity, private vulnerability reporting, and security boundaries.
 - [docs/ecosystem.md](docs/ecosystem.md): product boundary, adjacent systems, and interoperability direction.
 - [docs/troubleshooting.md](docs/troubleshooting.md): MCP startup, identity, backend, and client recovery.
 - [ADR-0001](docs/decisions/0001-protocol-layers-and-acknowledgment-semantics.md): protocol layers and acknowledgment semantics.
 - [ADR-0002](docs/decisions/0002-canonical-operation-contract-registry.md): canonical contracts, generated artifacts, discovery, and version negotiation.
+- [ADR-0003](docs/decisions/0003-host-adapters-and-consumer-instance-keys.md): host layers and consumer instance-key semantics.
 - [docs/architecture-v2.md](docs/architecture-v2.md): protocol and storage decisions.
 - [SKILL.md](SKILL.md): runtime-neutral agent operating instructions.
 - [llms.txt](llms.txt): compact machine-readable project map.
