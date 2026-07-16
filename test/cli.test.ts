@@ -46,6 +46,24 @@ function runAtAsync(home: string, args: string[], extra: NodeJS.ProcessEnv = {})
 afterEach(() => { for (const home of homes.splice(0)) rmSync(home, { recursive: true, force: true }); });
 
 describe("agent-bridge CLI", () => {
+  it("prints the package version with --version", () => {
+    const packageVersion = JSON.parse(readFileSync(join(root, "package.json"), "utf8")).version;
+    const result = run(["--version"]);
+
+    expect(result.status).toBe(0);
+    expect(result.stdout).toBe(`${packageVersion}\n`);
+    expect(result.stderr).toBe("");
+  });
+
+  it("prints the package version with -V", () => {
+    const packageVersion = JSON.parse(readFileSync(join(root, "package.json"), "utf8")).version;
+    const result = run(["-V"]);
+
+    expect(result.status).toBe(0);
+    expect(result.stdout).toBe(`${packageVersion}\n`);
+    expect(result.stderr).toBe("");
+  });
+
   it("exports, verifies, dry-runs, and applies a local portable archive", () => {
     const home = mkdtempSync(join(tmpdir(), "agent-bridge-cli-")); homes.push(home);
     const source = join(home, "source.sqlite3");
