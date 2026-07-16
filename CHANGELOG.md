@@ -6,6 +6,8 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and 
 
 ## [Unreleased]
 
+## [0.3.1] - 2026-07-15
+
 ### Added
 
 - Add `agent-bridge --version` and `agent-bridge -V` commands that print the
@@ -134,6 +136,7 @@ First tagged release. Marks the point where agent-bridge has shipped its initial
 - Narrative-leak detection in CI + on commit via `creatornader/textleaks@v0.2.0` (renamed from leakguard).
 
 [0.1.0]: https://github.com/creatornader/agent-bridge/releases/tag/v0.1.0
-[Unreleased]: https://github.com/creatornader/agent-bridge/compare/v0.3.0...HEAD
+[Unreleased]: https://github.com/creatornader/agent-bridge/compare/v0.3.1...HEAD
+[0.3.1]: https://github.com/creatornader/agent-bridge/compare/v0.3.0...v0.3.1
 [0.3.0]: https://github.com/creatornader/agent-bridge/compare/v0.2.0...v0.3.0
 [0.2.0]: https://github.com/creatornader/agent-bridge/compare/v0.1.0...v0.2.0
