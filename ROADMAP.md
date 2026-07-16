@@ -9,17 +9,17 @@ published and the supported clients pass a fresh end-to-end check.
 
 ## Status
 
-### Released in 0.2.0
+### Released by 0.3.0
 
 - Local SQLite and shared PostgreSQL storage behind provider-neutral interfaces.
 - An authenticated HTTPS gateway and a named legacy Supabase adapter.
 - Immutable messages, caller receipts, delivery leases, retries, dead letters, and
   presence.
 - Durable SQLite edge outbox and inbox cache for gateway clients.
-- CLI, MCP, Codex, Claude Code, and Claude Desktop integration paths.
-
-### Implemented for the next release
-
+- CLI, MCP, HTTPS, and Node library access surfaces.
+- Automated host adapters for Codex, Claude Code, and Claude Desktop. The Codex
+  adapter configures the profile shared by the Codex CLI and the Codex surface in the
+  ChatGPT desktop app.
 - Caller-bound inbox, sent, and combined history with scope-bound cursors.
 - Publisher-owned delivery policy, priority claims, cancel, requeue, and delivery event
   inspection.
@@ -34,13 +34,14 @@ published and the supported clients pass a fresh end-to-end check.
 - Portable workspace archives across canonical SQLite and PostgreSQL stores.
 - Native SQLite and PostgreSQL backup, verification, and restore.
 
-### Required before the next release is complete
+### Post-release validation and adoption
 
-- Merge the development branch through the protected-main checks.
-- Publish the package through the configured npm OIDC workflow.
-- Prove Codex, Claude Code, and Claude Desktop startup, send, receive, receipt, claim,
-  settlement, offline replay, and restart behavior against the released package.
-- Move the project's own normal traffic to v2 while retaining a tested v1 rollback path.
+- Move the project's own normal traffic to the authenticated gateway while retaining a
+  tested legacy rollback path.
+- Prove cross-machine claim, settlement, offline replay, and restart behavior against
+  the published package and a deployed v2 gateway. The 0.3.0 live release check covered
+  startup, private mailbox sends, caller-scoped history, receipts, and client restart
+  through the legacy compatibility backend; it could not prove gateway-only behavior.
 - Replace remaining direct legacy table pollers with the v2 cursor protocol.
 - Confirm the README, npm metadata, GitHub metadata, release notes, and package contents
   match the released artifact.
@@ -64,6 +65,11 @@ published and the supported clients pass a fresh end-to-end check.
 
 ### Presence and wakeups
 
+- Separate the stable consumer instance key from a live process identity. Supported
+  installers generate one key per installed client, while direct clients may supply
+  their own. Processes that share a key also share presence in 0.3.
+- Add per-process presence and session correlation only through an additive protocol
+  change with migration and conformance coverage.
 - Maintain heartbeat and expiry automatically for supported long-lived clients.
 - Add wake adapters only where they reduce latency. Lost wakeups must never lose data.
 - Keep cursored pull as the authoritative recovery path.
@@ -83,7 +89,11 @@ published and the supported clients pass a fresh end-to-end check.
 - Carry A2A envelopes without implementing a competing task state machine.
 - Publish conformance fixtures and an adapter template.
 - Add client libraries where real integrations need them.
-- Expand runtime installers after each host has a stable configuration contract.
+- Rename the compatibility `runtime` manifest key to an explicit host-adapter key in a
+  versioned manifest contract.
+- Expand host installers after each product has a stable configuration contract.
+  Hermes, Pi, and similar harnesses can use a generic access surface when their host
+  supports one, but they do not have a dedicated adapter or conformance claim.
 
 See [docs/ecosystem.md](docs/ecosystem.md) for the product boundary.
 

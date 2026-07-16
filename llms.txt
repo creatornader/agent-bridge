@@ -16,6 +16,11 @@ If an MCP client cannot attach, run `agent-bridge doctor --json` and see
 `docs/troubleshooting.md`. Normal client installation resolves the MCP launch command;
 do not copy another runtime's identity or backend file.
 
+The `codex` host adapter configures the profile shared by the Codex CLI and the Codex
+surface in the ChatGPT desktop app. Claude Code and Claude Desktop use separate
+adapters. OpenClaw and generic MCP manifests are operator-managed. Scripts and
+services can call the CLI or HTTPS API or embed the Node library without a host adapter.
+
 ## Modes
 
 - local: SQLite WAL, no account or daemon
@@ -84,7 +89,9 @@ Gateway MCP clients sync automatically and expose manual sync for bounded outbox
 ## Protocol boundary
 
 A2A and application task semantics sit above Agent Bridge.
-MCP, CLI, and HTTPS are client access surfaces.
+MCP, CLI, HTTPS, and the Node library are access surfaces.
+Harnesses, host applications, host adapters, and access surfaces are separate layers.
+The MCP server uses stdio. The gateway HTTPS API is not MCP over HTTP.
 Optional transports such as SLIM or NATS may sit below the core.
 agmsg is a reference for adapters, interoperability, and client experience.
 HTTP protocol 2.1 is current. Upgraded gateways continue to serve released headerless and explicit 2.0 clients. New 2.1 clients probe before mutation and proceed only after complete, consistent negotiation selects and advertises 2.1. They reject headerless or selected 2.0 gateways instead of downgrading. Upgrade the gateway before 2.1 clients. Capabilities distinguish current, selected, and supported versions.
@@ -100,7 +107,7 @@ Lease extension does not report progress or external task completion.
 
 ## Identity rule
 
-The active runtime supplies AGENT_BRIDGE_AGENT and AGENT_BRIDGE_INSTANCE. Do not hardcode another client name and do not store agent identity in the shared backend config. Gateway installations use a separate principal-bound token and owner-only backend file for each client.
+The active client supplies AGENT_BRIDGE_AGENT and may supply a stable AGENT_BRIDGE_INSTANCE consumer key. Do not hardcode another client name and do not store agent identity in the shared backend config. Gateway installations use a separate principal-bound token and owner-only backend file for each client. Supported installers generate and persist the instance key; direct clients may do so when they need separate consumer state or presence. The gateway does not bind it to an installer registration. It is not a PID, unique live process, session, or thread. Unless AGENT_BRIDGE_CURSOR is explicit, processes that share one key also share its cursor path. They also share delivery lease ownership and instance-keyed presence. Without a key or explicit cursor path, cursor storage uses `default`. Leases use the principal, and presence is unavailable.
 
 Owner commands are offline and use only AGENT_BRIDGE_OPERATOR_DATABASE_URL. They are
 not MCP, HTTP, or public gateway operations. Provision and rotation write private
@@ -126,6 +133,7 @@ Local CLI calls may override workspace for one invocation. The legacy Supabase s
 - docs/troubleshooting.md: MCP startup and client recovery
 - docs/decisions/0001-protocol-layers-and-acknowledgment-semantics.md: protocol layers and acknowledgment semantics
 - docs/decisions/0002-canonical-operation-contract-registry.md: generated contracts and version negotiation
+- docs/decisions/0003-host-adapters-and-consumer-instance-keys.md: host layers and instance-key semantics
 - docs/architecture-v2.md: protocol, storage, identity, delivery, and acceptance decisions
-- clients/*.json: runtime adapter manifests
+- clients/*.json: v1 host-adapter manifests; `runtime` is the compatibility key for the installation target
 - SKILL.md: concise agent operating instructions

@@ -1,6 +1,6 @@
 # Agent Bridge v2 architecture
 
-Status: living architecture for the 0.3.0 development line. Version 0.2.0 was released on July 14, 2026.
+Status: living architecture. Version 0.3.0 was released on July 15, 2026.
 
 ## Product boundary
 
@@ -13,11 +13,13 @@ These authorization guarantees apply to local v2 and the authenticated gateway. 
 - Local mode runs without an account or network connection.
 - Shared mode uses a remote service so agents on different machines see the same history and delivery state.
 
-The protocol must support informational context and executable work without treating them as the same thing. A2A and application task semantics sit above Agent Bridge. MCP, CLI, and HTTPS are access surfaces. Optional transports may sit below the core, but they cannot replace authoritative cursor replay or durable delivery state.
+The protocol must support informational context and executable work without treating them as the same thing. A2A and application task semantics sit above Agent Bridge. MCP, CLI, HTTPS, and the Node library are access surfaces. Agent harnesses and host applications use those surfaces through host adapters or direct integration. Optional transports may sit below the core, but they cannot replace authoritative cursor replay or durable delivery state.
 
 [ADR-0001](decisions/0001-protocol-layers-and-acknowledgment-semantics.md) defines these layers and the distinct meanings of receipts, claims, leases, delivery settlement, and external task completion.
 
 [ADR-0002](decisions/0002-canonical-operation-contract-registry.md) defines the canonical cross-surface operation contract, deterministic artifacts, capability discovery, and protocol negotiation.
+
+[ADR-0003](decisions/0003-host-adapters-and-consumer-instance-keys.md) separates harnesses, hosts, adapters, and access surfaces and defines the consumer instance-key contract.
 
 ## Decisions
 
@@ -179,7 +181,7 @@ Migration 010 uses `nack_retry` as a conservative compatibility mapping for a le
 
 A receipt does not change delivery state. A claim or settlement does not create a receipt. Lease renewal proves only that the current owner retained its claim. External task completion belongs to A2A or the application layer and must be recorded separately when a workflow needs both task state and delivery settlement.
 
-Each delivery transition also appends an audit event. Runtime presence uses a separate leased record keyed by workspace, agent, and instance. Presence can carry a runtime type and declared capabilities without using a PID as ownership proof. Expired rows are pruned during normal presence operations. Each agent is limited to 128 active instances, and each workspace is limited to 4,096.
+Each delivery transition also appends an audit event. Instance presence uses a separate leased record keyed by workspace, principal, and caller-supplied instance key. Presence requires that key and can carry a host or harness type and declared capabilities. Supported installers generate and persist a stable key for each installed client. Direct clients that use presence must provide a stable key for each intended consumer. Processes that share a key also share its presence row. The gateway does not bind the key to an installer registration, and the row does not identify a unique live process or PID. Expired rows are pruned during normal presence operations. Each principal is limited to 128 active instance keys, and each workspace is limited to 4,096.
 
 The system promises at-least-once delivery. It does not promise exactly-once execution. Idempotency keys prevent duplicate insertion, and consumers must make side effects idempotent.
 
@@ -217,13 +219,25 @@ The identity model separates:
 - Workspace.
 - Agent principal.
 - Human-readable name.
-- Runtime type.
-- Client instance.
-- Session or thread.
+- Host adapter and harness type.
+- Consumer instance key.
+- Live process identity, which the released protocol does not represent separately.
+- Session or thread context.
 - Optional role.
 - Authentication subject and credential.
 
 Remote credentials bind the workspace and principal. Each installed client gets a separate owner-only backend file containing only its bound token and backend settings. The shared config does not hold a gateway token. A client cannot claim another source label. Local mode binds identity through its process configuration. `AGENT_BRIDGE_AGENT` remains the compatibility field for MCP and CLI clients.
+
+`AGENT_BRIDGE_INSTANCE` is an optional caller-supplied stable consumer key. Unless
+`AGENT_BRIDGE_CURSOR` sets an explicit path, the instance key selects cursor storage.
+The key also selects delivery lease ownership and instance presence. Supported
+installers generate and persist it; direct clients may manage it themselves. When the
+key and explicit cursor path are both omitted, cursor storage uses the `default` path
+component. Delivery lease ownership falls back to the principal, and presence is
+unavailable. The gateway does not treat the key as registered authority. It is not a
+PID, conversation, or session identifier. A future per-process presence feature must
+add a separate identity instead of changing the meaning of `instance` and invalidating
+existing cursor or lease ownership.
 
 ### The core is provider-neutral
 
@@ -234,7 +248,7 @@ Protocol logic depends on a `BridgeStore` interface, not a provider SDK. The ini
 - Supabase legacy REST for v1 compatibility during migration.
 - Agent Bridge HTTP API for normal remote clients.
 
-Runtime and wakeup adapters are independent from storage. A client manifest declares identity injection, supported wake modes, config locations, health checks, and install actions for Codex, Claude Code, Claude Desktop, OpenClaw, or a generic MCP client.
+Host and wakeup adapters are independent from storage. A client manifest declares identity injection, supported wake modes, config locations, health checks, and install actions for Codex, Claude Code, Claude Desktop, OpenClaw, or a generic MCP client. The v1 manifest key named `runtime` identifies an installation target for compatibility. It does not identify a unique running process. The `codex` adapter configures the profile shared by the Codex CLI and the Codex surface in the ChatGPT desktop app. Scripts, CI jobs, daemons, and application services may instead call the CLI or HTTPS API or embed the Node library without pretending to be a harness adapter.
 
 ### v1 compatibility is additive
 
@@ -331,6 +345,11 @@ tarball install runs archive and CLI smoke checks in CI. Releases use one versio
 source, a tag-to-version check, and npm provenance. The npm environment does not
 currently require a human reviewer, so the release process must not claim a manual
 approval gate.
+
+GitHub immutable releases are enabled, and GitHub reports release `v0.3.0` as
+immutable. A tag ruleset also blocks update and deletion of `v*` tags with no bypass
+actor. Future recovery dispatches must run the workflow at the release tag ref so the
+provenance workflow identity and checked-out source commit do not diverge.
 
 ## Acceptance checks
 

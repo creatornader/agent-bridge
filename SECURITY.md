@@ -4,12 +4,29 @@
 
 | Version | Security updates |
 | --- | --- |
-| 0.2.x | Supported until its successor is released |
+| 0.3.x | Supported |
+| 0.2.x | Not supported |
 | 0.1.x | Not supported |
 | Unreleased development code | No public support guarantee |
 
 Upgrade to the latest published package before reporting a defect that may already be
 fixed. The npm package and GitHub release page are the public version authorities.
+
+## Release integrity
+
+GitHub immutable releases are enabled, and GitHub reports release `v0.3.0` as
+immutable. A repository ruleset also blocks updates and deletion for every `v*` tag
+without a bypass actor. The `v0.3.0` tag is unsigned.
+
+npm publication uses a protected GitHub environment, an OIDC trusted-publisher
+binding, and provenance for the package artifact. Verify the package digest and
+attestation before treating provenance as source identity. The `v0.3.0`
+[recovery run](https://github.com/creatornader/agent-bridge/actions/runs/29461308262)
+checked out package commit `95eb861`, while its attestation names recovery commit
+`c23d9df` as the workflow identity. GitHub Actions logs expire, so the
+[release notes](https://github.com/creatornader/agent-bridge/releases/tag/v0.3.0)
+also record this boundary. Future recovery dispatches must run at the release tag, and
+the workflow enforces that match before packaging.
 
 ## Report a vulnerability
 

@@ -6,8 +6,18 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and 
 
 ## [Unreleased]
 
-The changes in this section are implemented on the 0.3.0 development line. They are
-not released until the matching tag, GitHub release, and npm package exist.
+### Changed
+
+- Clarify the boundary between agent harnesses, host applications, host adapters, and
+  MCP, CLI, HTTPS, and Node library access. Define `AGENT_BRIDGE_INSTANCE` as the
+  stable consumer key used for cursor paths, leases, and presence. Supported installers
+  generate this key, while direct clients may supply it. Document the released
+  no-instance fallbacks and the fact that the key is not a unique live process or
+  session.
+- Require manual release recovery to run the workflow at the tag it publishes so npm
+  provenance identifies the checked-out release source.
+
+## [0.3.0] - 2026-07-15
 
 ### Control, portability, and recovery
 
@@ -77,7 +87,7 @@ not released until the matching tag, GitHub release, and npm package exist.
 - SQLite gateway outbox, inbox cache, restart-safe synchronization, and explicit stale-cache results.
 - Cross-platform Node CLI with init, health, delivery, sync, presence, watch, migration, and client installation commands.
 - Cheap `pending` process gate for unread context or due delivery work.
-- Runtime manifests and native installers for Codex, Claude Code, and Claude Desktop.
+- Host-adapter manifests and native installers for Codex, Claude Code, and Claude Desktop.
 - Runtime-neutral `SKILL.md` guidance and an `llms.txt` package map.
 - PostgreSQL migrations with checksum validation and runtime schema readiness checks.
 - Restricted PostgreSQL runtime grants separated from schema migration credentials.
@@ -86,7 +96,8 @@ not released until the matching tag, GitHub release, and npm package exist.
 ### Changed
 
 - Package identity is `@creatornader/agent-bridge` at version `0.2.0`. The first npm publication was performed manually. OIDC trusted publishing was configured afterward for later releases.
-- Agent identity is process-scoped. Shared config no longer supplies `AGENT_BRIDGE_AGENT`.
+- Agent principal is injected through the client process. Shared config no longer
+  supplies `AGENT_BRIDGE_AGENT`.
 - Exact idempotent replays deduplicate. Reusing a key for changed content returns a conflict.
 - Gateway clients authenticate through separate principal-bound credentials stored in owner-only client backend files.
 - Package-root imports expose the provider-neutral API without starting the MCP server.
@@ -118,5 +129,6 @@ First tagged release. Marks the point where agent-bridge has shipped its initial
 - Narrative-leak detection in CI + on commit via `creatornader/textleaks@v0.2.0` (renamed from leakguard).
 
 [0.1.0]: https://github.com/creatornader/agent-bridge/releases/tag/v0.1.0
-[Unreleased]: https://github.com/creatornader/agent-bridge/compare/v0.2.0...HEAD
+[Unreleased]: https://github.com/creatornader/agent-bridge/compare/v0.3.0...HEAD
+[0.3.0]: https://github.com/creatornader/agent-bridge/compare/v0.2.0...v0.3.0
 [0.2.0]: https://github.com/creatornader/agent-bridge/compare/v0.1.0...v0.2.0
