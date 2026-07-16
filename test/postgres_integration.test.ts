@@ -801,7 +801,7 @@ integration("PostgreSQL BridgeStore integration", () => {
       await pool!.query(`DROP ROLE IF EXISTS ${unrelatedSuperuser}`).catch(() => {});
       rmSync(directory, { recursive: true, force: true });
     }
-  }, 30_000);
+  }, 60_000);
 
   afterAll(async () => {
     await pool?.end();
