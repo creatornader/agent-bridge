@@ -631,6 +631,7 @@ Normal inbox and pending reads fall back to the local cache when the gateway is 
 
 ```bash
 agent-bridge --version
+agent-bridge --help
 agent-bridge init --provider local
 agent-bridge doctor
 agent-bridge status
@@ -657,6 +658,10 @@ agent-bridge presence
 agent-bridge sync
 agent-bridge watch
 ```
+
+`-h` and `--help` print help before Agent Bridge loads backend configuration or
+dispatches a command. They are safe to use after a command name, including `archive`
+and `dr` commands.
 
 `--project` adds an optional immutable label to a message. It never selects a workspace or changes the active identity. Omit it on reads to include every project and unlabeled messages in the credential-bound workspace. Pass it to `get`, `inbox`, `history`, `pending`, or `watch` for an exact label match. Gateway callers may use `--workspace` only as an assertion. The CLI rejects a mismatch before sending a request. Local mode permits a per-command workspace override. The global legacy Supabase schema has no tenant workspace, so legacy mode fixes workspace to `*` and rejects other `--workspace` values.
 

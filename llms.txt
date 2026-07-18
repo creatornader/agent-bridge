@@ -30,6 +30,7 @@ services can call the CLI or HTTPS API or embed the Node library without a host 
 ## Commands
 
 - `agent-bridge --version` or `agent-bridge -V`: print the installed package version without loading backend configuration.
+- `agent-bridge --help`, `agent-bridge -h`, or a command followed by either help flag: print help without loading backend configuration or dispatching the command.
 - `agent-bridge capabilities`: print the canonical v2 operation and protocol capability document.
 
 - agent-bridge init --provider local
