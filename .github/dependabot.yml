@@ -9,6 +9,12 @@ updates:
       interval: "weekly"
     commit-message:
       prefix: "deps"
+    # Keep production images on the selected LTS line. Move Node majors through
+    # a deliberate runtime migration after the new line reaches LTS.
+    ignore:
+      - dependency-name: "node"
+        update-types:
+          - "version-update:semver-major"
 
   - package-ecosystem: "github-actions"
     directory: "/"
