@@ -128,6 +128,9 @@ export function securePrivateSqliteSidecar(
   path: string,
   dependencies: PrivatePathDependencies = defaults,
 ): void {
+  const pathDisappeared = (error: unknown): boolean => error instanceof PrivatePathError
+    ? error.code === "PATH_DISAPPEARED"
+    : typeof error === "object" && error !== null && (error as NodeJS.ErrnoException).code === "ENOENT";
   const pathEntryExists = (): boolean => {
     try { lstatSync(path); return true; } catch (error) {
       if ((error as NodeJS.ErrnoException).code === "ENOENT") return false;
@@ -138,7 +141,7 @@ export function securePrivateSqliteSidecar(
   try {
     securePrivatePath(path, "file", dependencies);
   } catch (error) {
-    if (error instanceof PrivatePathError && error.code === "PATH_DISAPPEARED" && !pathEntryExists()) return;
+    if (pathDisappeared(error) && !pathEntryExists()) return;
     throw error;
   }
 }

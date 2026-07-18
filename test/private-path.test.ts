@@ -163,6 +163,17 @@ describe("private path policy", () => {
       writeFileSync(sidecar, "ephemeral");
       expect(() => securePrivateSqliteSidecar(sidecar, {
         platform: "win32",
+        execute: () => result(0),
+        inspect: () => {
+          rmSync(sidecar);
+          const error = Object.assign(new Error("sidecar disappeared"), { code: "ENOENT" });
+          throw error;
+        },
+      })).not.toThrow();
+
+      writeFileSync(sidecar, "ephemeral");
+      expect(() => securePrivateSqliteSidecar(sidecar, {
+        platform: "win32",
         execute: () => {
           rmSync(sidecar);
           return result(26);
