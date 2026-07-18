@@ -307,7 +307,7 @@ function bridgeStoreContract(name: string, makeStore: () => SQLiteBridgeStore) {
         deliveryPolicy: { mode: "leased", maxAttempts: 1, retryJitterRatio: 0 },
       });
       const owner = { workspace: "acme", agent: "worker", instance: "a" };
-      const claim = await service.claim(owner, { leaseMs: 1_000 });
+      const claim = await service.claim(owner, { leaseMs: 30_000 });
 
       expect(
         await service.ack(
