@@ -14,6 +14,7 @@ import { legacyContextMetadata, legacyNumericMessageId } from "./legacy-compat.j
 import { BridgeHttpError } from "./http-bridge-store.js";
 import { LegacySupabaseError } from "./legacy-supabase-store.js";
 import { installClient, type InstallableRuntime } from "./client-installer.js";
+import { adoptClient, inspectClient } from "./client-lifecycle.js";
 import { capabilityDocument, operationForCli, parseCliResponse, validateRequest } from "./contracts/registry.js";
 import { runOwnerCommand, type OwnerOptions } from "./owner-control.js";
 import { ArchiveCommandError, runArchiveCommand } from "./archive-cli.js";
@@ -33,7 +34,7 @@ const SUPPORTED_OPTIONS = new Set([
   "polls", "priority", "project", "provider", "reply-to-id", "since", "source",
   "target", "target-agent", "target-agents", "thread-id", "token", "type",
   "unacked-by", "url", "workspace", "mailbox", "receipt-state",
-  "identity", "command", "scope",
+  "identity", "command", "scope", "backend-config", "config-path",
   "recipient", "retry-base-ms", "retry-jitter", "retry-max-ms", "role", "runtime", "capability", "state",
   "max-pages", "max-push",
   "latest",
@@ -154,7 +155,7 @@ function packageVersion(): string {
   if (typeof manifest.version !== "string" || !manifest.version) throw new Error("package version is unavailable");
   return manifest.version;
 }
-function help(): void { process.stdout.write(`agent-bridge: provider-neutral agent messaging\n\nCommands:\n  init, doctor, status, capabilities, pending, migrate, reconcile-legacy-projects, sync, demo, join, presence\n  send (post), inbox (get), sent, history, acknowledge, claim, extend, ack, nack, watch\n  deliveries, dead-letters, delivery-events, cancel, requeue\n  owner <provision|inventory|rotate|revoke>\n  archive <export|verify|import>\n  dr <backup|verify|restore>\n  clients install <codex|claude-code|claude-desktop> --identity <name>\n\nOptions:\n  -V, --version  Print the installed package version\n  -h, --help     Show this help\n`); }
+function help(): void { process.stdout.write(`agent-bridge: provider-neutral agent messaging\n\nCommands:\n  init, doctor, status, capabilities, pending, migrate, reconcile-legacy-projects, sync, demo, join, presence\n  send (post), inbox (get), sent, history, acknowledge, claim, extend, ack, nack, watch\n  deliveries, dead-letters, delivery-events, cancel, requeue\n  owner <provision|inventory|rotate|revoke>\n  archive <export|verify|import>\n  dr <backup|verify|restore>\n  clients install <codex|claude-code|claude-desktop> --identity <name>\n  clients inspect <codex|claude-code|claude-desktop> --identity <name> --instance <key> --backend-config <path>\n  clients adopt <codex|claude-code|claude-desktop> --identity <name> --instance <key> --backend-config <path> [--apply]\n\nOptions:\n  -V, --version  Print the installed package version\n  -h, --help     Show this help\n`); }
 function rejectUnknownOptions(options: Options): void {
   const unknown = Object.keys(options).filter((key) => !SUPPORTED_OPTIONS.has(key));
   if (unknown.length) throw new Error(`unknown option: --${unknown[0]}`);
@@ -350,20 +351,50 @@ export async function runCli(argv = process.argv.slice(2)): Promise<void> {
     return;
   }
   if (command === "clients") {
-    if (positionals.length !== 2 || positionals[0] !== "install" || !positionals[1]) {
-      throw new Error("usage: agent-bridge clients install <runtime> --identity <name>");
+    const action = positionals[0];
+    if (positionals.length !== 2 || !["install", "inspect", "adopt"].includes(action ?? "") || !positionals[1]) {
+      throw new Error(action === "install"
+        ? "usage: agent-bridge clients install <runtime> --identity <name>"
+        : "usage: agent-bridge clients <install|inspect|adopt> <runtime>");
     }
-    rejectOptionsOutside(options, new Set([
-      "identity", "command", "scope", "instance", "token", "enrollment-file", "recover-lock",
-    ]), "clients install");
     const runtime = positionals[1] as InstallableRuntime | undefined;
     if (runtime && !["codex", "claude-code", "claude-desktop"].includes(runtime)) {
-      throw new Error(`unsupported install runtime: ${runtime}`);
+      throw new Error(`unsupported client runtime: ${runtime}`);
     }
     const scope = one(options, "scope");
     if (scope && !["local", "user", "project"].includes(scope)) {
       throw new Error("--scope must be local, user, or project");
     }
+    if (action === "inspect" || action === "adopt") {
+      rejectOptionsOutside(options, new Set([
+        "identity", "command", "scope", "instance", "backend-config", "config-path", "apply",
+      ]), `clients ${action}`);
+      if (action === "inspect" && options.apply !== undefined) {
+        throw new Error("--apply is only valid for clients adopt");
+      }
+      if (runtime !== "claude-code" && options.scope !== undefined) {
+        throw new Error("--scope is only valid for the claude-code runtime");
+      }
+      if (runtime !== "claude-desktop" && options["config-path"] !== undefined) {
+        throw new Error("--config-path is only valid for the claude-desktop runtime");
+      }
+      const lifecycleOptions = {
+        command: one(options, "command"),
+        scope: scope as "local" | "user" | "project" | undefined,
+        instance: one(options, "instance") ?? "",
+        backendConfigPath: one(options, "backend-config") ?? "",
+        configPath: one(options, "config-path"),
+        apply: action === "adopt" ? boolean(options, "apply") : false,
+        env: process.env,
+      };
+      output(action === "inspect"
+        ? inspectClient(runtime!, one(options, "identity") ?? "", lifecycleOptions)
+        : adoptClient(runtime!, one(options, "identity") ?? "", lifecycleOptions));
+      return;
+    }
+    rejectOptionsOutside(options, new Set([
+      "identity", "command", "scope", "instance", "token", "enrollment-file", "recover-lock",
+    ]), "clients install");
     output(installClient(runtime, one(options, "identity") ?? "", {
       command: one(options, "command"),
       scope: scope as "local" | "user" | "project" | undefined,

@@ -486,6 +486,65 @@ describe("agent-bridge CLI", () => {
     expect(extra.status).toBe(1);
     expect(extra.stderr).toContain("usage: agent-bridge clients install");
   });
+  it("inspects and plan-first adopts an exact Claude Desktop registration", () => {
+    const home = mkdtempSync(join(tmpdir(), "agent-bridge-cli-lifecycle-")); homes.push(home);
+    securePrivatePath(home, "directory");
+    const backendConfigPath = join(home, ".agent-bridge", "clients", "desktop-existing.config");
+    const configPath = join(home, "claude-desktop.json");
+    const executable = process.execPath;
+    mkdirSync(dirname(backendConfigPath), { recursive: true, mode: 0o700 });
+    securePrivatePath(join(home, ".agent-bridge"), "directory");
+    securePrivatePath(dirname(backendConfigPath), "directory");
+    writeFileSync(backendConfigPath, "AGENT_BRIDGE_TOKEN=must-not-leak\n", { mode: 0o600 });
+    securePrivatePath(backendConfigPath, "file");
+    writeFileSync(configPath, JSON.stringify({ mcpServers: { "agent-bridge": {
+      command: executable,
+      args: [],
+      env: {
+        AGENT_BRIDGE_AGENT: "desktop-work",
+        AGENT_BRIDGE_INSTANCE: "desktop-existing",
+        AGENT_BRIDGE_CONFIG: backendConfigPath,
+      },
+    } } }));
+    const args = [
+      "clients", "inspect", "claude-desktop", "--identity", "desktop-work",
+      "--instance", "desktop-existing", "--backend-config", backendConfigPath,
+      "--command", executable, "--config-path", configPath,
+    ];
+
+    const inspected = runAt(home, args);
+    expect(inspected.status).toBe(0);
+    expect(JSON.parse(inspected.stdout)).toMatchObject({ state: "unmanaged", exact: true });
+    expect(inspected.stdout).not.toContain("must-not-leak");
+
+    const planned = runAt(home, args.with(1, "adopt"));
+    expect(planned.status).toBe(0);
+    const plan = JSON.parse(planned.stdout);
+    expect(plan).toMatchObject({ action: "adopt", applied: false, before: "unmanaged", after: "managed" });
+    expect(existsSync(plan.metadataPath)).toBe(false);
+
+    const applied = runAt(home, [...args.with(1, "adopt"), "--apply"]);
+    expect(applied.status).toBe(0);
+    const result = JSON.parse(applied.stdout);
+    expect(result).toMatchObject({ action: "adopt", applied: true, before: "unmanaged", after: "managed" });
+    expect(readFileSync(result.metadataPath, "utf8")).not.toContain("must-not-leak");
+
+    const codexScope = runAt(home, [
+      "clients", "inspect", "codex", "--identity", "codex-work",
+      "--instance", "codex-existing", "--backend-config", backendConfigPath,
+      "--scope", "user",
+    ]);
+    expect(codexScope.status).toBe(1);
+    expect(codexScope.stderr).toContain("--scope is only valid for the claude-code runtime");
+
+    const claudeConfig = runAt(home, [
+      "clients", "inspect", "claude-code", "--identity", "claude-work",
+      "--instance", "claude-existing", "--backend-config", backendConfigPath,
+      "--config-path", configPath,
+    ]);
+    expect(claudeConfig.status).toBe(1);
+    expect(claudeConfig.stderr).toContain("--config-path is only valid for the claude-desktop runtime");
+  });
   it("does not load SQLite for a legacy provider command", () => {
     const result = run(["help"], {
       AGENT_BRIDGE_PROVIDER: "legacy-supabase",

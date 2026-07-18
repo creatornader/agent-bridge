@@ -270,6 +270,25 @@ Protocol logic depends on a `BridgeStore` interface, not a provider SDK. The ini
 
 Host and wakeup adapters are independent from storage. A client manifest declares identity injection, supported wake modes, config locations, health checks, and install actions for Codex, Claude Code, Claude Desktop, OpenClaw, or a generic MCP client. The v1 manifest key named `runtime` identifies an installation target for compatibility. It does not identify a unique running process. The `codex` adapter configures the profile shared by the Codex CLI and the Codex surface in the ChatGPT desktop app. Scripts, CI jobs, daemons, and application services may instead call the CLI or HTTPS API or embed the Node library without pretending to be a harness adapter.
 
+Client lifecycle ownership is separate from registration existence. Local inspection
+classifies a requested Codex, Claude Code, or Claude Desktop contract as absent,
+unmanaged, managed, or drifted by comparing the exact identity, stable instance key,
+backend path, scope, launch contract, and nonsecret registration locator. Desktop
+locators name the normalized host config, Codex locators name the active profile
+config, and Claude Code local or project locators include the invocation directory
+because the native CLI exposes no stronger target. Adoption is plan-first and writes
+only owner-private, credential-free metadata when `--apply` is explicit and the
+unmanaged registration is exact. Backend files and their immediate parents must pass
+the owner-only no-link policy. Codex JSON comparisons ignore diagnostic/status fields
+and property order but require exactly the three Agent Bridge environment keys;
+Claude Code connectivity status is not registration state. Claude Desktop inspection
+shares the installer's validated absolute launch resolver. Applied adoption
+re-inspects its postcondition. It does not read backend values or mutate the
+registration.
+Enrollment-based first-time provisioning retains strict registration and backend-file
+collision refusal. See
+[ADR 0004](decisions/0004-client-lifecycle-and-endpoint-migration.md).
+
 ### v1 compatibility is additive
 
 The MCP tools `post_context`, `get_context`, and `ack_context` remain available. Existing CLI verbs and flags remain accepted. Text responses remain present while v2 adds structured result data.
