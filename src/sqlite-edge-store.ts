@@ -12,7 +12,7 @@ import {
 } from "./bridge-domain.js";
 import type { MessagePage, MessageQuery } from "./bridge-store.js";
 import { retrySqliteBusy } from "./sqlite-retry.js";
-import { preparePrivateSqliteLocation, securePrivatePath, verifyPrivatePathAccess } from "./private-path.js";
+import { preparePrivateSqliteLocation, securePrivatePath, securePrivateSqliteSidecar, verifyPrivatePathAccess } from "./private-path.js";
 import { assertEdgeUpgradeCandidate, installEdgeMarkers } from "./sqlite-database-contract.js";
 
 const require = createRequire(import.meta.url);
@@ -228,7 +228,8 @@ export class SQLiteEdgeStore {
     for (const path of [this.databasePath, `${this.databasePath}-wal`, `${this.databasePath}-shm`]) {
       if (!existsSync(path)) continue;
       if (path === this.databasePath && this.preexistingFiles.has(path)) verifyPrivatePathAccess(path, "file");
-      else securePrivatePath(path, "file");
+      else if (path === this.databasePath) securePrivatePath(path, "file");
+      else securePrivateSqliteSidecar(path);
     }
   }
 
