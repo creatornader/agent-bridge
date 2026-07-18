@@ -1,8 +1,8 @@
-import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
-import { preparePrivateSqliteLocation, securePrivatePath, verifyPrivatePathAccess } from "../src/private-path.js";
+import { preparePrivateSqliteLocation, securePrivatePath, securePrivateSqliteSidecar, verifyPrivatePathAccess } from "../src/private-path.js";
 
 function result(status: number) {
   return {
@@ -78,7 +78,10 @@ describe("private path policy", () => {
     expect(script).not.toContain("Get-Acl");
     expect(script).not.toContain("Set-Acl");
     expect(script).not.toContain("RawSecurityDescriptor");
+    expect(script.match(/\.Exists/g)).toHaveLength(2);
     expect(script.match(/ReparsePoint/g)).toHaveLength(2);
+    expect(script.indexOf("if(-not $pathInfo.Exists)")).toBeLessThan(script.indexOf("$pathInfo.Attributes -band"));
+    expect(script.indexOf("if(-not $checkPathInfo.Exists)")).toBeLessThan(script.indexOf("$checkPathInfo.Attributes -band"));
 
     securePrivatePath("C:\\private", "directory", {
       platform: "win32",
@@ -150,5 +153,36 @@ describe("private path policy", () => {
       execute: () => result(0),
       inspect: () => fileIdentity(false, reads++ === 0 ? 10 : 11),
     })).toThrow(/identity changed/);
+  });
+
+  it("tolerates only a disappeared SQLite sidecar, never a replacement", () => {
+    const directory = mkdtempSync(join(tmpdir(), "agent-bridge-sidecar-race-"));
+    const sidecar = join(directory, "bridge.sqlite-wal");
+    const attacker = join(directory, "attacker");
+    try {
+      writeFileSync(sidecar, "ephemeral");
+      expect(() => securePrivateSqliteSidecar(sidecar, {
+        platform: "win32",
+        execute: () => {
+          rmSync(sidecar);
+          return result(26);
+        },
+        inspect: () => fileIdentity(),
+      })).not.toThrow();
+
+      writeFileSync(sidecar, "ephemeral");
+      mkdirSync(attacker);
+      expect(() => securePrivateSqliteSidecar(sidecar, {
+        platform: "win32",
+        execute: () => {
+          rmSync(sidecar);
+          symlinkSync(attacker, sidecar, "junction");
+          return result(26);
+        },
+        inspect: () => fileIdentity(),
+      })).toThrow(/disappeared/);
+    } finally {
+      rmSync(directory, { recursive: true, force: true });
+    }
   });
 });

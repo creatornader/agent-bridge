@@ -4,7 +4,11 @@ import { spawnSync, type SpawnSyncReturns } from "node:child_process";
 
 export type PrivatePathKind = "file" | "directory";
 
-export class PrivatePathError extends Error {}
+export class PrivatePathError extends Error {
+  constructor(message: string, readonly code?: "PATH_DISAPPEARED") {
+    super(message);
+  }
+}
 
 interface PrivatePathDependencies {
   platform: NodeJS.Platform;
@@ -42,6 +46,7 @@ function windowsScript(kind: PrivatePathKind, apply: boolean): string {
     "$tokenOwner=$identity.Owner",
     `$pathInfo=${pathInfo}`,
     "$pathInfo.Refresh()",
+    "if(-not $pathInfo.Exists){exit 26}",
     "if(($pathInfo.Attributes -band [System.IO.FileAttributes]::ReparsePoint) -ne 0){exit 25}",
     `$flags=${flags}`,
     "$sections=[System.Security.AccessControl.AccessControlSections]([System.Security.AccessControl.AccessControlSections]::Owner -bor [System.Security.AccessControl.AccessControlSections]::Access)",
@@ -63,6 +68,7 @@ function windowsScript(kind: PrivatePathKind, apply: boolean): string {
     ] : []),
     `$checkPathInfo=${pathInfo}`,
     "$checkPathInfo.Refresh()",
+    "if(-not $checkPathInfo.Exists){exit 26}",
     "if(($checkPathInfo.Attributes -band [System.IO.FileAttributes]::ReparsePoint) -ne 0){exit 25}",
     "$check=$checkPathInfo.GetAccessControl($sections)",
     "$owner=$check.GetOwner([System.Security.Principal.SecurityIdentifier])",
@@ -95,6 +101,9 @@ function windowsPrivatePath(
     "-NoProfile", "-NonInteractive", "-Command", windowsScript(kind, apply),
   ], { ...process.env, AGENT_BRIDGE_PRIVATE_PATH: path });
   if (result.status !== 0) {
+    if (result.status === 26) {
+      throw new PrivatePathError("private Windows path disappeared during policy validation", "PATH_DISAPPEARED");
+    }
     const phase = result.status === 23
       ? `final ACL verification failed${result.stdout.trim() ? ` (${result.stdout.trim()})` : ""}`
       : result.status === 24
@@ -111,6 +120,26 @@ function windowsPrivatePath(
     || (kind === "file" ? !after.isFile() : !after.isDirectory())
     || after.dev !== before.dev || after.ino !== before.ino) {
     throw new PrivatePathError("private Windows path identity changed during policy validation");
+  }
+}
+
+/** Secure an ephemeral SQLite sidecar, accepting deletion but never replacement. */
+export function securePrivateSqliteSidecar(
+  path: string,
+  dependencies: PrivatePathDependencies = defaults,
+): void {
+  const pathEntryExists = (): boolean => {
+    try { lstatSync(path); return true; } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === "ENOENT") return false;
+      throw error;
+    }
+  };
+  if (!pathEntryExists()) return;
+  try {
+    securePrivatePath(path, "file", dependencies);
+  } catch (error) {
+    if (error instanceof PrivatePathError && error.code === "PATH_DISAPPEARED" && !pathEntryExists()) return;
+    throw error;
   }
 }
 
@@ -178,7 +207,7 @@ export function preparePrivateSqliteLocation(path: string, createParent = false)
   if (path === ":memory:") return path;
   const target = preparePrivateFileLocation(path, createParent);
   for (const candidate of [`${target}-wal`, `${target}-shm`]) {
-    if (existsSync(candidate)) securePrivatePath(candidate, "file");
+    securePrivateSqliteSidecar(candidate);
   }
   return target;
 }

@@ -6,7 +6,7 @@ import { DeliveryStateConflictError, cursorScope, decodeCursor, decodeScopedCurs
 import type { BridgeDiagnostics, BridgeStore, ClaimOptions, DeliveryQuery, InsertMessageResult, MessagePage, MessageQuery } from "./bridge-store.js";
 import { assertIdempotentReplay } from "./idempotency.js";
 import { retrySqliteBusy } from "./sqlite-retry.js";
-import { preparePrivateSqliteLocation, securePrivatePath, verifyPrivatePathAccess } from "./private-path.js";
+import { preparePrivateSqliteLocation, securePrivatePath, securePrivateSqliteSidecar, verifyPrivatePathAccess } from "./private-path.js";
 import { assertLocalUpgradeCandidate, installLocalAuthorityMarkers } from "./sqlite-database-contract.js";
 
 type Row = Record<string, unknown>;
@@ -118,7 +118,8 @@ export class SQLiteBridgeStore implements BridgeStore {
     for (const path of [this.databasePath, `${this.databasePath}-wal`, `${this.databasePath}-shm`]) {
       if (!existsSync(path)) continue;
       if (path === this.databasePath && this.preexistingFiles.has(path)) verifyPrivatePathAccess(path, "file");
-      else securePrivatePath(path, "file");
+      else if (path === this.databasePath) securePrivatePath(path, "file");
+      else securePrivateSqliteSidecar(path);
     }
   }
   async initialize(): Promise<void> {
