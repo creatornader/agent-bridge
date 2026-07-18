@@ -321,6 +321,10 @@ async function localDemo(): Promise<void> {
 }
 
 export async function runCli(argv = process.argv.slice(2)): Promise<void> {
+  if (argv.some((argument) => argument === "-h" || argument === "--help")) {
+    help();
+    return;
+  }
   if (argv[0] === "archive") {
     output(await runArchiveCommand(argv.slice(1), process.env));
     return;
@@ -331,7 +335,7 @@ export async function runCli(argv = process.argv.slice(2)): Promise<void> {
   }
   const { command: raw, options, positionals } = parse(argv); const command = ({ post: "send", get: "inbox", receipt: "acknowledge" } as Record<string, string>)[raw] ?? raw;
   if (["-V", "--version"].includes(command)) { process.stdout.write(`${packageVersion()}\n`); return; }
-  if (["help", "-h", "--help"].includes(command)) { help(); return; }
+  if (command === "help") { help(); return; }
   rejectUnknownOptions(options);
   if (command === "owner") {
     if (positionals.length !== 1) {
