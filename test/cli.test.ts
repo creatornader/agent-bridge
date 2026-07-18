@@ -64,6 +64,24 @@ describe("agent-bridge CLI", () => {
     expect(result.stderr).toBe("");
   });
 
+  it("prints help before command parsing or side effects", () => {
+    const home = mkdtempSync(join(tmpdir(), "agent-bridge-cli-help-")); homes.push(home);
+    const database = join(home, "bridge.sqlite3");
+    const invocations = [
+      ["--help"], ["-h"], ["get", "--help"], ["send", "-h"],
+      ["owner", "--help"], ["clients", "--help"],
+      ["archive", "--help"], ["dr", "-h"],
+    ];
+
+    for (const invocation of invocations) {
+      const result = runAt(home, invocation, { AGENT_BRIDGE_DB: database });
+      expect(result.status, `${invocation.join(" ")}: ${result.stderr}`).toBe(0);
+      expect(result.stdout).toContain("agent-bridge: provider-neutral agent messaging");
+      expect(result.stderr).toBe("");
+      expect(existsSync(database)).toBe(false);
+    }
+  });
+
   it("exports, verifies, dry-runs, and applies a local portable archive", () => {
     const home = mkdtempSync(join(tmpdir(), "agent-bridge-cli-")); homes.push(home);
     const source = join(home, "source.sqlite3");
