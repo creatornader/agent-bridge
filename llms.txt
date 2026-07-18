@@ -11,6 +11,10 @@ History uses mailbox `inbox` (default), `sent`, or `all`. Receipt state is `any`
 - `npm install --global @creatornader/agent-bridge`
 - `agent-bridge init --provider local`
 - `agent-bridge demo`
+- Development gateway: create `.secrets/postgres_password` and
+  `.secrets/runtime_password`, then run `docker compose up --build --wait gateway`.
+  Both checked-in port bindings are loopback-only. See `docs/deployment.md` before a
+  non-loopback deployment.
 
 If an MCP client cannot attach, run `agent-bridge doctor --json` and see
 `docs/troubleshooting.md`. Normal client installation resolves the MCP launch command;
@@ -133,6 +137,7 @@ Local CLI calls may override workspace for one invocation. The legacy Supabase s
 - SECURITY.md: reporting process and security boundaries
 - docs/ecosystem.md: relationship to adjacent protocols, brokers, and runtimes
 - docs/troubleshooting.md: MCP startup and client recovery
+- docs/deployment.md: Compose development stack and production deployment constraints
 - docs/decisions/0001-protocol-layers-and-acknowledgment-semantics.md: protocol layers and acknowledgment semantics
 - docs/decisions/0002-canonical-operation-contract-registry.md: generated contracts and version negotiation
 - docs/decisions/0003-host-adapters-and-consumer-instance-keys.md: host layers and instance-key semantics

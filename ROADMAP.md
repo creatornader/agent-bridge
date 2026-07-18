@@ -35,6 +35,17 @@ published and the supported clients pass a fresh end-to-end check.
 - Portable workspace archives across canonical SQLite and PostgreSQL stores.
 - Native SQLite and PostgreSQL backup, verification, and restore.
 
+### Implemented after 0.3.1, awaiting release
+
+- A pinned, non-root gateway image and a Compose development stack with ordered
+  migration, restricted runtime-role bootstrap, health checks, private secret files,
+  and a persistent PostgreSQL volume.
+- A Linux Compose acceptance test that provisions two temporary principals and proves
+  authority binding, delivery settlement, denied runtime access to credential hashes,
+  idempotent restart, and PostgreSQL volume persistence.
+- A production deployment guide covering TLS, network exposure, secret separation,
+  backups, upgrade order, and schema rollback limits.
+
 ### Post-release validation and adoption
 
 - Move the project's own normal traffic to the authenticated gateway while retaining a
@@ -53,7 +64,6 @@ published and the supported clients pass a fresh end-to-end check.
 ### Installation and operations
 
 - Add client repair, update, uninstall, and registration diagnostics.
-- Provide a Compose-based development deployment and a production deployment guide.
 - Add endpoint migration tooling that does not strand an existing SQLite outbox.
 - Publish a maintained client compatibility matrix.
 

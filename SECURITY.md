@@ -58,9 +58,20 @@ identity from the credential, applies operation scopes and rate policy, and uses
 transaction-bound PostgreSQL request authority. Production runtime roles must not be
 superusers or hold `BYPASSRLS`. Put every non-loopback gateway behind TLS.
 
+Do not publish PostgreSQL on a public interface. Put it on a private network reachable
+only by the migration, runtime bootstrap, gateway, backup, and recovery jobs that need
+it. The checked-in Compose file binds both published ports to loopback and serves plain
+HTTP for local development. It is not a public deployment template.
+
 Keep the schema-owner, runtime, operator, archive, backup, and restore database
 authorities separate. Do not copy one client's token or backend file into another
 client's configuration.
+
+Run migrations as a one-shot schema-owner job before starting a new gateway image.
+Take and verify a native DR backup first. Gateway readiness checks the exact migration
+plan and protected catalog state. Once a migration changes the database, starting an
+older image is not a safe rollback. Apply a forward fix or restore the backup into a
+fresh target and switch authority only after verification.
 
 ### Legacy Supabase mode
 
@@ -91,5 +102,19 @@ when wrapper health is uncertain.
 - Pass gateway tokens through private enrollment or backend files, not shell arguments.
 - Keep database URLs in the documented environment variables. Do not put them in CLI
   arguments, logs, issues, or examples.
+- Store Compose password files outside version control with owner-only permissions.
+  Use the deployment platform's secret manager in production. Do not bake passwords or
+  tokens into images, Compose environment blocks, or image layers.
+- File-backed Compose secrets retain host ownership on native Linux. The development
+  stack starts a small Node entrypoint as root with `DAC_OVERRIDE`, `SETUID`, and
+  `SETGID`, reads one granted secret, then drops supplementary groups and UID/GID to
+  1000 before it imports the gateway. The final process has no effective capabilities
+  and cannot regain them under `no-new-privileges`. The fixed runtime-bootstrap job
+  keeps `DAC_OVERRIDE`, `SETUID`, and `SETGID` while it reads its two secrets, then runs
+  `psql` as the PostgreSQL account. It rejects runtime passwords shorter than 32
+  characters.
 - Treat client backend files, enrollment files, archives, and DR bundles as secrets.
 - Sanitize `doctor` output and logs before sharing them publicly.
+
+A Docker volume provides persistence, not backup. Keep verified native DR bundles on a
+separate failure domain with retention and restore drills appropriate to the deployment.
