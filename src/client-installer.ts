@@ -49,7 +49,7 @@ interface BackendBinding {
   instance: string;
 }
 
-interface DesktopLaunchContract {
+export interface DesktopLaunchContract {
   command: string;
   args: string[];
 }
@@ -102,7 +102,7 @@ function defaultServerEntry(): string {
   return resolve(entry);
 }
 
-function desktopLaunchContract(
+export function resolveDesktopLaunchContract(
   requestedCommand: string | undefined,
   env: NodeJS.ProcessEnv,
 ): DesktopLaunchContract {
@@ -383,9 +383,14 @@ function desktopRegistrationState(
     const config = JSON.parse(readFileSync(path, "utf8"));
     const server = config?.mcpServers?.["agent-bridge"];
     if (!server) return "absent";
-    const exactEnvironment = server?.env?.AGENT_BRIDGE_AGENT === enrollment.input.principal
-      && server?.env?.AGENT_BRIDGE_INSTANCE === enrollment.input.instance
-      && server?.env?.AGENT_BRIDGE_CONFIG === backendConfigPath;
+    const environment = server?.env;
+    const exactEnvironment = environment && typeof environment === "object"
+      && !Array.isArray(environment)
+      && Object.keys(environment).sort().join(",")
+        === "AGENT_BRIDGE_AGENT,AGENT_BRIDGE_CONFIG,AGENT_BRIDGE_INSTANCE"
+      && environment.AGENT_BRIDGE_AGENT === enrollment.input.principal
+      && environment.AGENT_BRIDGE_INSTANCE === enrollment.input.instance
+      && environment.AGENT_BRIDGE_CONFIG === backendConfigPath;
     if (server?.command === "agent-bridge-mcp"
       && (server?.args === undefined || (Array.isArray(server.args) && server.args.length === 0))
       && exactEnvironment) return "legacy";
@@ -525,7 +530,7 @@ function enrolledInstallLocked(
   const expectedPath = clientBackendConfigPath(runtime, enrollment.input.instance, env);
   const command = options.command?.trim() || "agent-bridge-mcp";
   const desktopLaunch = runtime === "claude-desktop"
-    ? desktopLaunchContract(options.command, env)
+    ? resolveDesktopLaunchContract(options.command, env)
     : undefined;
   const scope = options.scope ?? "user";
   const baseResult: ClientInstallResult = {
@@ -759,7 +764,7 @@ export function installClient(
   const command = options.command?.trim() || "agent-bridge-mcp";
   const env = options.env ?? process.env;
   const desktopLaunch = runtime === "claude-desktop"
-    ? desktopLaunchContract(options.command, env)
+    ? resolveDesktopLaunchContract(options.command, env)
     : undefined;
   const expectedPath = clientBackendConfigPath(runtime, instance, env);
   const previous = existsSync(expectedPath) ? readFileSync(expectedPath) : undefined;

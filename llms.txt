@@ -46,10 +46,28 @@ services can call the CLI or HTTPS API or embed the Node library without a host 
 - agent-bridge claim, extend, ack, nack, deliveries, delivery-events, cancel, requeue
 - agent-bridge sync, watch, join, presence
 - agent-bridge clients install <runtime> --identity <principal>
+- agent-bridge clients inspect <runtime> --identity <principal> --instance <stable-key> --backend-config <absolute path>
+- agent-bridge clients adopt <runtime> --identity <principal> --instance <stable-key> --backend-config <absolute path> [--apply]
 - agent-bridge owner provision|inventory|rotate|revoke
 - agent-bridge clients install <runtime> --enrollment-file <private path>
 - agent-bridge archive export|verify|import
 - agent-bridge dr backup|verify|restore
+
+Client inspection is local, read-only, secret-free, and reports absent, unmanaged,
+managed, or drifted. Adoption is a plan unless `--apply` is explicit. It writes only
+owner-private credential-free management metadata after the identity, stable instance,
+backend path, scope, and launch contract match exactly; it never rewrites the host
+registration or backend file. Enrollment-based first-time provisioning continues to
+refuse registration and backend-file collisions. Metadata binds Desktop to its
+normalized config path and Codex to its active profile config. Claude Code local and
+project scope bind to the invocation directory because its native CLI exposes no
+stronger registration target.
+The backend and its immediate parent must pass the owner-only no-link policy. Codex
+registration comparison ignores diagnostic fields and JSON property order but requires
+exactly AGENT_BRIDGE_AGENT, AGENT_BRIDGE_INSTANCE, and AGENT_BRIDGE_CONFIG. Claude Code
+connectivity status is not registration state. Desktop inspection uses the installer's
+validated absolute launch resolver, and applied adoption re-inspects its postcondition.
+Only Claude Code accepts `--scope`; only Claude Desktop accepts `--config-path`.
 
 Archive export moves one workspace's immutable messages and read receipts between
 canonical local SQLite and PostgreSQL stores. Import defaults to a rollback-backed dry

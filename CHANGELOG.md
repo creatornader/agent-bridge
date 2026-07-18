@@ -8,6 +8,18 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and 
 
 ### Added
 
+- Add read-only `clients inspect` and plan-first `clients adopt` for Codex, Claude
+  Code, and Claude Desktop. Exact unmanaged registrations can be adopted only with
+  `--apply`, which writes owner-only credential-free management metadata. Inspection
+  reports absent, unmanaged, managed, or drifted state without reading backend values
+  or contacting a gateway. Registration comparison is structural and health-neutral,
+  backend paths enforce the owner-only no-link policy, Desktop inspection shares the
+  installer launch resolver, and apply re-inspects its postcondition. Enrollment-based
+  provision collision behavior is unchanged. Managed metadata also binds Desktop to
+  its normalized config path, Codex to its active profile config, and Claude Code
+  local or project scope to its invocation directory so later operations cannot guess
+  at a registration target.
+
 - Add a pinned, non-root gateway image and a loopback-only Compose development stack.
   The stack runs migrations separately, creates a restricted runtime login, reads
   database passwords from private secret files, and retains PostgreSQL data in a named

@@ -51,6 +51,22 @@ If a crash leaves the adjacent enrollment lock, wait at least 60 seconds and pas
 `--recover-lock` with the resume or install command. Recovery must prove that the
 same-host process recorded in the lock has stopped. Never remove the lock manually.
 
+Before Agent Bridge takes lifecycle ownership of an existing Codex, Claude Code, or
+Claude Desktop registration, run `agent-bridge clients inspect <runtime>` with its
+exact `--identity`, stable `--instance`, and absolute `--backend-config` path. Supply
+the installed command and Claude Code scope when they differ from defaults. Treat
+`drifted` as a stop condition. `agent-bridge clients adopt` returns a plan by default;
+only add `--apply` after reviewing an exact `unmanaged` result. Adoption writes
+credential-free owner-private metadata only. It does not rewrite the MCP registration
+or backend file, and inspection never returns backend values or contacts the gateway.
+Desktop adoption records the normalized config path. Codex adoption records the active
+profile config. Run Claude Code local or project adoption from the directory that
+later lifecycle operations should use; the native CLI exposes no stronger target.
+The backend and its immediate parent must already pass the owner-only no-link policy.
+Treat registration state separately from connectivity health; applied adoption
+re-inspects the registration before it reports success. Enrollment-based first-time
+provisioning continues to refuse registration and backend-file collisions.
+
 Portable archive work is an offline operator task, not normal MCP traffic. Use
 `agent-bridge archive export --provider local|postgres --workspace <workspace>
 --output <file>` to create an archive, then run `agent-bridge archive verify --file

@@ -405,11 +405,43 @@ Claude Code installation uses its native MCP command. Claude Desktop installatio
 merges the `agent-bridge` server into its JSON config with an atomic write. Restart the
 client after installation.
 
+Inspect an existing registration before making Agent Bridge its lifecycle owner:
+
+```bash
+agent-bridge clients inspect codex --identity codex --instance <stable-key> \
+  --backend-config <absolute-client-backend-path>
+agent-bridge clients adopt codex --identity codex --instance <stable-key> \
+  --backend-config <absolute-client-backend-path>
+agent-bridge clients adopt codex --identity codex --instance <stable-key> \
+  --backend-config <absolute-client-backend-path> --apply
+```
+
+`inspect` is local, read-only, and does not return backend values or credentials. It
+classifies the requested registration as `absent`, `unmanaged`, `managed`, or
+`drifted`. `adopt` is plan-only unless `--apply` is explicit, and application writes
+only owner-private, credential-free management metadata after the identity, instance,
+backend path, scope, launch contract, and registration locator match exactly. Adoption
+never rewrites the host registration or backend file. Enrollment-based first-time
+provisioning still refuses registration and backend-file collisions.
+Claude Code inspection accepts the installed `--scope`; Claude Desktop accepts an
+explicit validated `--command` and, when needed, `--config-path`; its default contract
+is absolute Node plus the absolute server entry. Other adapters reject these
+runtime-specific options. Managed metadata binds Desktop to that normalized config
+path and Codex to its active profile config. Claude Code local and project adoption
+bind to the current directory because the native CLI exposes no stronger locator, so
+run those operations from the project context that later lifecycle commands should
+use. Backend files and their immediate parents must satisfy the owner-only no-link
+policy. Registration state is independent of connectivity health, and applied
+adoption re-inspects before reporting success.
+
 The v1 host-adapter manifests are under [`clients/`](clients/). Their compatibility
 field is named `runtime`, but its value identifies the installation target, not a
 unique process. OpenClaw and generic MCP manifests declare the required environment
 variables and command but leave config mutation to the operator because their host
 config shapes vary.
+
+The lifecycle ownership boundary and deferred endpoint-migration constraints are
+recorded in [ADR 0004](docs/decisions/0004-client-lifecycle-and-endpoint-migration.md).
 
 [`SKILL.md`](SKILL.md) provides concise runtime-neutral operating instructions for agents. [`llms.txt`](llms.txt) gives tools and model crawlers a compact map of the package, modes, commands, and identity rules.
 

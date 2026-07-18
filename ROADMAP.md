@@ -37,6 +37,12 @@ published and the supported clients pass a fresh end-to-end check.
 
 ### Implemented after 0.3.1, awaiting release
 
+- Read-only lifecycle inspection and explicit, plan-first adoption for the Codex,
+  Claude Code, and Claude Desktop adapters, backed by owner-only credential-free
+  managed metadata, private backend-path verification, health-neutral exact
+  registration comparison, immutable nonsecret host locators, and a re-inspected
+  adoption postcondition.
+
 - A pinned, non-root gateway image and a Compose development stack with ordered
   migration, restricted runtime-role bootstrap, health checks, private secret files,
   and a persistent PostgreSQL volume.
@@ -63,7 +69,7 @@ published and the supported clients pass a fresh end-to-end check.
 
 ### Installation and operations
 
-- Add client repair, update, uninstall, and registration diagnostics.
+- Build repair, update, and uninstall on the released inspect/adopt ownership boundary.
 - Add endpoint migration tooling that does not strand an existing SQLite outbox.
 - Publish a maintained client compatibility matrix.
 

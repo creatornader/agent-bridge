@@ -31,6 +31,7 @@ Provider-neutral MCP server, CLI, and HTTPS gateway for messaging between AI age
 - `docs/decisions/0001-protocol-layers-and-acknowledgment-semantics.md`: Protocol boundary and acknowledgment semantics
 - `docs/decisions/0002-canonical-operation-contract-registry.md`: Canonical v2 contracts and version negotiation
 - `docs/decisions/0003-host-adapters-and-consumer-instance-keys.md`: Host integration layers and consumer instance-key semantics
+- `docs/decisions/0004-client-lifecycle-and-endpoint-migration.md`: Managed client ownership, exact adoption, and endpoint-migration boundary
 - `docs/architecture-v2.md`: Accepted v2 protocol, storage, security, delivery, and migration design
 - `docs/ecosystem.md`: Public product boundary and interoperability position
 - `docs/troubleshooting.md`: Public MCP and client recovery guide
@@ -85,6 +86,7 @@ Sync triggers:
 - SQLite is the local authority in local mode. In gateway mode it stores the durable outbox, cache, and cursor state.
 - Shared config contains backend settings only. `AGENT_BRIDGE_AGENT` is accepted only from the active process or an explicit CLI identity argument.
 - Client installers write separate owner-only backend files. Gateway tokens are bound to one principal and never stored in the shared config.
+- Client lifecycle inspection is read-only and classifies absent, unmanaged, managed, and drifted registrations independently of connectivity health. Backend files and their immediate parents must pass the owner-only no-link policy. Adoption is plan-first, requires `--apply`, writes only owner-private credential-free management metadata after exact identity, instance, backend-path, scope, launch, and registration-locator verification, and re-inspects the registration before success. Desktop locators name the normalized config, Codex locators name the active profile config, and Claude Code local or project locators include the invocation directory because its native CLI exposes no stronger target. It does not weaken enrollment-based provision collision refusal.
 - Gateway credentials bind workspace and principal. Client source and workspace fields are not trusted.
 - Migrations use the schema-owner `AGENT_BRIDGE_DATABASE_URL`. The gateway requires a restricted `AGENT_BRIDGE_RUNTIME_DATABASE_URL` and never runs migrations at startup.
 - The checked-in Compose stack is a loopback-only development reference. Production gateways require TLS, private PostgreSQL networking, platform-managed secrets, verified native DR backups, and a one-shot migration gate before gateway rollout.
