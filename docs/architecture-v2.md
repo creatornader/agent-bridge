@@ -1,6 +1,6 @@
 # Agent Bridge v2 architecture
 
-Status: living architecture. Version 0.3.0 was released on July 15, 2026.
+Status: living architecture. Version 0.3.1 was released on July 15, 2026.
 
 ## Product boundary
 
@@ -346,10 +346,11 @@ source, a tag-to-version check, and npm provenance. The npm environment does not
 currently require a human reviewer, so the release process must not claim a manual
 approval gate.
 
-GitHub immutable releases are enabled, and GitHub reports release `v0.3.0` as
+GitHub immutable releases are enabled, and GitHub reports release `v0.3.1` as
 immutable. A tag ruleset also blocks update and deletion of `v*` tags with no bypass
-actor. Future recovery dispatches must run the workflow at the release tag ref so the
-provenance workflow identity and checked-out source commit do not diverge.
+actor. Recovery dispatches must run the workflow at the release tag ref so the
+provenance workflow identity and checked-out source commit do not diverge. Release
+packaging also waits for the exact commit to pass the full `test.yml` matrix on `main`.
 
 ## Acceptance checks
 

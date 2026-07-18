@@ -6,6 +6,22 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and 
 
 ## [Unreleased]
 
+### Fixed
+
+- Treat a Windows SQLite sidecar that disappears during ACL validation as an expected
+  race only when the path remains absent. A replacement or reparse object still fails
+  validation.
+- Handle `-h` and `--help` before command parsing and dispatch so help never opens a
+  backend or performs a command side effect.
+
+### Changed
+
+- Require the exact release commit to pass the full `test.yml` matrix on `main` before
+  release packaging begins. Pin GitHub Actions and reusable workflows to verified
+  commit SHAs.
+- Keep Dependabot's grouped npm updates to patch and minor versions. Major updates now
+  require separate review.
+
 ## [0.3.1] - 2026-07-15
 
 ### Added

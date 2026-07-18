@@ -9,7 +9,7 @@ published and the supported clients pass a fresh end-to-end check.
 
 ## Status
 
-### Released by 0.3.0
+### Released by 0.3.1
 
 - Local SQLite and shared PostgreSQL storage behind provider-neutral interfaces.
 - An authenticated HTTPS gateway and a named legacy Supabase adapter.
@@ -17,6 +17,7 @@ published and the supported clients pass a fresh end-to-end check.
   presence.
 - Durable SQLite edge outbox and inbox cache for gateway clients.
 - CLI, MCP, HTTPS, and Node library access surfaces.
+- Installed-package version reporting through `agent-bridge --version` and `-V`.
 - Automated host adapters for Codex, Claude Code, and Claude Desktop. The Codex
   adapter configures the profile shared by the Codex CLI and the Codex surface in the
   ChatGPT desktop app.
@@ -39,9 +40,10 @@ published and the supported clients pass a fresh end-to-end check.
 - Move the project's own normal traffic to the authenticated gateway while retaining a
   tested legacy rollback path.
 - Prove cross-machine claim, settlement, offline replay, and restart behavior against
-  the published package and a deployed v2 gateway. The 0.3.0 live release check covered
-  startup, private mailbox sends, caller-scoped history, receipts, and client restart
-  through the legacy compatibility backend; it could not prove gateway-only behavior.
+  the published package and a deployed v2 gateway. The historical 0.3.0 live release
+  check covered startup, private mailbox sends, caller-scoped history, receipts, and
+  client restart through the legacy compatibility backend. It did not prove
+  gateway-only behavior.
 - Replace remaining direct legacy table pollers with the v2 cursor protocol.
 - Confirm the README, npm metadata, GitHub metadata, release notes, and package contents
   match the released artifact.

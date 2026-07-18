@@ -14,19 +14,24 @@ fixed. The npm package and GitHub release page are the public version authoritie
 
 ## Release integrity
 
-GitHub immutable releases are enabled, and GitHub reports release `v0.3.0` as
+GitHub immutable releases are enabled, and GitHub reports release `v0.3.1` as
 immutable. A repository ruleset also blocks updates and deletion for every `v*` tag
-without a bypass actor. The `v0.3.0` tag is unsigned.
+without a bypass actor. The `v0.3.1` tag is unsigned.
 
 npm publication uses a protected GitHub environment, an OIDC trusted-publisher
 binding, and provenance for the package artifact. Verify the package digest and
-attestation before treating provenance as source identity. The `v0.3.0`
+attestation before treating provenance as source identity. The
+[`v0.3.1` release run](https://github.com/creatornader/agent-bridge/actions/runs/29465467036)
+used package commit `d17ba544d31beaa33b4955e41c3b3d4e3f141900`.
+
+The historical `v0.3.0`
 [recovery run](https://github.com/creatornader/agent-bridge/actions/runs/29461308262)
 checked out package commit `95eb861`, while its attestation names recovery commit
 `c23d9df` as the workflow identity. GitHub Actions logs expire, so the
 [release notes](https://github.com/creatornader/agent-bridge/releases/tag/v0.3.0)
-also record this boundary. Future recovery dispatches must run at the release tag, and
-the workflow enforces that match before packaging.
+also record this boundary. Recovery dispatches must run at the release tag. The
+workflow also requires a successful `test.yml` run from `main` for the exact package
+commit before packaging.
 
 ## Report a vulnerability
 
