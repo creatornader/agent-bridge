@@ -12,19 +12,61 @@ on:
         type: string
 
 permissions:
+  actions: read
   contents: read
 
 jobs:
-  package:
-    name: verify release package
+  main-checks:
+    name: require successful main checks
     runs-on: ubuntu-latest
-    timeout-minutes: 10
+    timeout-minutes: 25
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
         with:
           fetch-depth: 0
           ref: ${{ github.event_name == 'workflow_dispatch' && inputs.tag || github.ref }}
-      - uses: actions/setup-node@v7
+      - name: Wait for the exact main commit to pass test.yml
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          release_sha="$(git rev-parse HEAD)"
+          for attempt in {1..80}; do
+            response="$(gh api --method GET \
+              "repos/${GITHUB_REPOSITORY}/actions/workflows/test.yml/runs" \
+              -f branch=main -f event=push -f head_sha="${release_sha}" -f per_page=100)"
+            run="$(jq -c '.workflow_runs | sort_by(.created_at) | reverse | .[0] // empty' <<<"${response}")"
+            if [[ -n "${run}" ]]; then
+              status="$(jq -r '.status' <<<"${run}")"
+              conclusion="$(jq -r '.conclusion // "pending"' <<<"${run}")"
+              url="$(jq -r '.html_url' <<<"${run}")"
+              echo "test.yml for ${release_sha}: ${status}/${conclusion} (${url})"
+              if [[ "${status}" == "completed" ]]; then
+                if [[ "${conclusion}" == "success" ]]; then
+                  exit 0
+                fi
+                echo "::error::test.yml completed with ${conclusion} for ${release_sha}: ${url}"
+                exit 1
+              fi
+            else
+              echo "Waiting for a main push test.yml run for ${release_sha}"
+            fi
+            sleep 15
+          done
+          echo "::error::No successful main push test.yml run found for ${release_sha}"
+          exit 1
+
+  package:
+    name: verify release package
+    needs: main-checks
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          fetch-depth: 0
+          ref: ${{ github.event_name == 'workflow_dispatch' && inputs.tag || github.ref }}
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
           node-version: "24"
           cache: npm
@@ -50,7 +92,7 @@ jobs:
           git merge-base --is-ancestor "$(git rev-parse HEAD)" "origin/main"
       - name: Build and pack
         run: npm pack --pack-destination "$RUNNER_TEMP"
-      - uses: actions/upload-artifact@v7
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: npm-package
           path: ${{ runner.temp }}/*.tgz
@@ -66,11 +108,11 @@ jobs:
       contents: read
       id-token: write
     steps:
-      - uses: actions/download-artifact@v8
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
           name: npm-package
           path: package
-      - uses: actions/setup-node@v7
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
           node-version: "24"
           registry-url: https://registry.npmjs.org
