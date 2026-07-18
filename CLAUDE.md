@@ -23,6 +23,10 @@ Provider-neutral MCP server, CLI, and HTTPS gateway for messaging between AI age
 - `clients/*.json`: v1 host-adapter manifests and installation contracts
 - `sql/migrations/`: Ordered gateway schema migrations
 - `sql/setup.sql`: Legacy Supabase v1 schema
+- `Dockerfile`: Pinned, non-root gateway image
+- `compose.yaml`: Loopback-only PostgreSQL and gateway development stack
+- `deploy/bootstrap-runtime.sql`: Idempotent restricted runtime-login bootstrap
+- `scripts/compose-smoke.sh`: Disposable authenticated gateway and persistence proof
 - `docs/postmortems/2026-07-08-wrapper-source-drift.md`: Incident note for wrapper/source drift
 - `docs/decisions/0001-protocol-layers-and-acknowledgment-semantics.md`: Protocol boundary and acknowledgment semantics
 - `docs/decisions/0002-canonical-operation-contract-registry.md`: Canonical v2 contracts and version negotiation
@@ -30,6 +34,7 @@ Provider-neutral MCP server, CLI, and HTTPS gateway for messaging between AI age
 - `docs/architecture-v2.md`: Accepted v2 protocol, storage, security, delivery, and migration design
 - `docs/ecosystem.md`: Public product boundary and interoperability position
 - `docs/troubleshooting.md`: Public MCP and client recovery guide
+- `docs/deployment.md`: Development Compose setup and production deployment constraints
 - `ROADMAP.md`: Released, implemented, and remaining product work
 - `SECURITY.md`: Supported versions, vulnerability reporting, and security boundaries
 - `SKILL.md`: Runtime-neutral instructions for agents using the bridge
@@ -46,6 +51,7 @@ Provider-neutral MCP server, CLI, and HTTPS gateway for messaging between AI age
 - ADRs under `docs/decisions/` record durable protocol and architecture choices. `docs/architecture-v2.md` describes the resulting system.
 - `docs/ecosystem.md` explains how Agent Bridge fits with adjacent protocols, brokers, runtimes, and client interfaces.
 - `docs/troubleshooting.md` records public recovery procedures for MCP and supported clients.
+- `docs/deployment.md` records development deployment, production constraints, upgrade order, backup, and rollback.
 - `ROADMAP.md` separates released behavior, implementation awaiting release, and remaining work.
 - `SECURITY.md` records supported versions, private reporting, and public security boundaries.
 - `CHANGELOG.md` records released and pending behavior.
@@ -62,6 +68,7 @@ Sync triggers:
 | Protocol, storage, identity, or delivery decision changes | `docs/architecture-v2.md`, `CLAUDE.md`, `README.md` |
 | Product boundary or interoperability changes | `docs/ecosystem.md`, matching ADR, `README.md`, `CLAUDE.md` |
 | Client startup or recovery behavior changes | `docs/troubleshooting.md`, `README.md`, `SKILL.md`, `llms.txt` |
+| Gateway image, deployment, migration order, or network behavior changes | `docs/deployment.md`, `SECURITY.md`, `README.md`, `CHANGELOG.md` |
 | Roadmap item changes state | `ROADMAP.md`, `CHANGELOG.md` when released |
 | Security support or threat boundary changes | `SECURITY.md`, `README.md`, `docs/architecture-v2.md` when architectural |
 | Release version changes | `package.json`, `CHANGELOG.md`, `README.md` when compatibility changes |
@@ -80,6 +87,7 @@ Sync triggers:
 - Client installers write separate owner-only backend files. Gateway tokens are bound to one principal and never stored in the shared config.
 - Gateway credentials bind workspace and principal. Client source and workspace fields are not trusted.
 - Migrations use the schema-owner `AGENT_BRIDGE_DATABASE_URL`. The gateway requires a restricted `AGENT_BRIDGE_RUNTIME_DATABASE_URL` and never runs migrations at startup.
+- The checked-in Compose stack is a loopback-only development reference. Production gateways require TLS, private PostgreSQL networking, platform-managed secrets, verified native DR backups, and a one-shot migration gate before gateway rollout.
 - Message content and routing are immutable. Receipts, deliveries, delivery events, and presence use separate records.
 - History defaults to caller-relative inbox visibility. Sent is source-equal-to-caller, all is their union, and receipt state is caller-bound and inbox-only. Cursors bind identity, visibility, and normalized filters.
 - Project is an optional immutable message label. Workspace remains the tenant and credential boundary; omitted project reads all labels.

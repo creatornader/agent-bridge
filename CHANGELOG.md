@@ -6,6 +6,18 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and 
 
 ## [Unreleased]
 
+### Added
+
+- Add a pinned, non-root gateway image and a loopback-only Compose development stack.
+  The stack runs migrations separately, creates a restricted runtime login, reads
+  database passwords from private secret files, and retains PostgreSQL data in a named
+  volume.
+- Add a Linux Compose acceptance test for credential-bound identity, targeted delivery,
+  lease settlement, denied runtime access to credential hashes, and PostgreSQL
+  persistence across a full stack restart.
+- Add a deployment guide for production TLS, network isolation, secret handling,
+  backup, upgrade order, and rollback.
+
 ### Fixed
 
 - Treat a Windows SQLite sidecar that disappears during ACL validation as an expected

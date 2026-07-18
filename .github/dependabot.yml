@@ -1,12 +1,15 @@
 # Dependabot config for agent-bridge.
 #
-# Tracks two ecosystems:
-# 1. github-actions — weekly grouped PR for action version drift,
-#    matching the pattern across the rest of the OSS stack
-# 2. npm — Node.js package security updates (MCP server is an npm
-#    package; the bash CLI uses no npm deps directly)
+# Tracks Docker base images, GitHub Actions, npm packages, and pre-commit hooks.
 version: 2
 updates:
+  - package-ecosystem: "docker"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+    commit-message:
+      prefix: "deps"
+
   - package-ecosystem: "github-actions"
     directory: "/"
     schedule:
@@ -33,7 +36,7 @@ updates:
           - "patch"
 
   # pre-commit ecosystem (Layer 1 of the pin-drift fix, 2026-05-17).
-  # Tracks rev: fields in .pre-commit-config.yaml — primarily
+  # Tracks rev fields in .pre-commit-config.yaml, primarily
   # creatornader/textleaks + creatornader/oss-twin hooks. Without this,
   # internal tool releases don't auto-PR into consumer repos and pins
   # drift silently. Audit at: ~/.claude/scripts/oss-pin-audit.sh

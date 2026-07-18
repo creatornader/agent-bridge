@@ -1,0 +1,12 @@
+.git
+.github
+.secrets
+.atrib
+.claude
+dist
+node_modules
+thoughts
+docs/handoffs
+docs/superpowers
+*.log
+*.tgz

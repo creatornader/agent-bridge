@@ -1,0 +1,138 @@
+name: agent-bridge
+
+services:
+  postgres:
+    image: postgres:16@sha256:33f923b05f64ca54ac4401c01126a6b92afe839a0aa0a52bc5aeb5cc958e5f20
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: agent_bridge
+      POSTGRES_PASSWORD_FILE: /run/secrets/postgres_password
+      POSTGRES_USER: postgres
+    secrets:
+      - postgres_password
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    ports:
+      - "127.0.0.1:${AGENT_BRIDGE_POSTGRES_PORT:-54329}:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres -d agent_bridge"]
+      interval: 5s
+      timeout: 5s
+      retries: 12
+      start_period: 10s
+    networks:
+      - backend
+
+  migrate:
+    image: agent-bridge-gateway:${AGENT_BRIDGE_IMAGE_TAG:-local}
+    user: "0:0"
+    restart: "no"
+    depends_on:
+      postgres:
+        condition: service_healthy
+    entrypoint: ["node", "/usr/local/lib/agent-bridge-secret-entrypoint.mjs"]
+    command: ["postgres_password", "/app/dist/gateway-main.js", "--migrate-only"]
+    environment:
+      AGENT_BRIDGE_DATABASE_URL: postgresql://postgres@postgres:5432/agent_bridge
+      PGUSER: postgres
+    secrets:
+      - postgres_password
+    read_only: true
+    tmpfs:
+      - /tmp:size=16m,mode=1777
+    cap_drop:
+      - ALL
+    cap_add:
+      - DAC_OVERRIDE
+      - SETGID
+      - SETUID
+    security_opt:
+      - no-new-privileges:true
+    networks:
+      - backend
+
+  bootstrap-runtime:
+    image: postgres:16@sha256:33f923b05f64ca54ac4401c01126a6b92afe839a0aa0a52bc5aeb5cc958e5f20
+    user: "0:0"
+    restart: "no"
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+    entrypoint: ["/bin/sh", "-ec"]
+    command:
+      - |
+        export PGPASSWORD="$$(cat /run/secrets/postgres_password)"
+        export AGENT_BRIDGE_RUNTIME_PASSWORD="$$(cat /run/secrets/runtime_password)"
+        exec gosu postgres psql --no-psqlrc --set ON_ERROR_STOP=1 --file /opt/agent-bridge/bootstrap-runtime.sql
+    environment:
+      AGENT_BRIDGE_RUNTIME_LOGIN: agent_bridge_gateway
+      PGDATABASE: agent_bridge
+      PGHOST: postgres
+      PGUSER: postgres
+    secrets:
+      - postgres_password
+      - runtime_password
+    volumes:
+      - ./deploy/bootstrap-runtime.sql:/opt/agent-bridge/bootstrap-runtime.sql:ro
+    read_only: true
+    tmpfs:
+      - /tmp:size=16m,mode=1777
+    cap_drop:
+      - ALL
+    cap_add:
+      - DAC_OVERRIDE
+      - SETGID
+      - SETUID
+    security_opt:
+      - no-new-privileges:true
+    networks:
+      - backend
+
+  gateway:
+    build:
+      context: .
+      target: runtime
+    image: agent-bridge-gateway:${AGENT_BRIDGE_IMAGE_TAG:-local}
+    user: "0:0"
+    restart: unless-stopped
+    init: true
+    depends_on:
+      bootstrap-runtime:
+        condition: service_completed_successfully
+    entrypoint: ["node", "/usr/local/lib/agent-bridge-secret-entrypoint.mjs"]
+    command: ["runtime_password", "/app/dist/gateway-main.js"]
+    environment:
+      AGENT_BRIDGE_HOST: 0.0.0.0
+      AGENT_BRIDGE_PORT: "8787"
+      AGENT_BRIDGE_RUNTIME_DATABASE_URL: postgresql://postgres:5432/agent_bridge
+      PGUSER: agent_bridge_gateway
+    secrets:
+      - runtime_password
+    ports:
+      - "127.0.0.1:${AGENT_BRIDGE_PORT:-8787}:8787"
+    read_only: true
+    tmpfs:
+      - /tmp:size=16m,mode=1777
+    cap_drop:
+      - ALL
+    cap_add:
+      - DAC_OVERRIDE
+      - SETGID
+      - SETUID
+    security_opt:
+      - no-new-privileges:true
+    stop_grace_period: 30s
+    networks:
+      - backend
+
+secrets:
+  postgres_password:
+    file: ${AGENT_BRIDGE_POSTGRES_PASSWORD_FILE:-./.secrets/postgres_password}
+  runtime_password:
+    file: ${AGENT_BRIDGE_RUNTIME_PASSWORD_FILE:-./.secrets/runtime_password}
+
+volumes:
+  postgres_data:
+
+networks:
+  backend: {}

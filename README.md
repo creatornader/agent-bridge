@@ -43,6 +43,26 @@ Restart the client, then run `agent-bridge doctor --json` if the MCP server does
 attach. The [troubleshooting guide](docs/troubleshooting.md) covers executable paths,
 client configuration, and recovery steps.
 
+## Run the gateway with Compose
+
+The repository includes a loopback-only Compose stack for development and evaluation.
+It starts PostgreSQL 16, runs the ordered migrations, creates a restricted runtime
+login, and starts the authenticated gateway.
+
+```bash
+mkdir -m 700 .secrets
+node -e "process.stdout.write(require('node:crypto').randomBytes(32).toString('hex'))" > .secrets/postgres_password
+node -e "process.stdout.write(require('node:crypto').randomBytes(32).toString('hex'))" > .secrets/runtime_password
+chmod 600 .secrets/*
+docker compose up --build --wait gateway
+curl --fail http://127.0.0.1:8787/readyz
+```
+
+The checked-in stack publishes the gateway and PostgreSQL only on loopback. It is not
+a production TLS deployment. Read [the deployment guide](docs/deployment.md) before
+exposing a gateway, changing network bindings, upgrading the schema, or relying on the
+named volume for persistent data.
+
 ## What v2 provides
 
 - Immutable messages with UUIDv7 IDs and opaque server cursors.
@@ -840,6 +860,7 @@ durability behavior has not yet been proved on a dedicated Windows host.
 - [SECURITY.md](SECURITY.md): supported versions, release integrity, private vulnerability reporting, and security boundaries.
 - [docs/ecosystem.md](docs/ecosystem.md): product boundary, adjacent systems, and interoperability direction.
 - [docs/troubleshooting.md](docs/troubleshooting.md): MCP startup, identity, backend, and client recovery.
+- [docs/deployment.md](docs/deployment.md): Compose development setup, production constraints, upgrades, backup, and rollback.
 - [ADR-0001](docs/decisions/0001-protocol-layers-and-acknowledgment-semantics.md): protocol layers and acknowledgment semantics.
 - [ADR-0002](docs/decisions/0002-canonical-operation-contract-registry.md): canonical contracts, generated artifacts, discovery, and version negotiation.
 - [ADR-0003](docs/decisions/0003-host-adapters-and-consumer-instance-keys.md): host layers and consumer instance-key semantics.

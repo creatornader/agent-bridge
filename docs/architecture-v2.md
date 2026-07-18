@@ -31,6 +31,26 @@ A standalone Agent Bridge API sits between remote clients and PostgreSQL. Client
 
 Supabase can still host the database. Existing direct PostgREST deployments remain available through an explicitly named legacy adapter while they migrate.
 
+### Deployment separates schema and request authority
+
+The schema-owner connection runs migrations as an explicit one-shot operation. A
+separate bootstrap step creates or updates a restricted runtime login and grants only
+the database-derived runtime role. The gateway starts only after both steps succeed and
+receives no schema-owner authority. Its readiness check fails on an incomplete
+migration plan, unsupported PostgreSQL major, row-isolation drift, protected catalog
+drift, or an invalid owner-control membership graph.
+
+The repository Compose stack publishes the gateway and PostgreSQL on loopback for
+development. Production deployments put PostgreSQL on a private network, terminate TLS
+before every non-loopback gateway, and source credentials from the platform's secret
+manager. A persistent volume is runtime storage, not a backup.
+
+Upgrade order is database backup, migration, runtime bootstrap, readiness, then client
+or gateway rollout. Because an older image may reject the newer migration plan, schema
+rollback cannot rely on starting the previous container image. Operators apply a
+forward fix or restore a verified native DR bundle into a fresh target before switching
+authority. [The deployment guide](deployment.md) records the operational procedure.
+
 ### SQLite is local storage
 
 SQLite WAL provides local-only operation, a durable outbox, an inbox cache, cursor state, and a cheap pending-work check. Outbox writes use `synchronous=FULL`. It is not the canonical multi-machine database.
