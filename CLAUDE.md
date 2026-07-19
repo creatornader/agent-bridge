@@ -27,6 +27,7 @@ Provider-neutral MCP server, CLI, and HTTPS gateway for messaging between AI age
 - `compose.yaml`: Loopback-only PostgreSQL and gateway development stack
 - `deploy/bootstrap-runtime.sql`: Idempotent restricted runtime-login bootstrap
 - `scripts/compose-smoke.sh`: Disposable authenticated gateway and persistence proof
+- `scripts/postgres-preflight.mjs`: Disposable local PostgreSQL 15-18 contract runner
 - `docs/postmortems/2026-07-08-wrapper-source-drift.md`: Incident note for wrapper/source drift
 - `docs/decisions/0001-protocol-layers-and-acknowledgment-semantics.md`: Protocol boundary and acknowledgment semantics
 - `docs/decisions/0002-canonical-operation-contract-registry.md`: Canonical v2 contracts and version negotiation

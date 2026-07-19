@@ -1003,14 +1003,27 @@ The runtime role owns no schema objects. PostgreSQL keeps roles after a database
 ```bash
 npm run typecheck
 npm test
+npm run test:postgres:preflight
 npm run build
 npm pack
 ```
 
-Set `AGENT_BRIDGE_TEST_DATABASE_URL` to run the live PostgreSQL contract and migration
-tests. CI runs Node 22 and 24 on Linux, macOS, and Windows. PostgreSQL 15 through 18 each
-pack and install the npm tarball, register a least-privilege operator, and exercise
-owner provision, inventory, rotation, and revocation. Before applying a Windows DACL,
+The PostgreSQL preflight starts a fresh Docker container for each supported major,
+assigns a free loopback port, and runs the live contract. Normal completion removes
+each container. A later run removes labeled preflight containers older than two hours,
+which bounds residue after a process or machine stops before cleanup can run. Use
+`npm run test:postgres:preflight -- --major 16` for one major, or
+`npm run test:postgres:preflight:full` for the full suite on every major. The command
+requires a running Docker engine and never reuses a database from an earlier run.
+
+Set `AGENT_BRIDGE_TEST_DATABASE_URL` when an existing disposable PostgreSQL database is
+more convenient. CI runs one PostgreSQL 16 contract before starting the 15 through 18
+jobs. Each version then runs the live contract and matching native DR proof. The package
+job builds and installs the npm tarball separately.
+
+CI runs Node 22 and 24 on Linux, macOS, and Windows. One native Windows contract checks
+private paths, managed uninstall path identity, and recovery before the two Windows jobs
+start. Before applying a Windows DACL,
 private paths must be owned by the current account SID or the active token's default
 owner SID. The final owner and sole protected FullControl rule must use the account SID.
 Verification-only paths must already satisfy that final policy. Node file identity
