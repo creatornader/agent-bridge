@@ -21,6 +21,7 @@ import {
   type PostgresDrClient,
   type PostgresNativeDrArtifactAnchor,
   type PostgresNativeDrDependencies,
+  validatePostgresDumpToc,
   validatePostgresRoleInventory,
   verifyPostgresNativeDrArtifacts,
 } from "../src/postgres-native-dr.js";
@@ -156,6 +157,26 @@ describe("PostgreSQL native DR process boundary", () => {
   it("requires an exact supported PostgreSQL tool major", () => {
     expect(parsePostgresToolMajor("pg_dump (PostgreSQL) 17.5")).toBe(17);
     expect(() => parsePostgresToolMajor("not postgres")).toThrow(/version/);
+  });
+
+  it("accepts tab-separated PostgreSQL TOC fields", () => {
+    expect(() => validatePostgresDumpToc(
+      "1;\t2615\t1\tSCHEMA - agent_bridge owner\n",
+    )).not.toThrow();
+  });
+
+  it("rejects adversarial TOC records with long numeric prefixes", () => {
+    const record = `${"9".repeat(2 * 1024 * 1024)}; 2615 1`;
+    expect(() => validatePostgresDumpToc(record)).toThrowError(expect.objectContaining({
+      code: "PG_DUMP_TOC_INVALID",
+    }));
+  });
+
+  it("rejects adversarial TOC records with long separators", () => {
+    const record = `1; ${" ".repeat(2 * 1024 * 1024)}x`;
+    expect(() => validatePostgresDumpToc(record)).toThrowError(expect.objectContaining({
+      code: "PG_DUMP_TOC_INVALID",
+    }));
   });
 });
 
