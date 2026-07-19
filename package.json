@@ -87,13 +87,17 @@
     "pretest": "npm run build",
     "test": "vitest run",
     "test:built": "vitest run",
+    "test:postgres:contract": "vitest run test/postgres_integration.test.ts --maxWorkers=1 --hookTimeout=60000",
+    "test:postgres:preflight": "node scripts/postgres-preflight.mjs",
+    "test:postgres:preflight:full": "node scripts/postgres-preflight.mjs --full",
+    "test:windows:contract": "vitest run test/private-path.test.ts test/windows-native-smoke.test.ts test/client-maintenance.test.ts --maxWorkers=1 --testTimeout=180000",
     "typecheck": "tsc --noEmit",
     "contracts:generate": "npm run build --silent && npm run contracts:generate:built",
     "contracts:generate:built": "node dist/contracts/generate.js",
     "contracts:check": "npm run build --silent && npm run contracts:check:built",
     "contracts:check:built": "node dist/contracts/generate.js --check",
     "check": "npm run typecheck && npm run build && npm run contracts:check:built && npm run test:built",
-    "check:windows": "npm run typecheck && npm run build && npm run contracts:check:built && vitest run --maxWorkers=2 --testTimeout=90000 --exclude test/private-path.test.ts --exclude test/cli.test.ts"
+    "check:windows": "npm run typecheck && npm run build && npm run contracts:check:built && vitest run --maxWorkers=2 --testTimeout=90000 --exclude test/private-path.test.ts --exclude test/windows-native-smoke.test.ts --exclude test/client-maintenance.test.ts --exclude test/cli.test.ts"
   },
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.12.1",
