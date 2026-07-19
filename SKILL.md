@@ -74,7 +74,25 @@ ordered steps use no-replace before and verified after artifacts. Treat corrupt,
 cross-host, or ambiguous state as a stop condition. Cleanup is restartable per artifact
 and `committed` means verified writes plus removed artifacts. The terminal manifest
 keeps a credential-free completion record but no request, step, digest, locator, or
-artifact metadata. No public repair, update, uninstall, or migration command is available.
+artifact metadata.
+
+For a managed registration, use `clients repair <runtime> --identity <name> --instance
+<key>` to preview its recorded launch contract and backend privacy repair. Add `--apply`
+only after reviewing the plan. Use `clients update` with the same metadata-selected
+runtime and instance to validate a replacement launch contract. The same identity must
+match the stored metadata and the immutable request. Native commands are one executable
+contract. Do not pass arguments, URLs, or credential selectors in `--command`. Repair and update reject
+`--backend-config`, `--scope`, and `--config-path`; `--identity` is an assertion, not a
+locator. A no-op exact registration creates no journal. Native updates remove, prove
+absence, add, and prove the target before metadata changes. Desktop updates replace only
+the Agent Bridge entry and retain unrelated JSON values in memory. It publishes through
+a private operation-scoped temporary file. A concurrent same-user Desktop writer can
+still race this advisory single-file update because Node cannot provide an OS transaction.
+
+Resume with the same action, runtime, instance, and identity: `--apply --resume <uuid>`.
+The stored request controls resume. Do not supply a new command unless it exactly matches
+the recorded update request. `--recover-lock` also requires `--apply`; it only recovers a
+stale same-host lock after process-death proof. Never remove operation locks by hand.
 
 Portable archive work is an offline operator task, not normal MCP traffic. Use
 `agent-bridge archive export --provider local|postgres --workspace <workspace>

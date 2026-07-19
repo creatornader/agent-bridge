@@ -1,5 +1,5 @@
 import { createHash, randomUUID } from "node:crypto";
-import { existsSync, fstatSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { existsSync, fstatSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -86,7 +86,7 @@ describe("agent-bridge CLI", () => {
     const home = mkdtempSync(join(tmpdir(), "agent-bridge-cli-operations-")); homes.push(home);
     const result = runAt(home, ["clients", "operations"]);
     expect(result.status).toBe(0);
-    expect(JSON.parse(result.stdout)).toEqual({ schemaVersion: 2, operations: [] });
+    expect(JSON.parse(result.stdout)).toEqual({ schemaVersion: 3, operations: [] });
     expect(result.stderr).toBe("");
     expect(existsSync(join(home, ".agent-bridge", "operations"))).toBe(false);
 
@@ -97,7 +97,23 @@ describe("agent-bridge CLI", () => {
 
     const undocumentedAlias = runAt(home, ["clients", "operation"]);
     expect(undocumentedAlias.status).toBe(1);
-    expect(undocumentedAlias.stderr).toContain("clients <install|inspect|adopt>");
+    expect(undocumentedAlias.stderr).toContain("clients <install|inspect|adopt|repair|update>");
+  });
+
+  it("rejects caller authority flags for managed repair and update", () => {
+    const repair = run([
+      "clients", "repair", "codex", "--identity", "codex", "--instance", "stable",
+      "--backend-config", "/tmp/forbidden",
+    ]);
+    expect(repair.status).toBe(1);
+    expect(repair.stderr).toContain("--backend-config is not valid for clients repair");
+
+    const update = run([
+      "clients", "update", "claude-code", "--identity", "claude", "--instance", "stable",
+      "--scope", "project",
+    ]);
+    expect(update.status).toBe(1);
+    expect(update.stderr).toContain("--scope is not valid for clients update");
   });
 
   it("exports, verifies, dry-runs, and applies a local portable archive", () => {
@@ -505,7 +521,7 @@ describe("agent-bridge CLI", () => {
     expect(extra.stderr).toContain("usage: agent-bridge clients install");
   });
   it("inspects and plan-first adopts an exact Claude Desktop registration", () => {
-    const home = mkdtempSync(join(tmpdir(), "agent-bridge-cli-lifecycle-")); homes.push(home);
+    const home = realpathSync(mkdtempSync(join(tmpdir(), "agent-bridge-cli-lifecycle-"))); homes.push(home);
     securePrivatePath(home, "directory");
     const backendConfigPath = join(home, ".agent-bridge", "clients", "desktop-existing.config");
     const configPath = join(home, "claude-desktop.json");

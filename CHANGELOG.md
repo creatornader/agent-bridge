@@ -8,6 +8,25 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and 
 
 ### Added
 
+- Add plan-first `clients repair` and `clients update` for metadata-owned Codex,
+  Claude Code, and Claude Desktop registrations. Runtime and stable instance locate
+  strict owner-private metadata. Identity binds the record and immutable repair or
+  update request. Repair restores the stored launch contract, while update journals a
+  normalized credential-free launch request.
+  Applied native changes prove remove, absence, add, and exact target before a
+  metadata-last launch update. Desktop replaces only the Agent Bridge entry and
+  preserves unrelated JSON values. Backend privacy repair records only policy proofs
+  and tightens permissions without reading or snapshotting backend content. Full
+  metadata and bounded registration proofs prevent drifted state from advancing a
+  prior journal. Unknown environment keys and unsafe registration fields stop before
+  journal creation. Native update commands reject argument, credential, and URL-like
+  surfaces. Desktop publication uses a private operation-scoped temporary file and
+  detects the checked races that Node can observe, but it cannot provide an OS
+  transaction with Claude Desktop. Same-action same-host resume and stale-lock recovery
+  use the existing operation substrate.
+  New journals use operation format version 3. Version 2 journals remain inspectable,
+  but incomplete records cannot resume without an identity-bound request.
+
 - Give local and edge SQLite initialization a 15-second minimum busy-retry window
   for concurrent first-start schema work. Normal database operations retain their
   configured timeout. Concurrency tests also terminate hung child processes before
@@ -30,7 +49,7 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and 
   retain a bounded credential-free completion record. Windows mutations reuse native
   ACL results only within one held lock and for the same verified directory path
   identity. File checks, new or resumed locks, and passive inspection recheck the
-  policy. POSIX checks remain per-access. Public mutators remain unavailable.
+  policy. POSIX checks remain per-access. Repair and update use this substrate.
 
 - Add read-only `clients inspect` and plan-first `clients adopt` for Codex, Claude
   Code, and Claude Desktop. Exact unmanaged registrations can be adopted only with

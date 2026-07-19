@@ -1,11 +1,11 @@
 import {
-  chmodSync, existsSync, mkdtempSync, mkdirSync, readFileSync, renameSync, rmSync,
+  chmodSync, existsSync, mkdtempSync, mkdirSync, readFileSync, realpathSync, renameSync, rmSync,
   statSync, symlinkSync, writeFileSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
-import { adoptClient, inspectClient } from "../src/client-lifecycle.js";
+import { adoptClient, inspectClient, managedClientMetadataPath } from "../src/client-lifecycle.js";
 import { resolveDesktopLaunchContract } from "../src/client-installer.js";
 import { securePrivatePath } from "../src/private-path.js";
 
@@ -203,6 +203,22 @@ describe("client lifecycle", () => {
     }, execute)).toThrow("only an exact unmanaged registration can be adopted");
   });
 
+  it("rejects unknown Codex transport fields before adoption", () => {
+    const { home, backendConfigPath } = fixture();
+    const registration = JSON.parse(codexRegistration("codex-work", "codex-existing", backendConfigPath));
+    registration.transport.headers = { Authorization: "credential-sentinel" };
+    const execute = () => ({
+      pid: 1, output: [], stdout: JSON.stringify(registration), stderr: "", status: 0, signal: null,
+    });
+    expect(inspectClient("codex", "codex-work", {
+      instance: "codex-existing", backendConfigPath, env: { HOME: home },
+    }, execute)).toMatchObject({ state: "drifted", managed: false, exact: false });
+    expect(() => adoptClient("codex", "codex-work", {
+      instance: "codex-existing", backendConfigPath, apply: true, env: { HOME: home },
+    }, execute)).toThrow("only an exact unmanaged registration can be adopted");
+    expect(existsSync(managedClientMetadataPath("codex", "codex-existing", { HOME: home }))).toBe(false);
+  });
+
   it("records the requested Claude Code scope and rejects another scope", () => {
     const { home, backendConfigPath } = fixture("claude-code");
     const execute = () => ({
@@ -317,7 +333,7 @@ describe("client lifecycle", () => {
     const executable = join(home, "agent-bridge-mcp");
     writeFileSync(executable, "#!/bin/sh\n");
     if (process.platform !== "win32") chmodSync(executable, 0o755);
-    const configPath = join(home, "desktop.json");
+    const configPath = join(realpathSync(home), "desktop.json");
     writeFileSync(configPath, JSON.stringify({ mcpServers: { "agent-bridge": {
       command: executable,
       args: [],
@@ -341,7 +357,7 @@ describe("client lifecycle", () => {
   it("uses the installer's default Desktop launch contract and rejects invalid launchers", () => {
     const { home, backendConfigPath } = fixture("claude-code");
     const launch = resolveDesktopLaunchContract(undefined, { HOME: home });
-    const configPath = join(home, "desktop-default.json");
+    const configPath = join(realpathSync(home), "desktop-default.json");
     writeFileSync(configPath, JSON.stringify({ mcpServers: { "agent-bridge": {
       command: launch.command, args: launch.args,
       env: { AGENT_BRIDGE_AGENT: "desktop-work", AGENT_BRIDGE_INSTANCE: "desktop-existing", AGENT_BRIDGE_CONFIG: backendConfigPath },
@@ -360,7 +376,7 @@ describe("client lifecycle", () => {
     const executable = join(home, "agent-bridge-mcp");
     writeFileSync(executable, "#!/bin/sh\n");
     if (process.platform !== "win32") chmodSync(executable, 0o755);
-    const configPath = join(home, "desktop-stable.json");
+    const configPath = join(realpathSync(home), "desktop-stable.json");
     writeFileSync(configPath, JSON.stringify({ mcpServers: { "agent-bridge": {
       command: executable, args: [],
       env: { AGENT_BRIDGE_AGENT: "desktop-work", AGENT_BRIDGE_INSTANCE: "desktop-existing", AGENT_BRIDGE_CONFIG: backendConfigPath },
@@ -388,8 +404,8 @@ describe("client lifecycle", () => {
     const executable = join(home, "agent-bridge-mcp");
     writeFileSync(executable, "#!/bin/sh\n");
     if (process.platform !== "win32") chmodSync(executable, 0o755);
-    const adoptedConfigPath = join(home, "desktop-adopted.json");
-    const otherConfigPath = join(home, "desktop-other.json");
+    const adoptedConfigPath = join(realpathSync(home), "desktop-adopted.json");
+    const otherConfigPath = join(realpathSync(home), "desktop-other.json");
     const registration = {
       command: executable,
       args: [],

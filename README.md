@@ -436,23 +436,62 @@ use. Backend files and their immediate parents must satisfy the owner-only no-li
 policy. Registration state is independent of connectivity health, and applied
 adoption re-inspects before reporting success.
 
+Once adopted, repair and update locate the registration from owner-private managed
+metadata. The runtime and stable instance select that record. `--identity` must match
+the recorded identity and the immutable repair or update request. These commands reject backend-path, scope, and host
+config locator flags, so a caller cannot redirect a managed mutation.
+
+```bash
+agent-bridge clients repair codex --identity codex --instance <stable-key>
+agent-bridge clients repair codex --identity codex --instance <stable-key> --apply
+agent-bridge clients update codex --identity codex --instance <stable-key> \
+  --command agent-bridge-mcp --apply
+agent-bridge clients repair codex --identity codex --instance <stable-key> \
+  --apply --resume <operation-uuid>
+```
+
+Both commands return a plan by default. A managed registration that is already exact
+and has a private backend file produces no operation. Repair restores the recorded
+launch contract. Update validates and records a new credential-free launch contract
+before it creates a journal. A native `--command` is one executable contract. Bare
+commands cannot contain arguments or URL-like selectors. Absolute paths must resolve
+to executable files. Native adapters remove, verify absence, add, and verify
+the target registration. Claude Desktop replaces only `mcpServers.agent-bridge`,
+preserves unrelated JSON values in memory, publishes through a private operation-scoped
+temporary file, and verifies the new entry. Node cannot provide an OS transaction with
+an uncooperative same-user Desktop writer. The pre-rename identity checks make this an
+advisory race boundary rather than a guarantee.
+
+`--resume` must name an unfinished operation for the same action, runtime, instance,
+and identity. It uses the recorded request instead of new flags. `--recover-lock`
+requires `--apply` and only removes an old same-host lock after the process-death
+proof succeeds. Never delete a lock manually.
+
+New repair and update journals use operation format version 3. Existing version 2
+journals remain inspectable. A non-terminal version 2 journal lacks the required
+identity-bound request, so it is blocked rather than resumed by these commands.
+
 Managed-client operations now have a crash-safe local substrate under the owner-only
 `~/.agent-bridge/operations/` directory. `agent-bridge clients operations` lists safe
 operation summaries, and appending an operation UUID inspects one manifest. Output
-never includes artifact contents or backend values. Typed requests reject URL query
-strings, fragments, user information, and unsafe release selectors before they reach
-the journal. Each immutable ordered plan names
+never includes artifact contents or backend values. Update requests retain only a
+normalized launch command, arguments, scope, and the fixed Agent Bridge environment
+key names. Each immutable ordered plan names
 registration, backend, and management-metadata targets with non-sensitive locators,
-no-replace before and after artifacts, and expected digests. Begin holds the
+no-replace before and after artifacts, and expected digests. Registration artifacts
+contain only bounded Agent Bridge fields and the full nonsecret target contract. An
+unknown environment key, malformed field, unsafe argument, or wrong scope stops before
+the journal is created. Begin holds the
 runtime-plus-instance lock and refuses another unfinished operation. Any corrupt or
-blocked journal fences new mutations until an operator resolves it. Resume is
+blocked journal fences new mutations and resume until an operator resolves it. Resume is
 same-host only. Intent is durable before an
 external write; observed-applied is durable only after the after-state is verified.
 On restart, the exact pending step is retryable only at its before-state, advances only
 at its after-state, and otherwise blocks as ambiguous. Sensitive file access checks and
 pins its immediate directory. Stale-lock recovery separately pins the operation root
 and locks directory for the full recovery sequence. Creation and destructive cleanup
-also keep the operation root and target directories pinned through their writes.
+also keep the operation root and target directories pinned through their writes. The
+full metadata record is rechecked after the lock and before every non-metadata step.
 
 On Windows, a held mutation lock can reuse a native ACL result only for the same
 directory path identity. File checks, every new or resumed lock, and each passive
@@ -470,8 +509,8 @@ residues: that authorized absence, or the verified after artifact for the curren
 intent-recorded step. A terminal manifest removes request, step, digest, locator, and
 artifact metadata but retains the operation kind, step count, completion time, and
 cleanup durability as a credential-free audit record. Completed records remain readable
-across hosts. No public repair, update, uninstall, or endpoint
-migration command is added here. Agent Bridge cannot promise physical erasure
+across hosts. Repair and update use this journal. Uninstall and endpoint migration
+remain unavailable. Agent Bridge cannot promise physical erasure
 on SSDs or journaled filesystems, so future commands must minimize credential-bearing
 snapshots and rotate credentials when retained copies contained them. Inspection
 changes no registration, backend, metadata, or snapshot file.
