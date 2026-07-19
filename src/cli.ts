@@ -15,7 +15,9 @@ import { BridgeHttpError } from "./http-bridge-store.js";
 import { LegacySupabaseError } from "./legacy-supabase-store.js";
 import { installClient, type InstallableRuntime } from "./client-installer.js";
 import { adoptClient, inspectClient } from "./client-lifecycle.js";
-import { repairManagedClient, updateManagedClient } from "./client-maintenance.js";
+import {
+  repairManagedClient, resumeManagedClientOperation, uninstallManagedClient, updateManagedClient,
+} from "./client-maintenance.js";
 import { inspectClientOperation, listClientOperations } from "./client-operation.js";
 import { capabilityDocument, operationForCli, parseCliResponse, validateRequest } from "./contracts/registry.js";
 import { runOwnerCommand, type OwnerOptions } from "./owner-control.js";
@@ -157,7 +159,7 @@ function packageVersion(): string {
   if (typeof manifest.version !== "string" || !manifest.version) throw new Error("package version is unavailable");
   return manifest.version;
 }
-function help(): void { process.stdout.write(`agent-bridge: provider-neutral agent messaging\n\nCommands:\n  init, doctor, status, capabilities, pending, migrate, reconcile-legacy-projects, sync, demo, join, presence\n  send (post), inbox (get), sent, history, acknowledge, claim, extend, ack, nack, watch\n  deliveries, dead-letters, delivery-events, cancel, requeue\n  owner <provision|inventory|rotate|revoke>\n  archive <export|verify|import>\n  dr <backup|verify|restore>\n  clients install <codex|claude-code|claude-desktop> --identity <name>\n  clients inspect <codex|claude-code|claude-desktop> --identity <name> --instance <key> --backend-config <path>\n  clients adopt <codex|claude-code|claude-desktop> --identity <name> --instance <key> --backend-config <path> [--apply]\n  clients repair <codex|claude-code|claude-desktop> --identity <name> --instance <key> [--apply] [--resume <uuid>] [--recover-lock]\n  clients update <codex|claude-code|claude-desktop> --identity <name> --instance <key> [--command <command>] [--apply] [--resume <uuid>] [--recover-lock]\n  clients operations [<operation-id>]\n\nOptions:\n  -V, --version  Print the installed package version\n  -h, --help     Show this help\n`); }
+function help(): void { process.stdout.write(`agent-bridge: provider-neutral agent messaging\n\nCommands:\n  init, doctor, status, capabilities, pending, migrate, reconcile-legacy-projects, sync, demo, join, presence\n  send (post), inbox (get), sent, history, acknowledge, claim, extend, ack, nack, watch\n  deliveries, dead-letters, delivery-events, cancel, requeue\n  owner <provision|inventory|rotate|revoke>\n  archive <export|verify|import>\n  dr <backup|verify|restore>\n  clients install <codex|claude-code|claude-desktop> --identity <name>\n  clients inspect <codex|claude-code|claude-desktop> --identity <name> --instance <key> --backend-config <path>\n  clients adopt <codex|claude-code|claude-desktop> --identity <name> --instance <key> --backend-config <path> [--apply]\n  clients repair <codex|claude-code|claude-desktop> --identity <name> --instance <key> [--apply] [--resume <uuid>] [--recover-lock]\n  clients update <codex|claude-code|claude-desktop> --identity <name> --instance <key> [--command <command>] [--apply] [--resume <uuid>] [--recover-lock]\n  clients uninstall <codex|claude-code|claude-desktop> --identity <name> --instance <key> [--apply] [--resume <uuid>] [--recover-lock]\n  clients resume <operation-id> [--recover-lock]\n  clients operations [<operation-id>]\n\nOptions:\n  -V, --version  Print the installed package version\n  -h, --help     Show this help\n`); }
 function rejectUnknownOptions(options: Options): void {
   const unknown = Object.keys(options).filter((key) => !SUPPORTED_OPTIONS.has(key));
   if (unknown.length) throw new Error(`unknown option: --${unknown[0]}`);
@@ -367,10 +369,20 @@ export async function runCli(argv = process.argv.slice(2)): Promise<void> {
       });
       return;
     }
-    if (positionals.length !== 2 || !["install", "inspect", "adopt", "repair", "update"].includes(action ?? "") || !positionals[1]) {
+    if (action === "resume") {
+      rejectOptionsOutside(options, new Set(["recover-lock"]), "clients resume");
+      if (positionals.length !== 2 || !positionals[1]) {
+        throw new Error("usage: agent-bridge clients resume <operation-id> [--recover-lock]");
+      }
+      output(resumeManagedClientOperation({
+        operationId: positionals[1], recoverLock: boolean(options, "recover-lock"), env: process.env,
+      }));
+      return;
+    }
+    if (positionals.length !== 2 || !["install", "inspect", "adopt", "repair", "update", "uninstall"].includes(action ?? "") || !positionals[1]) {
       throw new Error(action === "install"
         ? "usage: agent-bridge clients install <runtime> --identity <name>"
-        : "usage: agent-bridge clients <install|inspect|adopt|repair|update> <runtime>");
+        : "usage: agent-bridge clients <install|inspect|adopt|repair|update|uninstall> <runtime>");
     }
     const runtime = positionals[1] as InstallableRuntime | undefined;
     if (runtime && !["codex", "claude-code", "claude-desktop"].includes(runtime)) {
@@ -380,12 +392,12 @@ export async function runCli(argv = process.argv.slice(2)): Promise<void> {
     if (scope && !["local", "user", "project"].includes(scope)) {
       throw new Error("--scope must be local, user, or project");
     }
-    if (action === "repair" || action === "update") {
+    if (action === "repair" || action === "update" || action === "uninstall") {
       rejectOptionsOutside(options, new Set([
         "identity", "instance", "command", "apply", "resume", "recover-lock",
       ]), `clients ${action}`);
-      if (action === "repair" && options.command !== undefined) {
-        throw new Error("--command is not valid for clients repair");
+      if (action !== "update" && options.command !== undefined) {
+        throw new Error(`--command is not valid for clients ${action}`);
       }
       if (!boolean(options, "apply") && (options.resume !== undefined || options["recover-lock"] !== undefined)) {
         throw new Error("--resume and --recover-lock require --apply");
@@ -397,7 +409,9 @@ export async function runCli(argv = process.argv.slice(2)): Promise<void> {
       };
       output(action === "repair"
         ? repairManagedClient(maintenance)
-        : updateManagedClient(maintenance));
+        : action === "update"
+          ? updateManagedClient(maintenance)
+          : uninstallManagedClient(maintenance));
       return;
     }
     if (action === "inspect" || action === "adopt") {

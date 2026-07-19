@@ -1,9 +1,9 @@
 import {
   closeSync, constants, existsSync, fchmodSync, fstatSync, fsyncSync, lstatSync, mkdirSync, openSync,
-  readFileSync, renameSync, rmSync, writeFileSync,
+  readFileSync, renameSync, rmSync, unlinkSync, writeFileSync,
 } from "node:fs";
 import { createHash } from "node:crypto";
-import { dirname, isAbsolute, join } from "node:path";
+import { dirname, isAbsolute, join, resolve } from "node:path";
 import { spawnSync } from "node:child_process";
 import { isDeepStrictEqual } from "node:util";
 import {
@@ -26,13 +26,30 @@ import { securePrivatePath, verifyPrivatePathAccess } from "./private-path.js";
 const MAX_DESKTOP_CONFIG_BYTES = 4 * 1024 * 1024;
 
 type BackendState = "private" | "repairable";
-type PlannedKind = "backend" | "native-remove" | "native-add" | "desktop-replace" | "metadata";
+type PlannedKind = "backend" | "backend-delete" | "native-remove" | "native-add"
+  | "desktop-replace" | "desktop-remove" | "metadata" | "metadata-delete";
 
 interface BackendProof {
   role: "backend";
   file: { device: number; inode: number };
   parent: { device: number; inode: number };
   state: BackendState;
+}
+
+interface BackendAbsentProof {
+  role: "backend";
+  parent: { device: number; inode: number };
+  state: "absent";
+  directoryDurability: "durable" | "unavailable";
+}
+
+interface MetadataAbsentProof {
+  role: "metadata";
+  runtime: InstallableRuntime;
+  instance: string;
+  parent: { device: number; inode: number };
+  state: "absent";
+  directoryDurability: "durable" | "unavailable";
 }
 
 interface PlannedStep {
@@ -45,7 +62,7 @@ interface PlannedStep {
 
 export interface ClientMaintenancePlan {
   schemaVersion: 1;
-  action: "repair" | "update" | "none";
+  action: "repair" | "update" | "uninstall" | "none";
   applied: boolean;
   operationId?: string;
   runtime: InstallableRuntime;
@@ -64,13 +81,22 @@ interface ClientMaintenanceTestHooks {
 }
 
 export interface ClientMaintenanceOptions {
-  action: "repair" | "update";
+  action: "repair" | "update" | "uninstall";
   runtime: InstallableRuntime;
   instance: string;
   identity: string;
   command?: string;
   apply?: boolean;
   resume?: string;
+  recoverLock?: boolean;
+  env?: NodeJS.ProcessEnv;
+  execute?: ClientLifecycleExecutor;
+  /** Test-only fault injection for mutation-boundary regression coverage. */
+  testHooks?: ClientMaintenanceTestHooks;
+}
+
+export interface ClientMaintenanceResumeOptions {
+  operationId: string;
   recoverLock?: boolean;
   env?: NodeJS.ProcessEnv;
   execute?: ClientLifecycleExecutor;
@@ -187,6 +213,159 @@ function backendPolicy(path: string): BackendProof {
     role: "backend", file: { device: file.dev, inode: file.ino },
     parent: { device: parent.dev, inode: parent.ino }, state: "repairable",
   };
+}
+
+function privateDirectoryProof(path: string, message: string): { device: number; inode: number } {
+  const before = lstatSync(path);
+  if (before.isSymbolicLink() || !before.isDirectory()) throw new Error(message);
+  verifyPrivatePathAccess(path, "directory");
+  const after = lstatSync(path);
+  if (after.isSymbolicLink() || !after.isDirectory() || after.dev !== before.dev || after.ino !== before.ino) {
+    throw new Error(message);
+  }
+  return { device: before.dev, inode: before.ino };
+}
+
+function samePrivateDirectory(
+  path: string,
+  expected: { device: number; inode: number },
+  message: string,
+): void {
+  const current = lstatSync(path);
+  if (current.isSymbolicLink() || !current.isDirectory()
+    || current.dev !== expected.device || current.ino !== expected.inode) {
+    throw new Error(message);
+  }
+  verifyPrivatePathAccess(path, "directory");
+}
+
+function pathEntryIsAbsent(path: string): boolean {
+  try {
+    lstatSync(path);
+    return false;
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") return true;
+    throw error;
+  }
+}
+
+function syncPrivateDirectory(
+  path: string,
+  expected: { device: number; inode: number },
+  message: string,
+): "durable" | "unavailable" {
+  samePrivateDirectory(path, expected, message);
+  if (process.platform === "win32") return "unavailable";
+  const descriptor = openSync(path, constants.O_RDONLY | (constants.O_DIRECTORY ?? 0) | (constants.O_NOFOLLOW ?? 0));
+  try {
+    const opened = fstatSync(descriptor);
+    if (!opened.isDirectory() || opened.dev !== expected.device || opened.ino !== expected.inode) {
+      throw new Error(message);
+    }
+    fsyncSync(descriptor);
+  } finally { closeSync(descriptor); }
+  samePrivateDirectory(path, expected, message);
+  return "durable";
+}
+
+function expectedBackendAbsentProof(before: BackendProof): BackendAbsentProof {
+  return {
+    role: "backend", parent: { ...before.parent }, state: "absent",
+    directoryDurability: process.platform === "win32" ? "unavailable" : "durable",
+  };
+}
+
+function observedBackendAbsentProof(
+  path: string,
+  expected: { device: number; inode: number },
+): BackendAbsentProof {
+  const parentPath = dirname(path);
+  samePrivateDirectory(parentPath, expected, "managed backend directory changed during deletion");
+  if (!pathEntryIsAbsent(path)) throw new Error("managed backend remains after deletion");
+  const directoryDurability = syncPrivateDirectory(
+    parentPath, expected, "managed backend directory changed during deletion",
+  );
+  return { role: "backend", parent: { ...expected }, state: "absent", directoryDurability };
+}
+
+function expectedMetadataAbsentProof(
+  metadata: ManagedClientMetadata,
+  env: NodeJS.ProcessEnv,
+): MetadataAbsentProof {
+  const parent = privateDirectoryProof(
+    dirname(managedClientMetadataPath(metadata.runtime, metadata.instance, env)),
+    "managed metadata directory is invalid",
+  );
+  return {
+    role: "metadata", runtime: metadata.runtime, instance: metadata.instance,
+    parent, state: "absent", directoryDurability: process.platform === "win32" ? "unavailable" : "durable",
+  };
+}
+
+function observedMetadataAbsentProof(
+  runtime: InstallableRuntime,
+  instance: string,
+  env: NodeJS.ProcessEnv,
+  expected: { device: number; inode: number },
+): MetadataAbsentProof {
+  const path = managedClientMetadataPath(runtime, instance, env);
+  const parentPath = dirname(path);
+  samePrivateDirectory(parentPath, expected, "managed metadata directory changed during deletion");
+  if (!pathEntryIsAbsent(path)) throw new Error("managed metadata remains after deletion");
+  const directoryDurability = syncPrivateDirectory(
+    parentPath, expected, "managed metadata directory changed during deletion",
+  );
+  return { role: "metadata", runtime, instance, parent: { ...expected }, state: "absent", directoryDurability };
+}
+
+function deletePrivateFile(
+  path: string,
+  expectedFile: { device: number; inode: number },
+  expectedParent: { device: number; inode: number },
+  description: string,
+): "durable" | "unavailable" {
+  const parentPath = dirname(path);
+  samePrivateDirectory(parentPath, expectedParent, `${description} directory changed during deletion`);
+  const descriptor = openSync(path, constants.O_RDONLY | (constants.O_NOFOLLOW ?? 0));
+  try {
+    const opened = fstatSync(descriptor);
+    if (!opened.isFile() || opened.dev !== expectedFile.device || opened.ino !== expectedFile.inode) {
+      throw new Error(`${description} changed during deletion`);
+    }
+  } finally { closeSync(descriptor); }
+  const current = lstatSync(path);
+  if (current.isSymbolicLink() || !current.isFile()
+    || current.dev !== expectedFile.device || current.ino !== expectedFile.inode) {
+    throw new Error(`${description} changed during deletion`);
+  }
+  unlinkSync(path);
+  if (!pathEntryIsAbsent(path)) throw new Error(`${description} remains after deletion`);
+  return syncPrivateDirectory(parentPath, expectedParent, `${description} directory changed during deletion`);
+}
+
+function deleteManagedClientMetadata(metadata: ManagedClientMetadata, env: NodeJS.ProcessEnv): "durable" | "unavailable" {
+  const current = loadManagedClientMetadata(metadata.runtime, metadata.instance, env);
+  if (!isDeepStrictEqual(current, metadata)) throw new Error("managed metadata changed before deletion");
+  const path = managedClientMetadataPath(metadata.runtime, metadata.instance, env);
+  const parent = privateDirectoryProof(dirname(path), "managed metadata directory is invalid");
+  const file = lstatSync(path);
+  if (file.isSymbolicLink() || !file.isFile()) throw new Error("managed metadata changed before deletion");
+  verifyPrivatePathAccess(path, "file");
+  return deletePrivateFile(path, { device: file.dev, inode: file.ino }, parent, "managed metadata");
+}
+
+function deleteBackend(
+  path: string,
+  before: BackendProof,
+): "durable" | "unavailable" {
+  if (before.state !== "private") throw new Error("managed backend must be private before deletion");
+  const current = backendPolicy(path);
+  if (current.state !== "private" || current.file.device !== before.file.device
+    || current.file.inode !== before.file.inode || current.parent.device !== before.parent.device
+    || current.parent.inode !== before.parent.inode) {
+    throw new Error("managed backend changed before deletion");
+  }
+  return deletePrivateFile(path, before.file, before.parent, "managed backend");
 }
 
 function tightenBackendPolicy(path: string, before: BackendProof, afterPin?: () => void): void {
@@ -342,10 +521,11 @@ function removeKnownTemporary(path: string, identity: { device: number; inode: n
   syncDesktopDirectory(dirname(path));
 }
 
-function replaceDesktopRegistration(
+function mutateDesktopRegistration(
   metadata: ManagedClientMetadata,
   operationId: string,
   stepIndex: number,
+  action: "replace" | "remove",
   hooks?: DesktopMaintenanceHooks,
 ): void {
   const locator = metadata.locator as Extract<ClientRegistrationLocator, { kind: "claude-desktop-config" }>;
@@ -364,20 +544,23 @@ function replaceDesktopRegistration(
   if (servers !== undefined && (!servers || typeof servers !== "object" || Array.isArray(servers))) {
     throw new Error("Claude Desktop mcpServers is not an object");
   }
+  const nextServers = { ...(servers as Record<string, unknown> | undefined) };
+  if (action === "replace") {
+    nextServers["agent-bridge"] = {
+      command: metadata.launch.command,
+      args: metadata.launch.args,
+      env: {
+        AGENT_BRIDGE_AGENT: metadata.identity,
+        AGENT_BRIDGE_INSTANCE: metadata.instance,
+        AGENT_BRIDGE_CONFIG: metadata.backendConfigPath,
+      },
+    };
+  } else {
+    delete nextServers["agent-bridge"];
+  }
   const next = {
     ...read.config,
-    mcpServers: {
-      ...(servers as Record<string, unknown> | undefined),
-      "agent-bridge": {
-        command: metadata.launch.command,
-        args: metadata.launch.args,
-        env: {
-          AGENT_BRIDGE_AGENT: metadata.identity,
-          AGENT_BRIDGE_INSTANCE: metadata.instance,
-          AGENT_BRIDGE_CONFIG: metadata.backendConfigPath,
-        },
-      },
-    },
+    mcpServers: nextServers,
   };
   const temporary = join(directory, `.ab-${operationId.slice(0, 8)}-${stepIndex}-${digest(path).slice(0, 12)}.tmp`);
   removeKnownTemporary(temporary, null);
@@ -425,7 +608,9 @@ function replaceDesktopRegistration(
     const verified = readDesktopConfigNoFollow(path);
     const servers = verified.config.mcpServers as Record<string, unknown> | undefined;
     const entry = servers?.["agent-bridge"] as Record<string, unknown> | undefined;
-    if (!entry || entry.command !== metadata.launch.command
+    if (action === "remove") {
+      if (entry !== undefined) throw new Error("Claude Desktop registration removal was not verified");
+    } else if (!entry || entry.command !== metadata.launch.command
       || !isDeepStrictEqual(entry.args, metadata.launch.args)
       || !isDeepStrictEqual(entry.env, {
         AGENT_BRIDGE_AGENT: metadata.identity,
@@ -505,15 +690,101 @@ function buildPlan(
   return steps;
 }
 
+function expectedBackendAbsentFromParent(parent: { device: number; inode: number }): BackendAbsentProof {
+  return {
+    role: "backend", parent: { ...parent }, state: "absent",
+    directoryDurability: process.platform === "win32" ? "unavailable" : "durable",
+  };
+}
+
+function uninstallBackendObservation(path: string): BackendProof | BackendAbsentProof {
+  try { return backendPolicy(path); }
+  catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+    const parent = privateDirectoryProof(dirname(path), "managed backend directory is invalid");
+    if (!pathEntryIsAbsent(path)) throw new Error("managed backend appeared during uninstall planning");
+    return expectedBackendAbsentFromParent(parent);
+  }
+}
+
+function assertUninstallPathIsolation(metadata: ManagedClientMetadata, env: NodeJS.ProcessEnv): void {
+  const paths = [
+    ["backend", metadata.backendConfigPath],
+    ["metadata", managedClientMetadataPath(metadata.runtime, metadata.instance, env)],
+  ] as Array<[string, string]>;
+  if (metadata.runtime === "claude-desktop") {
+    const locator = metadata.locator as Extract<ClientRegistrationLocator, { kind: "claude-desktop-config" }>;
+    paths.push(["Desktop config", locator.configPath]);
+  }
+  const seen = new Map<string, string>();
+  const existing = new Map<string, string>();
+  for (const [role, path] of paths) {
+    const resolved = resolve(path);
+    const normalized = process.platform === "win32" ? resolved.toLowerCase() : resolved;
+    const prior = seen.get(normalized);
+    if (prior) throw new Error(`managed uninstall paths alias: ${prior} and ${role}`);
+    seen.set(normalized, role);
+    try {
+      const entry = lstatSync(resolved);
+      const identity = `${entry.dev}:${entry.ino}`;
+      const existingRole = existing.get(identity);
+      if (existingRole) throw new Error(`managed uninstall paths alias: ${existingRole} and ${role}`);
+      existing.set(identity, role);
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+    }
+  }
+}
+
+function buildUninstallPlan(
+  metadata: ManagedClientMetadata,
+  execute: ClientLifecycleExecutor,
+  env: NodeJS.ProcessEnv,
+): PlannedStep[] {
+  const steps: PlannedStep[] = [];
+  const registration = observeManagedRegistration(metadata, execute, env, metadata.launch.args);
+  const absentRegistration: ManagedRegistrationObservation = {
+    state: "absent", target: registration.target, observed: { state: "absent" },
+  };
+  if (registration.state !== "absent") {
+    steps.push({
+      kind: metadata.runtime === "claude-desktop" ? "desktop-remove" : "native-remove",
+      target: "registration", locator: `${metadata.runtime}:agent-bridge`,
+      before: registrationProof(registration), after: registrationProof(absentRegistration),
+    });
+  }
+  const backend = uninstallBackendObservation(metadata.backendConfigPath);
+  if (backend.state === "repairable") {
+    throw new Error("managed backend must be private before uninstall deletes it");
+  }
+  if (backend.state === "private") {
+    steps.push({
+      kind: "backend-delete", target: "backend", locator: "managed-backend-policy",
+      before: canonical(backend), after: canonical(expectedBackendAbsentProof(backend)),
+    });
+  }
+  const metadataAbsent = expectedMetadataAbsentProof(metadata, env);
+  steps.push({
+    kind: "metadata-delete", target: "metadata", locator: "managed-client-metadata",
+    before: metadataProof(metadata), after: canonical(metadataAbsent),
+  });
+  return steps;
+}
+
 function executionStepsFromManifest(
   manifest: ClientOperationManifest,
   target: ManagedClientMetadata,
+  action: "repair" | "update" | "uninstall",
 ): PlannedStep[] {
   const registrationSteps = manifest.steps.filter((step) => step.target === "registration");
   let registrationIndex = 0;
   return manifest.steps.map((step) => {
     let kind: PlannedKind;
-    if (step.target === "backend") kind = "backend";
+    if (action === "uninstall") {
+      if (step.target === "backend") kind = "backend-delete";
+      else if (step.target === "metadata") kind = "metadata-delete";
+      else kind = target.runtime === "claude-desktop" ? "desktop-remove" : "native-remove";
+    } else if (step.target === "backend") kind = "backend";
     else if (step.target === "metadata") kind = "metadata";
     else if (target.runtime === "claude-desktop") kind = "desktop-replace";
     else {
@@ -539,8 +810,24 @@ function observedProof(
     const backend = backendPolicy(metadata.backendConfigPath);
     return { proof: canonical(backend), backend };
   }
+  if (step.kind === "backend-delete") {
+    if (!pathEntryIsAbsent(metadata.backendConfigPath)) {
+      const backend = backendPolicy(metadata.backendConfigPath);
+      return { proof: canonical(backend), backend };
+    }
+    const parent = privateDirectoryProof(dirname(metadata.backendConfigPath), "managed backend directory is invalid");
+    return { proof: canonical(observedBackendAbsentProof(metadata.backendConfigPath, parent)) };
+  }
   if (step.kind === "metadata") {
     return { proof: metadataProof(loadManagedClientMetadata(metadata.runtime, metadata.instance, env)) };
+  }
+  if (step.kind === "metadata-delete") {
+    const metadataPath = managedClientMetadataPath(metadata.runtime, metadata.instance, env);
+    if (!pathEntryIsAbsent(metadataPath)) {
+      return { proof: metadataProof(loadManagedClientMetadata(metadata.runtime, metadata.instance, env)) };
+    }
+    const parent = privateDirectoryProof(dirname(metadataPath), "managed metadata directory is invalid");
+    return { proof: canonical(observedMetadataAbsentProof(metadata.runtime, metadata.instance, env, parent)) };
   }
   return { proof: registrationProof(observeManagedRegistration(target, execute, env, metadata.launch.args)) };
 }
@@ -562,9 +849,19 @@ function applyStep(
     tightenBackendPolicy(metadata.backendConfigPath, observed.backend, afterBackendPin);
     return;
   }
+  if (step.kind === "backend-delete") {
+    if (!observed.backend) throw new Error("backend proof is unavailable");
+    deleteBackend(metadata.backendConfigPath, observed.backend);
+    return;
+  }
   if (step.kind === "native-remove") return nativeExecute(target, "remove", execute, env);
   if (step.kind === "native-add") return nativeExecute(target, "add", execute, env);
-  if (step.kind === "desktop-replace") return replaceDesktopRegistration(target, operationId, stepIndex, desktopHooks);
+  if (step.kind === "desktop-replace") return mutateDesktopRegistration(target, operationId, stepIndex, "replace", desktopHooks);
+  if (step.kind === "desktop-remove") return mutateDesktopRegistration(target, operationId, stepIndex, "remove", desktopHooks);
+  if (step.kind === "metadata-delete") {
+    deleteManagedClientMetadata(metadata, env);
+    return;
+  }
   const current = loadManagedClientMetadata(metadata.runtime, metadata.instance, env);
   if (!isDeepStrictEqual(current, metadata)) throw new Error("managed metadata changed before update");
   writeManagedClientMetadata(managedClientMetadataPath(target.runtime, target.instance, env), target);
@@ -572,12 +869,12 @@ function applyStep(
   if (!isDeepStrictEqual(after, target)) throw new Error("managed metadata update was not verified");
 }
 
-function resumeLaunch(
+function resumeAction(
   metadata: ManagedClientMetadata,
   manifest: ClientOperationManifest,
   command: string | undefined,
   env: NodeJS.ProcessEnv,
-  action: "repair" | "update",
+  action: "repair" | "update" | "uninstall",
 ): ManagedClientMetadata {
   if (manifest.runtime !== metadata.runtime || manifest.instance !== metadata.instance) {
     throw new Error("--resume does not match this client action, runtime, or instance");
@@ -591,6 +888,14 @@ function resumeLaunch(
       throw new Error("--resume does not match this client action, runtime, or instance");
     }
     if (command !== undefined) throw new Error("--command is not valid for clients repair");
+    return metadata;
+  }
+  if (action === "uninstall") {
+    if (!manifest.request || manifest.request.kind !== "uninstall" || !("identity" in manifest.request)
+      || manifest.request.identity !== metadata.identity) {
+      throw new Error("--resume does not match this client action, runtime, or instance");
+    }
+    if (command !== undefined) throw new Error("--command is not valid for clients uninstall");
     return metadata;
   }
   if (!manifest.request || manifest.request.kind !== "update" || !("identity" in manifest.request)
@@ -616,7 +921,7 @@ function resumeLaunch(
 }
 
 function planResult(
-  action: "repair" | "update" | "none", applied: boolean, metadata: ManagedClientMetadata,
+  action: "repair" | "update" | "uninstall" | "none", applied: boolean, metadata: ManagedClientMetadata,
   steps: PlannedStep[], env: NodeJS.ProcessEnv, operationId?: string,
 ): ClientMaintenancePlan {
   return {
@@ -628,7 +933,7 @@ function planResult(
 }
 
 /**
- * Repair or update one metadata-owned registration. The dry-run path does not acquire a lock,
+ * Repair, update, or forward-only uninstall one metadata-owned registration. The dry-run path does not acquire a lock,
  * create operation state, or touch the registration, backend, or metadata file.
  */
 export function maintainManagedClient(options: ClientMaintenanceOptions): ClientMaintenancePlan {
@@ -641,13 +946,17 @@ export function maintainManagedClient(options: ClientMaintenanceOptions): Client
   assertIdentity(metadata, options.identity);
   const authority = metadataProof(metadata);
   const requestedAction = options.action;
+  if (requestedAction === "uninstall") assertUninstallPathIsolation(metadata, env);
   const manifest = options.resume ? readClientOperation(options.resume, env) : undefined;
   const target = manifest
-    ? resumeLaunch(metadata, manifest, options.command, env, requestedAction)
+    ? resumeAction(metadata, manifest, options.command, env, requestedAction)
     : requestedAction === "update"
       ? updateMetadata(metadata, resolveUpdateLaunch(metadata, options.command, env))
       : metadata;
-  const steps = options.resume && options.apply ? [] : buildPlan(metadata, target, execute, env);
+  const steps = options.resume && options.apply ? []
+    : requestedAction === "uninstall"
+      ? buildUninstallPlan(metadata, execute, env)
+      : buildPlan(metadata, target, execute, env);
   if (!options.apply) {
     if (options.resume || options.recoverLock) throw new Error("--resume and --recover-lock require --apply");
     return planResult(steps.length === 0 ? "none" : requestedAction, false, metadata, steps, env);
@@ -659,7 +968,9 @@ export function maintainManagedClient(options: ClientMaintenanceOptions): Client
     : beginClientOperation({
       request: requestedAction === "repair"
         ? { kind: "repair", identity: metadata.identity }
-        : { kind: "update", identity: metadata.identity, launch: operationLaunch(target) },
+        : requestedAction === "update"
+          ? { kind: "update", identity: metadata.identity, launch: operationLaunch(target) }
+          : { kind: "uninstall", identity: metadata.identity },
       runtime: metadata.runtime, instance: metadata.instance,
       steps: steps.map((step, index) => ({
         target: step.target, locator: step.locator,
@@ -674,8 +985,10 @@ export function maintainManagedClient(options: ClientMaintenanceOptions): Client
       throw new Error("managed metadata changed while acquiring the client lock");
     }
     const recordedSteps = options.resume && current.state !== "prepared"
-      ? executionStepsFromManifest(current, target)
-      : buildPlan(metadata, target, execute, env);
+      ? executionStepsFromManifest(current, target, requestedAction)
+      : requestedAction === "uninstall"
+        ? buildUninstallPlan(metadata, execute, env)
+        : buildPlan(metadata, target, execute, env);
     if (recordedSteps.length !== current.steps.length) {
       throw new Error("operation request no longer matches the managed client state");
     }
@@ -738,10 +1051,85 @@ export function maintainManagedClient(options: ClientMaintenanceOptions): Client
   }
 }
 
+function uninstallStepAction(step: { target: "registration" | "backend" | "metadata" }, runtime: InstallableRuntime): PlannedKind {
+  if (step.target === "registration") return runtime === "claude-desktop" ? "desktop-remove" : "native-remove";
+  return step.target === "backend" ? "backend-delete" : "metadata-delete";
+}
+
+function resumeUninstallAfterMetadataDeletion(
+  manifest: ClientOperationManifest,
+  identity: string,
+  options: ClientMaintenanceResumeOptions,
+): ClientMaintenancePlan {
+  const env = options.env ?? process.env;
+  if (options.recoverLock) recoverClientOperationLock(manifest.runtime, manifest.instance, env);
+  const begun = resumeClientOperation(manifest.operationId, env);
+  let current = begun.manifest;
+  const steps = current.steps.map((step) => ({
+    target: step.target,
+    action: uninstallStepAction(step, current.runtime),
+  }));
+  try {
+    if (current.version !== 3 || !current.request || current.request.kind !== "uninstall"
+      || !("identity" in current.request) || current.request.identity !== identity) {
+      throw new Error("operation is not an identity-bound uninstall request");
+    }
+    const pending = current.steps.find((step) => step.state !== "observed-applied");
+    if (pending) {
+      const earlierComplete = current.steps.slice(0, pending.index).every((step) => step.state === "observed-applied");
+      if (!earlierComplete || pending.target !== "metadata" || pending.state !== "intent-recorded") {
+        throw new Error("managed metadata is missing before uninstall reached its final deletion step");
+      }
+      const metadataPath = managedClientMetadataPath(current.runtime, current.instance, env);
+      if (!pathEntryIsAbsent(metadataPath)) throw new Error("managed metadata reappeared during uninstall resume");
+      const parent = privateDirectoryProof(dirname(metadataPath), "managed metadata directory is invalid");
+      const actual = canonical(observedMetadataAbsentProof(current.runtime, current.instance, env, parent));
+      const classification = classifyClientOperationRestart(current, digest(actual));
+      if (classification.disposition !== "advance") throw new Error(classification.reason);
+      current = recordClientOperationStepApplied(
+        current.operationId, current, pending.index, actual, begun.lock, env,
+      );
+    }
+    current = completeClientOperationCleanup(current.operationId, current, begun.lock, env);
+    return {
+      schemaVersion: 1, action: "uninstall", applied: true, operationId: current.operationId,
+      runtime: manifest.runtime, instance: manifest.instance, identity,
+      metadataPath: managedClientMetadataPath(manifest.runtime, manifest.instance, env), steps,
+    };
+  } finally {
+    releaseClientOperationLock(begun.lock);
+  }
+}
+
+/** Resume exactly one v3 repair, update, or uninstall using recorded operation authority only. */
+export function resumeManagedClientOperation(options: ClientMaintenanceResumeOptions): ClientMaintenancePlan {
+  const env = options.env ?? process.env;
+  const manifest = readClientOperation(options.operationId, env);
+  if (manifest.version !== 3 || !manifest.request || !["repair", "update", "uninstall"].includes(manifest.request.kind)
+    || !("identity" in manifest.request)) {
+    throw new Error("operation is not a resumable identity-bound managed client request");
+  }
+  const action = manifest.request.kind;
+  const identity = manifest.request.identity;
+  const metadataPath = managedClientMetadataPath(manifest.runtime, manifest.instance, env);
+  if (action === "uninstall" && pathEntryIsAbsent(metadataPath)) {
+    return resumeUninstallAfterMetadataDeletion(manifest, identity, options);
+  }
+  return maintainManagedClient({
+    action, runtime: manifest.runtime, instance: manifest.instance, identity,
+    apply: true, resume: manifest.operationId, recoverLock: options.recoverLock,
+    env, execute: options.execute, testHooks: options.testHooks,
+  });
+}
+
 export function repairManagedClient(options: Omit<ClientMaintenanceOptions, "command" | "action">): ClientMaintenancePlan {
   return maintainManagedClient({ ...options, action: "repair" });
 }
 
 export function updateManagedClient(options: Omit<ClientMaintenanceOptions, "action">): ClientMaintenancePlan {
   return maintainManagedClient({ ...options, action: "update" });
+}
+
+export function uninstallManagedClient(options: Omit<ClientMaintenanceOptions, "command" | "action">): ClientMaintenancePlan {
+  return maintainManagedClient({ ...options, action: "uninstall" });
 }

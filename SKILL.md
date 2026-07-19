@@ -81,7 +81,7 @@ For a managed registration, use `clients repair <runtime> --identity <name> --in
 only after reviewing the plan. Use `clients update` with the same metadata-selected
 runtime and instance to validate a replacement launch contract. The same identity must
 match the stored metadata and the immutable request. Native commands are one executable
-contract. Do not pass arguments, URLs, or credential selectors in `--command`. Repair and update reject
+contract. Do not pass arguments, URLs, or credential selectors in `--command`. Repair, update, and uninstall reject
 `--backend-config`, `--scope`, and `--config-path`; `--identity` is an assertion, not a
 locator. A no-op exact registration creates no journal. Native updates remove, prove
 absence, add, and prove the target before metadata changes. Desktop updates replace only
@@ -89,10 +89,20 @@ the Agent Bridge entry and retain unrelated JSON values in memory. It publishes 
 a private operation-scoped temporary file. A concurrent same-user Desktop writer can
 still race this advisory single-file update because Node cannot provide an OS transaction.
 
-Resume with the same action, runtime, instance, and identity: `--apply --resume <uuid>`.
-The stored request controls resume. Do not supply a new command unless it exactly matches
-the recorded update request. `--recover-lock` also requires `--apply`; it only recovers a
-stale same-host lock after process-death proof. Never remove operation locks by hand.
+Use `clients uninstall <runtime> --identity <name> --instance <key>` to preview a
+forward-only removal. With `--apply`, it proves and removes the managed registration,
+deletes the already private backend file, then deletes metadata. It refuses a backend
+that needs privacy repair and never recreates an earlier target after a later failure.
+Desktop removes only its Agent Bridge entry. Backend content never enters the journal.
+
+Resume an action-specific operation with the same action, runtime, instance, and
+identity: `--apply --resume <uuid>`. The stored request controls resume. Do not supply
+a new command unless it exactly matches the recorded update request. Use
+`clients resume <uuid> [--recover-lock]` to resume from the v3 request alone. It does
+not accept replacement client authority. Use the generic form after uninstall has
+deleted metadata. `--recover-lock` on an action-specific command also requires
+`--apply`; it only recovers a stale same-host lock after process-death proof. Never
+remove operation locks by hand.
 
 Portable archive work is an offline operator task, not normal MCP traffic. Use
 `agent-bridge archive export --provider local|postgres --workspace <workspace>

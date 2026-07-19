@@ -436,9 +436,9 @@ use. Backend files and their immediate parents must satisfy the owner-only no-li
 policy. Registration state is independent of connectivity health, and applied
 adoption re-inspects before reporting success.
 
-Once adopted, repair and update locate the registration from owner-private managed
+Once adopted, repair, update, and uninstall locate the registration from owner-private managed
 metadata. The runtime and stable instance select that record. `--identity` must match
-the recorded identity and the immutable repair or update request. These commands reject backend-path, scope, and host
+the recorded identity and the immutable request. These commands reject backend-path, scope, and host
 config locator flags, so a caller cannot redirect a managed mutation.
 
 ```bash
@@ -448,9 +448,11 @@ agent-bridge clients update codex --identity codex --instance <stable-key> \
   --command agent-bridge-mcp --apply
 agent-bridge clients repair codex --identity codex --instance <stable-key> \
   --apply --resume <operation-uuid>
+agent-bridge clients uninstall codex --identity codex --instance <stable-key> --apply
+agent-bridge clients resume <operation-uuid>
 ```
 
-Both commands return a plan by default. A managed registration that is already exact
+These commands return a plan by default. A managed registration that is already exact
 and has a private backend file produces no operation. Repair restores the recorded
 launch contract. Update validates and records a new credential-free launch contract
 before it creates a journal. A native `--command` is one executable contract. Bare
@@ -462,12 +464,30 @@ temporary file, and verifies the new entry. Node cannot provide an OS transactio
 an uncooperative same-user Desktop writer. The pre-rename identity checks make this an
 advisory race boundary rather than a guarantee.
 
+Uninstall is forward-only. It removes the managed registration and verifies its
+absence, deletes the private backend file, then deletes the management metadata. It
+does not repair an unsafe backend before deletion. If the backend is not already
+private, uninstall stops without changing the registration. It does not restore a
+registration, backend, or metadata file after a later step fails. Desktop removes only
+`mcpServers.agent-bridge` and preserves other JSON values. Backend and metadata removal
+check the file and private parent identities before unlink. POSIX then syncs the parent
+directory. Windows verifies the result but records unavailable directory durability.
+Node cannot make pathname-based deletion atomic against an uncooperative same-user
+writer, so that boundary remains advisory.
+
 `--resume` must name an unfinished operation for the same action, runtime, instance,
 and identity. It uses the recorded request instead of new flags. `--recover-lock`
 requires `--apply` and only removes an old same-host lock after the process-death
 proof succeeds. Never delete a lock manually.
 
-New repair and update journals use operation format version 3. Existing version 2
+`clients resume <operation-uuid>` takes only the recorded v3 operation authority and
+an optional `--recover-lock`. It does not accept a replacement action, runtime,
+instance, identity, command, backend path, scope, or config locator. Use it for every
+generic resume. It is also required when an uninstall has already deleted its final
+metadata file, because the action-specific command has no metadata record left to
+assert.
+
+New repair, update, and uninstall journals use operation format version 3. Existing version 2
 journals remain inspectable. A non-terminal version 2 journal lacks the required
 identity-bound request, so it is blocked rather than resumed by these commands.
 
@@ -509,8 +529,8 @@ residues: that authorized absence, or the verified after artifact for the curren
 intent-recorded step. A terminal manifest removes request, step, digest, locator, and
 artifact metadata but retains the operation kind, step count, completion time, and
 cleanup durability as a credential-free audit record. Completed records remain readable
-across hosts. Repair and update use this journal. Uninstall and endpoint migration
-remain unavailable. Agent Bridge cannot promise physical erasure
+across hosts. Repair, update, and uninstall use this journal. Endpoint migration
+remains unavailable. Agent Bridge cannot promise physical erasure
 on SSDs or journaled filesystems, so future commands must minimize credential-bearing
 snapshots and rotate credentials when retained copies contained them. Inspection
 changes no registration, backend, metadata, or snapshot file.

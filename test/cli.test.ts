@@ -97,10 +97,10 @@ describe("agent-bridge CLI", () => {
 
     const undocumentedAlias = runAt(home, ["clients", "operation"]);
     expect(undocumentedAlias.status).toBe(1);
-    expect(undocumentedAlias.stderr).toContain("clients <install|inspect|adopt|repair|update>");
+    expect(undocumentedAlias.stderr).toContain("clients <install|inspect|adopt|repair|update|uninstall>");
   });
 
-  it("rejects caller authority flags for managed repair and update", () => {
+  it("rejects caller authority flags for managed repair, update, uninstall, and generic resume", () => {
     const repair = run([
       "clients", "repair", "codex", "--identity", "codex", "--instance", "stable",
       "--backend-config", "/tmp/forbidden",
@@ -114,6 +114,19 @@ describe("agent-bridge CLI", () => {
     ]);
     expect(update.status).toBe(1);
     expect(update.stderr).toContain("--scope is not valid for clients update");
+
+    const uninstall = run([
+      "clients", "uninstall", "codex", "--identity", "codex", "--instance", "stable",
+      "--backend-config", "/tmp/forbidden",
+    ]);
+    expect(uninstall.status).toBe(1);
+    expect(uninstall.stderr).toContain("--backend-config is not valid for clients uninstall");
+
+    const resume = run([
+      "clients", "resume", "11111111-1111-4111-8111-111111111111", "--identity", "forbidden",
+    ]);
+    expect(resume.status).toBe(1);
+    expect(resume.stderr).toContain("--identity is not valid for clients resume");
   });
 
   it("exports, verifies, dry-runs, and applies a local portable archive", () => {

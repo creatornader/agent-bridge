@@ -1,13 +1,15 @@
 import {
-  chmodSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, readdirSync,
+  chmodSync, existsSync, linkSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, readdirSync,
   renameSync, rmSync, symlinkSync, writeFileSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect } from "vitest";
 import { adoptClient } from "../src/client-lifecycle.js";
-import { repairManagedClient, updateManagedClient } from "../src/client-maintenance.js";
-import { listClientOperations } from "../src/client-operation.js";
+import {
+  repairManagedClient, resumeManagedClientOperation, uninstallManagedClient, updateManagedClient,
+} from "../src/client-maintenance.js";
+import { listClientOperations, readClientOperation } from "../src/client-operation.js";
 import { securePrivatePath } from "../src/private-path.js";
 import { privatePathIt } from "./private-path-policy.js";
 
@@ -554,4 +556,215 @@ describe("managed client repair and update", () => {
       apply: true, resume: mismatched.operationId, env: { HOME: changed.home }, execute: changed.execute,
     })).toThrow("completed operation step");
   }, 30_000);
+
+  it("uninstalls forward only after proving registration and retains no backend bytes in its journal", () => {
+    const state = fixture();
+    const planned = uninstallManagedClient({
+      runtime: "codex", instance: "codex-existing", identity: "codex-work",
+      env: { HOME: state.home }, execute: state.execute,
+    });
+    expect(planned).toMatchObject({
+      action: "uninstall", applied: false,
+      steps: [
+        { target: "registration", action: "native-remove" },
+        { target: "backend", action: "backend-delete" },
+        { target: "metadata", action: "metadata-delete" },
+      ],
+    });
+    const removed = uninstallManagedClient({
+      runtime: "codex", instance: "codex-existing", identity: "codex-work", apply: true,
+      env: { HOME: state.home }, execute: state.execute,
+    });
+    expect(removed).toMatchObject({ action: "uninstall", applied: true });
+    expect(state.registration.present).toBe(false);
+    expect(existsSync(state.backendConfigPath)).toBe(false);
+    expect(existsSync(state.adopted.metadataPath)).toBe(false);
+    expect(JSON.stringify(listClientOperations({ HOME: state.home }))).not.toContain("credential-sentinel-must-not-leak");
+  }, 20_000);
+
+  it("refuses to delete a backend whose privacy repair is still pending", () => {
+    if (process.platform === "win32") return;
+    const state = fixture();
+    chmodSync(state.backendConfigPath, 0o644);
+    expect(() => uninstallManagedClient({
+      runtime: "codex", instance: "codex-existing", identity: "codex-work",
+      env: { HOME: state.home }, execute: state.execute,
+    })).toThrow("managed backend must be private before uninstall deletes it");
+    expect(state.registration.present).toBe(true);
+    expect(existsSync(state.backendConfigPath)).toBe(true);
+    expect(existsSync(state.adopted.metadataPath)).toBe(true);
+  });
+
+  it("rejects an uninstall whose backend path aliases its metadata", () => {
+    const state = fixture();
+    const metadata = JSON.parse(readFileSync(state.adopted.metadataPath, "utf8"));
+    metadata.backendConfigPath = state.adopted.metadataPath;
+    writeFileSync(state.adopted.metadataPath, `${JSON.stringify(metadata)}\n`, { mode: 0o600 });
+    expect(() => uninstallManagedClient({
+      runtime: "codex", instance: "codex-existing", identity: "codex-work",
+      env: { HOME: state.home }, execute: state.execute,
+    })).toThrow("managed uninstall paths alias");
+    expect(state.registration.present).toBe(true);
+    expect(existsSync(join(state.home, ".agent-bridge", "operations"))).toBe(false);
+  });
+
+  it("rejects a Desktop uninstall whose backend path aliases its config", () => {
+    const state = desktopFixture();
+    const metadata = JSON.parse(readFileSync(state.adopted.metadataPath, "utf8"));
+    metadata.backendConfigPath = state.configPath;
+    writeFileSync(state.adopted.metadataPath, `${JSON.stringify(metadata)}\n`, { mode: 0o600 });
+    expect(() => uninstallManagedClient({
+      runtime: "claude-desktop", instance: "desktop-existing", identity: "desktop-work",
+      env: { HOME: state.home },
+    })).toThrow("managed uninstall paths alias");
+    expect(JSON.parse(readFileSync(state.configPath, "utf8")).mcpServers["agent-bridge"]).toBeDefined();
+    expect(existsSync(join(state.home, ".agent-bridge", "operations"))).toBe(false);
+  });
+
+  it("rejects an uninstall whose backend is a hard link to metadata", () => {
+    const state = fixture();
+    const alias = join(state.home, ".agent-bridge", "clients", "metadata-hard-link.config");
+    linkSync(state.adopted.metadataPath, alias);
+    const metadata = JSON.parse(readFileSync(state.adopted.metadataPath, "utf8"));
+    metadata.backendConfigPath = alias;
+    writeFileSync(state.adopted.metadataPath, `${JSON.stringify(metadata)}\n`, { mode: 0o600 });
+    expect(() => uninstallManagedClient({
+      runtime: "codex", instance: "codex-existing", identity: "codex-work",
+      env: { HOME: state.home }, execute: state.execute,
+    })).toThrow("managed uninstall paths alias");
+    expect(state.registration.present).toBe(true);
+    expect(existsSync(join(state.home, ".agent-bridge", "operations"))).toBe(false);
+  });
+
+  it("resumes an interrupted uninstall only from the recorded v3 request", () => {
+    const state = fixture();
+    expect(() => uninstallManagedClient({
+      runtime: "codex", instance: "codex-existing", identity: "codex-work", apply: true,
+      env: { HOME: state.home }, execute: state.execute,
+      testHooks: { afterApply: ({ action }) => { if (action === "native-remove") throw new Error("pause after remove"); } },
+    })).toThrow("pause after remove");
+    const [operation] = listClientOperations({ HOME: state.home });
+    expect(existsSync(state.backendConfigPath)).toBe(true);
+    expect(existsSync(state.adopted.metadataPath)).toBe(true);
+    expect(resumeManagedClientOperation({
+      operationId: operation.operationId, env: { HOME: state.home }, execute: state.execute,
+    })).toMatchObject({ action: "uninstall", applied: true });
+    expect(state.registration.present).toBe(false);
+    expect(existsSync(state.backendConfigPath)).toBe(false);
+    expect(existsSync(state.adopted.metadataPath)).toBe(false);
+  }, 20_000);
+
+  it("does not roll back after backend deletion and keeps backend bytes out of the journal", () => {
+    const state = fixture();
+    expect(() => uninstallManagedClient({
+      runtime: "codex", instance: "codex-existing", identity: "codex-work", apply: true,
+      env: { HOME: state.home }, execute: state.execute,
+      testHooks: { afterApply: ({ action }) => { if (action === "backend-delete") throw new Error("pause after backend deletion"); } },
+    })).toThrow("pause after backend deletion");
+    const [operation] = listClientOperations({ HOME: state.home });
+    expect(state.registration.present).toBe(false);
+    expect(existsSync(state.backendConfigPath)).toBe(false);
+    expect(existsSync(state.adopted.metadataPath)).toBe(true);
+    const snapshots = readdirSync(join(state.home, ".agent-bridge", "operations", operation.operationId, "snapshots"));
+    for (const name of snapshots) {
+      expect(readFileSync(join(state.home, ".agent-bridge", "operations", operation.operationId, "snapshots", name), "utf8"))
+        .not.toContain("credential-sentinel-must-not-leak");
+    }
+    expect(resumeManagedClientOperation({
+      operationId: operation.operationId, env: { HOME: state.home }, execute: state.execute,
+    })).toMatchObject({ action: "uninstall", applied: true });
+    expect(state.registration.present).toBe(false);
+    expect(existsSync(state.backendConfigPath)).toBe(false);
+    expect(existsSync(state.adopted.metadataPath)).toBe(false);
+  }, 20_000);
+
+  it("does not advance a backend deletion after a dangling link appears", () => {
+    const state = fixture();
+    expect(() => uninstallManagedClient({
+      runtime: "codex", instance: "codex-existing", identity: "codex-work", apply: true,
+      env: { HOME: state.home }, execute: state.execute,
+      testHooks: { afterApply: ({ action }) => { if (action === "backend-delete") throw new Error("pause after backend deletion"); } },
+    })).toThrow("pause after backend deletion");
+    const [operation] = listClientOperations({ HOME: state.home });
+    symlinkSync(join(state.home, "missing-backend-target"), state.backendConfigPath);
+    expect(() => resumeManagedClientOperation({
+      operationId: operation.operationId, env: { HOME: state.home }, execute: state.execute,
+    })).toThrow("managed backend path cannot be a link");
+    expect(readClientOperation(operation.operationId, { HOME: state.home }).steps[1]?.state).toBe("intent-recorded");
+    expect(existsSync(state.adopted.metadataPath)).toBe(true);
+  }, 20_000);
+
+  it("dispatches generic resume to the recorded repair and update requests without new authority", () => {
+    const repair = fixture();
+    repair.registration.command = "drifted-agent-bridge-mcp";
+    expect(() => repairManagedClient({
+      runtime: "codex", instance: "codex-existing", identity: "codex-work", apply: true,
+      env: { HOME: repair.home }, execute: repair.execute,
+      testHooks: { afterApply: ({ action }) => { if (action === "native-remove") throw new Error("pause repair"); } },
+    })).toThrow("pause repair");
+    const [repairOperation] = listClientOperations({ HOME: repair.home });
+    expect(resumeManagedClientOperation({
+      operationId: repairOperation.operationId, env: { HOME: repair.home }, execute: repair.execute,
+    })).toMatchObject({ action: "repair", applied: true });
+
+    const update = fixture();
+    expect(() => updateManagedClient({
+      runtime: "codex", instance: "codex-existing", identity: "codex-work", command: "new-agent-bridge-mcp",
+      apply: true, env: { HOME: update.home }, execute: update.execute,
+      testHooks: { afterApply: ({ action }) => { if (action === "native-remove") throw new Error("pause update"); } },
+    })).toThrow("pause update");
+    const [updateOperation] = listClientOperations({ HOME: update.home });
+    expect(resumeManagedClientOperation({
+      operationId: updateOperation.operationId, env: { HOME: update.home }, execute: update.execute,
+    })).toMatchObject({ action: "update", applied: true });
+  }, 30_000);
+
+  it("finishes an uninstall after metadata deletion without recreating metadata", () => {
+    const state = fixture();
+    expect(() => uninstallManagedClient({
+      runtime: "codex", instance: "codex-existing", identity: "codex-work", apply: true,
+      env: { HOME: state.home }, execute: state.execute,
+      testHooks: { afterApply: ({ action }) => { if (action === "metadata-delete") throw new Error("pause after metadata deletion"); } },
+    })).toThrow("pause after metadata deletion");
+    const [operation] = listClientOperations({ HOME: state.home });
+    expect(existsSync(state.adopted.metadataPath)).toBe(false);
+    expect(resumeManagedClientOperation({
+      operationId: operation.operationId, env: { HOME: state.home }, execute: state.execute,
+    })).toMatchObject({ action: "uninstall", applied: true });
+    expect(existsSync(state.backendConfigPath)).toBe(false);
+    expect(existsSync(state.adopted.metadataPath)).toBe(false);
+  }, 20_000);
+
+  it("does not advance a metadata deletion after a dangling link appears", () => {
+    const state = fixture();
+    expect(() => uninstallManagedClient({
+      runtime: "codex", instance: "codex-existing", identity: "codex-work", apply: true,
+      env: { HOME: state.home }, execute: state.execute,
+      testHooks: { afterApply: ({ action }) => { if (action === "metadata-delete") throw new Error("pause after metadata deletion"); } },
+    })).toThrow("pause after metadata deletion");
+    const [operation] = listClientOperations({ HOME: state.home });
+    symlinkSync(join(state.home, "missing-metadata-target"), state.adopted.metadataPath);
+    expect(() => resumeManagedClientOperation({
+      operationId: operation.operationId, env: { HOME: state.home }, execute: state.execute,
+    })).toThrow("managed metadata is invalid");
+    expect(readClientOperation(operation.operationId, { HOME: state.home }).steps[2]?.state).toBe("intent-recorded");
+  }, 20_000);
+
+  it("removes only the Desktop bridge entry", () => {
+    const state = desktopFixture();
+    const configuration = JSON.parse(readFileSync(state.configPath, "utf8"));
+    configuration.preserved = { value: true };
+    configuration.mcpServers.other = { command: "/other-server", env: { TOKEN: "unrelated-sentinel" } };
+    writeFileSync(state.configPath, `${JSON.stringify(configuration)}\n`, { mode: 0o600 });
+    expect(uninstallManagedClient({
+      runtime: "claude-desktop", instance: "desktop-existing", identity: "desktop-work",
+      apply: true, env: { HOME: state.home },
+    })).toMatchObject({ action: "uninstall", applied: true });
+    const removed = JSON.parse(readFileSync(state.configPath, "utf8"));
+    expect(removed.preserved).toEqual({ value: true });
+    expect(removed.mcpServers.other).toEqual({ command: "/other-server", env: { TOKEN: "unrelated-sentinel" } });
+    expect(removed.mcpServers["agent-bridge"]).toBeUndefined();
+    expect(existsSync(state.backendConfigPath)).toBe(false);
+    expect(existsSync(state.adopted.metadataPath)).toBe(false);
+  }, 20_000);
 });

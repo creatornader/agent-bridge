@@ -43,14 +43,17 @@ published and the supported clients pass a fresh end-to-end check.
   registration comparison, immutable nonsecret host locators, and a re-inspected
   adoption postcondition.
 
-- Plan-first managed-client repair and update for Codex, Claude Code, and Claude
+- Plan-first managed-client repair, update, and forward-only uninstall for Codex, Claude Code, and Claude
   Desktop. Mutation authority comes only from strict private metadata selected by
   runtime and instance, then bound to the exact managed identity. Applied work uses
   the crash-safe journal, fixed-key credential-free update requests, full metadata and
   bounded registration proofs, exact restart classification, monotonic POSIX backend
   privacy repair, and metadata-last launch updates. Windows accepts only an already
-  private backend path. Desktop publication has a documented same-user advisory race.
-  Uninstall and endpoint migration remain out of scope.
+  private backend path. Uninstall removes the registration, backend, and metadata in
+  that order without rollback. It refuses a backend that still needs privacy repair.
+  Desktop publication and deletion have a documented same-user advisory race.
+  Generic `clients resume` derives authority only from a recorded v3 request. Endpoint
+  migration remains out of scope.
 
 - A pinned, non-root gateway image and a Compose development stack with ordered
   migration, restricted runtime-role bootstrap, health checks, private secret files,
@@ -78,8 +81,6 @@ published and the supported clients pass a fresh end-to-end check.
 
 ### Installation and operations
 
-- Build uninstall on the implemented crash-safe operation substrate and released
-  inspect/adopt/repair/update ownership boundary.
 - Add endpoint migration tooling that does not strand an existing SQLite outbox.
 - Publish a maintained client compatibility matrix.
 

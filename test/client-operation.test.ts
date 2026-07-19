@@ -540,6 +540,10 @@ describe("managed client operation substrate", () => {
       request: { kind: "update", release: "token=secret" } as unknown as ClientOperationRequest,
       runtime: "codex", instance: "one", steps: step,
     }, env)).toThrow("manifest is corrupt");
+    expect(() => createClientOperation({
+      request: { kind: "uninstall" } as unknown as ClientOperationRequest,
+      runtime: "codex", instance: "one", steps: step,
+    }, env)).toThrow("manifest is corrupt");
   });
 
   it("keeps released v2 manifests inspectable without allowing identity-free resume", () => {
@@ -704,7 +708,7 @@ describe("managed client operation substrate", () => {
   it("records POSIX cleanup durability or explicit Windows unavailability", () => {
     const { env } = fixture();
     let manifest = createClientOperation({
-      operationId: "66666666-6666-4666-8666-666666666666", request: { kind: "uninstall" }, runtime: "codex", instance: "one",
+      operationId: "66666666-6666-4666-8666-666666666666", request: { kind: "uninstall", identity: "test-worker" }, runtime: "codex", instance: "one",
       steps: [{ target: "metadata", locator: "management:one", beforeArtifact: "one.before", afterArtifact: "one.after", expectedBeforeSha256: sha256("before"), expectedAfterSha256: sha256("after") }],
     }, env);
     const lock = acquireClientOperationLock("codex", "one", env);
