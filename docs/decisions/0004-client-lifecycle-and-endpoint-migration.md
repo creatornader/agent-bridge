@@ -76,9 +76,10 @@ First-time `clients install` and enrollment behavior remains unchanged. A provis
 enrollment still refuses an existing backend file or MCP registration, so adoption
 cannot weaken first-install collision protection.
 
-`clients repair` and `clients update` operate only on a strict managed metadata record.
+`clients repair`, `clients update`, and `clients uninstall` operate only on a strict
+managed metadata record.
 The runtime and stable instance locate that record. `--identity` must match the record
-and the immutable repair or update request, but never locates it. These commands reject
+and the immutable request, but never locates it. These commands reject
 backend path, scope, and config-path flags.
 They plan without writing by default. A no-op exact registration creates no operation.
 
@@ -88,8 +89,8 @@ and fixed three Agent Bridge environment key names. It does not record their val
 Native launch arguments are empty. A native command is one executable contract. Bare
 commands reject argument separators and URL-like surfaces. Absolute paths must resolve
 to executable files before an update is journaled. Claude Desktop uses the installer's
-absolute launch resolver. A resume uses that recorded request and rejects another action, runtime,
-instance, identity, or replacement command.
+absolute launch resolver. An action-specific resume uses that recorded request and
+rejects another action, runtime, instance, identity, or replacement command.
 
 Before a mutation starts, metadata load verifies the private management root, clients
 directory, and metadata file. It rejects links, replacement, oversized files, unknown
@@ -126,7 +127,7 @@ resume. Resume is same-host only. Journal states
 are prepared, snapshotted, in-progress, applied, cleaning, and committed. Inspection
 separately reports resumable, classification-required, blocked, or complete.
 
-New repair and update journals use operation format version 3. A version 2 journal
+New repair, update, and uninstall journals use operation format version 3. A version 2 journal
 keeps its released request shape and remains inspectable. A non-terminal version 2
 journal cannot resume because it lacks an identity-bound request.
 
@@ -138,13 +139,29 @@ safe only when intent predates the cleanup attempt. Inspection recognizes a veri
 after artifact for the current intent-recorded step, but rejects other missing or extra
 files. Committed means verified writes and removed artifacts. It drops requests, steps,
 locators, digests, and artifact metadata while retaining a bounded credential-free
-completion record for audit. Public repair and update now use this substrate. Uninstall
-and endpoint migration remain deferred, and no rolled-back state is added. Physical
-erasure is outside the contract.
+completion record for audit. Public repair, update, and uninstall use this substrate.
+
+Uninstall is forward-only. It removes the managed registration and proves absence,
+deletes the already private backend file, then deletes metadata. It refuses a backend
+that still needs privacy repair, so it cannot loosen that policy as a side effect of
+deletion. A later failure does not restore a registration, backend, or metadata file.
+The uninstall plan never stores backend bytes. File deletion confirms the file and
+private parent identities before unlink. POSIX syncs the parent directory after a
+verified absence. Windows records unavailable directory durability. Node's pathname
+unlink cannot provide a transaction against a same-user writer, so this is an advisory
+race boundary. Desktop removes only `mcpServers.agent-bridge`.
+
+`clients resume <operation-id> [--recover-lock]` resumes only the v3 request recorded
+in the operation. It derives action, runtime, instance, identity, and update launch
+from that request and accepts no replacement client authority. It cannot resume a
+version 2 operation. It also completes an uninstall interrupted after metadata
+deletion, when an action-specific resume cannot reload the deleted record. Endpoint
+migration remains deferred, and no rolled-back state is added. Physical erasure is
+outside the contract.
 
 ## Consequences
 
-Managed repair and update have a narrow authority boundary and can fail closed on drift,
+Managed repair, update, and uninstall have a narrow authority boundary and can fail closed on drift,
 metadata corruption, ambiguous crash state, and unsafe backend policy changes. Existing
 exact registrations still require intentional, reviewable adoption. Endpoint migration
 remains deferred until it can also preserve and prove gateway edge outbox state.

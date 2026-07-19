@@ -26,7 +26,7 @@ export interface ClientOperationLaunch {
 export type ClientOperationRequest =
   | { kind: "repair"; identity: string }
   | { kind: "update"; identity: string; launch: ClientOperationLaunch }
-  | { kind: "uninstall" }
+  | { kind: "uninstall"; identity: string }
   | { kind: "migrate"; endpoint: string; workspace: string };
 type LegacyClientOperationRequest =
   | { kind: "repair" }
@@ -366,7 +366,10 @@ function validateRequest(
     if (keys !== "identity,kind") fail("CORRUPT_OPERATION", "operation manifest is corrupt");
     return { kind: "repair", identity: safeIdentity(request.identity) };
   }
-  if (request.kind === "uninstall" && keys !== "kind") fail("CORRUPT_OPERATION", "operation manifest is corrupt");
+  if (request.kind === "uninstall") {
+    if (keys !== "identity,kind") fail("CORRUPT_OPERATION", "operation manifest is corrupt");
+    return { kind: "uninstall", identity: safeIdentity(request.identity) };
+  }
   if (request.kind === "update") {
     if (keys !== "identity,kind,launch" || !request.launch || typeof request.launch !== "object"
       || Array.isArray(request.launch)) fail("CORRUPT_OPERATION", "operation manifest is corrupt");
@@ -417,7 +420,7 @@ function validateRequest(
     if (!/^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/.test(workspace)) fail("CORRUPT_OPERATION", "operation manifest is corrupt");
     return { kind: "migrate", endpoint: parsed.toString(), workspace };
   }
-  return { kind: "uninstall" };
+  fail("CORRUPT_OPERATION", "operation manifest is corrupt");
 }
 function validateCompletion(value: unknown): ClientOperationCompletion {
   if (!value || typeof value !== "object" || Array.isArray(value)) fail("CORRUPT_OPERATION", "operation manifest is corrupt");

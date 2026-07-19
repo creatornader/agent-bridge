@@ -8,6 +8,19 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and 
 
 ### Added
 
+- Add forward-only `clients uninstall` for metadata-owned Codex, Claude Code, and
+  Claude Desktop registrations. Uninstall proves and removes the managed
+  registration, deletes an already private backend file, then deletes management
+  metadata. It never snapshots backend bytes or reverses a completed step. POSIX
+  deletion syncs the private parent directory. Windows verifies deletion and records
+  unavailable directory durability. Native and Desktop writes retain their documented
+  same-user advisory race boundaries.
+  Add `clients resume <operation-id> [--recover-lock]`, which derives repair, update,
+  or uninstall authority from the recorded v3 request. It accepts no replacement
+  identity, runtime, instance, launch, or file locator. Version 2 journals remain
+  inspectable only. Generic resume also completes an uninstall interrupted after its
+  final metadata deletion.
+
 - Add plan-first `clients repair` and `clients update` for metadata-owned Codex,
   Claude Code, and Claude Desktop registrations. Runtime and stable instance locate
   strict owner-private metadata. Identity binds the record and immutable repair or
@@ -49,7 +62,7 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and 
   retain a bounded credential-free completion record. Windows mutations reuse native
   ACL results only within one held lock and for the same verified directory path
   identity. File checks, new or resumed locks, and passive inspection recheck the
-  policy. POSIX checks remain per-access. Repair and update use this substrate.
+  policy. POSIX checks remain per-access. Repair, update, and uninstall use this substrate.
 
 - Add read-only `clients inspect` and plan-first `clients adopt` for Codex, Claude
   Code, and Claude Desktop. Exact unmanaged registrations can be adopted only with

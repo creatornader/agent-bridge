@@ -293,10 +293,10 @@ Enrollment-based first-time provisioning retains strict registration and backend
 collision refusal. See
 [ADR 0004](decisions/0004-client-lifecycle-and-endpoint-migration.md).
 
-Managed-client repair and update use a local crash-safe substrate. Strict
+Managed-client repair, update, and uninstall use a local crash-safe substrate. Strict
 owner-private metadata is the mutation authority. Runtime plus stable instance locate
 the metadata, and identity must match both the record and the immutable repair or
-update request. Repair restores its launch contract. Update validates a new launch
+update request. Uninstall also binds the identity. Repair restores its launch contract. Update validates a new launch
 before it creates the journal and stores only the identity, normalized command,
 arguments, scope, and fixed Agent Bridge environment key names.
 Caller backend, scope, and host-config flags are rejected. Owner-private revisioned
@@ -318,12 +318,12 @@ is same-host only. The journal advances through prepared,
 snapshotted, in-progress, applied, cleaning, and committed. Inspection separately
 reports resumable, classification-required, blocked, or complete.
 
-New repair and update journals use operation format version 3. Version 2 manifests
+New repair, update, and uninstall journals use operation format version 3. Version 2 manifests
 retain their released request interpretation and remain inspectable. A non-terminal
 version 2 record is blocked because it cannot prove the identity-bound request needed
 for these public mutations.
 
-Before a mutation, repair and update compare the full strict metadata record after
+Before a mutation, repair, update, and uninstall compare the full strict metadata record after
 acquiring the lock. Each non-metadata step repeats that authority check. Registration
 proofs include a bounded observation of the Agent Bridge entry and its full target
 contract. Unknown environment keys, malformed values, unsafe arguments, an unexpected
@@ -343,6 +343,16 @@ identities immediately before rename, but this is an advisory race boundary, not
 transaction guarantee. Windows accepts an already owner-private backend path and
 refuses a non-private backend instead of claiming a safe permission tightening.
 
+Uninstall removes a managed registration, proves its absence, deletes the private
+backend file, then deletes the management metadata. It does not tighten an unsafe
+backend before deletion. A backend that is not already private stops the plan before
+it removes the registration. Uninstall never rolls a completed step back. Desktop
+deletes only `mcpServers.agent-bridge` and preserves unrelated JSON. Before a backend
+or metadata unlink, the code checks the private parent and file identities. POSIX
+syncs that parent after deletion. Windows reports verified deletion with unavailable
+directory durability. Node pathname deletion cannot make this atomic against an
+uncooperative same-user writer, so that race remains advisory.
+
 Native Windows ACL checks start uncached for each acquired or resumed mutation lock.
 While that lock remains held, later directory checks may reuse the result only for the
 same directory path, device, and inode. File checks always use the native policy.
@@ -359,8 +369,15 @@ one verified after artifact left by an interrupted manifest publication. Other m
 or extra files block. Committed means verified writes and removed artifacts. Its
 manifest drops requests, steps, locators, digests, and artifact metadata while retaining
 the operation kind, step count, completion time, and cleanup durability for audit.
-Uninstall, endpoint migration, and rolled-back state remain unavailable. Physical erasure remains outside the
-filesystem contract.
+Endpoint migration remains unavailable. Uninstall adds no rolled-back state. Physical
+erasure remains outside the filesystem contract.
+
+`clients resume <operation-id>` accepts only the stored v3 operation and optional
+same-host stale-lock recovery. It derives the action, runtime, instance, identity, and
+update launch from the immutable request. It rejects version 2 records and cannot take
+replacement caller authority. Generic resume finishes an uninstall interrupted after
+metadata deletion, when an action-specific command cannot reload metadata to assert
+its identity.
 
 ### v1 compatibility is additive
 

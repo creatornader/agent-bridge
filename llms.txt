@@ -50,6 +50,8 @@ services can call the CLI or HTTPS API or embed the Node library without a host 
 - agent-bridge clients adopt <runtime> --identity <principal> --instance <stable-key> --backend-config <absolute path> [--apply]
 - agent-bridge clients repair <runtime> --identity <principal> --instance <stable-key> [--apply] [--resume <uuid>] [--recover-lock]
 - agent-bridge clients update <runtime> --identity <principal> --instance <stable-key> [--command <command>] [--apply] [--resume <uuid>] [--recover-lock]
+- agent-bridge clients uninstall <runtime> --identity <principal> --instance <stable-key> [--apply] [--resume <uuid>] [--recover-lock]
+- agent-bridge clients resume <operation-id> [--recover-lock]  # resumes only the identity-bound v3 request
 - agent-bridge clients operations [<operation-id>]  # read-only resumable/classification-required/blocked/complete summaries
 - agent-bridge owner provision|inventory|rotate|revoke
 - agent-bridge clients install <runtime> --enrollment-file <private path>
@@ -71,7 +73,7 @@ exactly AGENT_BRIDGE_AGENT, AGENT_BRIDGE_INSTANCE, and AGENT_BRIDGE_CONFIG. Clau
 connectivity status is not registration state. Desktop inspection uses the installer's
 validated absolute launch resolver, and applied adoption re-inspects its postcondition.
 Only Claude Code accepts `--scope`; only Claude Desktop accepts `--config-path` for
-inspect and adopt. Repair and update derive those locators from strict managed metadata.
+inspect and adopt. Repair, update, and uninstall derive those locators from strict managed metadata.
 They reject backend, scope, and config-path authority flags. `--identity` binds the
 metadata record and immutable request. Repair restores the recorded launch contract.
 Update records a normalized credential-free launch request, including only fixed Agent

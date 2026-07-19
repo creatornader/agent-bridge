@@ -11,7 +11,7 @@ import {
   recoverClientOperationLock,
 } from "../src/client-operation.js";
 import { adoptClient } from "../src/client-lifecycle.js";
-import { repairManagedClient } from "../src/client-maintenance.js";
+import { repairManagedClient, uninstallManagedClient } from "../src/client-maintenance.js";
 import {
   acquireEnrollmentLock,
   createPendingEnrollment,
@@ -299,5 +299,51 @@ describe("Windows native private path smoke", () => {
     expect(registration).toEqual({ present: true, command: "agent-bridge-mcp" });
     verifyPrivatePathAccess(adopted.metadataPath, "file");
     verifyPrivatePathAccess(backendConfigPath, "file");
+  }, nativeTestTimeout);
+
+  it.skipIf(process.platform !== "win32")("uninstalls a managed native registration with native private paths", () => {
+    const { home, env } = root("agent-bridge-native-uninstall-");
+    const clients = join(home, ".agent-bridge", "clients");
+    mkdirSync(clients, { recursive: true });
+    securePrivatePath(join(home, ".agent-bridge"), "directory");
+    securePrivatePath(clients, "directory");
+    const backendConfigPath = join(clients, "codex-native-uninstall.config");
+    writeFileSync(backendConfigPath, "AGENT_BRIDGE_PROVIDER=local\n", { mode: 0o600 });
+    securePrivatePath(backendConfigPath, "file");
+    const registration = { present: true, command: "agent-bridge-mcp" };
+    const execute = (_command: string, args: string[]) => {
+      if (args[1] === "get") {
+        if (!registration.present) {
+          return { pid: 1, output: [], stdout: "Error: No MCP server named 'agent-bridge' found.\n", stderr: "", status: 1, signal: null };
+        }
+        return {
+          pid: 1, output: [], stderr: "", status: 0, signal: null,
+          stdout: JSON.stringify({
+            name: "agent-bridge", enabled: true,
+            transport: { type: "stdio", command: registration.command, args: [], env: {
+              AGENT_BRIDGE_AGENT: "codex", AGENT_BRIDGE_INSTANCE: "native-uninstall",
+              AGENT_BRIDGE_CONFIG: backendConfigPath,
+            }, env_vars: [], cwd: null },
+          }),
+        };
+      }
+      if (args[1] === "remove") {
+        registration.present = false;
+        return { pid: 1, output: [], stdout: "", stderr: "", status: 0, signal: null };
+      }
+      throw new Error("uninstall must not add a native registration");
+    };
+    const lifecycleEnv = { ...env, CODEX_HOME: join(home, "codex-profile") };
+    const adopted = adoptClient("codex", "codex", {
+      instance: "native-uninstall", backendConfigPath, apply: true, env: lifecycleEnv,
+    }, execute);
+    expect(uninstallManagedClient({
+      runtime: "codex", identity: "codex", instance: "native-uninstall",
+      apply: true, env: lifecycleEnv, execute,
+    })).toMatchObject({ action: "uninstall", applied: true });
+    expect(registration.present).toBe(false);
+    expect(existsSync(backendConfigPath)).toBe(false);
+    expect(existsSync(adopted.metadataPath)).toBe(false);
+    verifyPrivatePathAccess(clients, "directory");
   }, nativeTestTimeout);
 });
