@@ -94,9 +94,11 @@ Do not delete the edge database, alter the gate tables, or reopen a retired scop
 hand. Inspect the operation ID reported by status. Resume the matching v6 operation
 with `clients resume <operation-id> [--recover-lock]`. A new worker cannot take an
 unexpired drain lease. It must wait for the lease to expire. Reverse before the
-predecessor grace cutoff drains and retires the temporary target, then reactivates the
-source. Finalization after grace retires the source. If no matching operation exists,
-preserve the database and stop rather than changing the gate manually.
+predecessor grace cutoff is not supported. To return to the earlier endpoint, first
+rotate a new owner credential for that endpoint, then run an ordinary forward cutover
+with it as the successor. Finalization after grace retires the source. If no matching
+operation exists, preserve the database and stop rather than changing the gate
+manually.
 
 A dry migration plan refuses an edge with live `-wal` or `-shm` sidecars. Stop the
 writer and let SQLite checkpoint its state, then retry the plan. The plan never opens
