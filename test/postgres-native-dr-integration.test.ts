@@ -27,7 +27,9 @@ import {
 } from "../src/postgres-native-dr.js";
 
 const enabled = process.env.AGENT_BRIDGE_POSTGRES_NATIVE_DR_INTEGRATION === "1";
-const integration = enabled ? describe : describe.skip;
+// Every case owns the selected major's fixed host port and the shared residue tracker.
+// Keep cases sequential inside a matrix job so cleanup completes before the next bind.
+const integration = enabled ? describe.sequential : describe.skip;
 const migrationDirectory = fileURLToPath(new URL("../sql/migrations", import.meta.url));
 const password = "agent-bridge-native-dr-test";
 const residues = new Set<string>();
