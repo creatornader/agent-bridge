@@ -7,6 +7,7 @@ import { fileURLToPath } from "node:url";
 import { afterEach, describe, expect, it } from "vitest";
 import {
   acquireClientOperationLock,
+  CLIENT_OPERATION_VERSION,
   createClientOperation,
   recoverClientOperationLock,
 } from "../src/client-operation.js";
@@ -204,7 +205,7 @@ describe("Windows native private path smoke", () => {
     expect(operations.status, operations.stderr).toBe(0);
     expect(operations.stderr).toBe("");
     expect(JSON.parse(operations.stdout)).toMatchObject({
-      schemaVersion: 5,
+      schemaVersion: CLIENT_OPERATION_VERSION,
       operations: [{
         operationId,
         operation: "repair",

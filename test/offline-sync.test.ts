@@ -1090,11 +1090,15 @@ describe("offline SQLite synchronization", () => {
       await edge.initialize();
       await edge.close();
     `;
-    await Promise.all(Array.from({ length: 8 }, () => execFileAsync(
+    const children = await Promise.allSettled(Array.from({ length: 8 }, () => execFileAsync(
       process.execPath,
       ["--input-type=module", "--eval", script],
       { env: { ...process.env, AGENT_BRIDGE_TEST_DB: path }, timeout: 30_000 },
     )));
+    const failures = children.filter((result): result is PromiseRejectedResult => result.status === "rejected");
+    if (failures.length) {
+      throw new AggregateError(failures.map((result) => result.reason), "concurrent edge upgrades failed");
+    }
 
     const upgraded = new DatabaseSync(path);
     const columns = upgraded.prepare("PRAGMA table_info(edge_inbox)").all() as Array<{
