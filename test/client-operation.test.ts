@@ -8,10 +8,11 @@ import { createHash } from "node:crypto";
 import { afterEach, describe, expect, it } from "vitest";
 import {
   acquireClientOperationLock, ClientOperationError, createClientOperation,
+  beginClientOperation, cleanupClientOperationArtifact, completeClientOperationCleanup,
   classifyClientOperationRestart, type ClientOperationFilesystem,
   inspectClientOperation, listClientOperations, readClientOperation,
   recordClientOperationStepApplied, recordClientOperationStepIntent,
-  recoverClientOperationLock, releaseClientOperationLock, transitionClientOperation,
+  recoverClientOperationLock, releaseClientOperationLock, resumeClientOperation, transitionClientOperation,
   validateClientOperation, writeClientOperationSnapshot,
 } from "../src/client-operation.js";
 import { securePrivatePath } from "../src/private-path.js";
@@ -27,10 +28,10 @@ const sha256 = (value: string) => createHash("sha256").update(value).digest("hex
 function operation(env: NodeJS.ProcessEnv) {
   return createClientOperation({
     operationId: "11111111-1111-4111-8111-111111111111",
-    operation: "update", runtime: "codex", instance: "stable-client", steps: [
-      { target: "registration", locator: "codex:profile:default", snapshotArtifact: "registration.json", expectedBeforeSha256: sha256("before-registration"), expectedAfterSha256: sha256("after-registration") },
-      { target: "backend", locator: "backend:managed", snapshotArtifact: "backend.snapshot", expectedBeforeSha256: sha256("before-backend"), expectedAfterSha256: sha256("after-backend") },
-      { target: "metadata", locator: "management:stable-client", snapshotArtifact: "metadata.json", expectedBeforeSha256: sha256("before-metadata"), expectedAfterSha256: sha256("after-metadata") },
+    request: { kind: "update", release: "next" }, runtime: "codex", instance: "stable-client", steps: [
+      { target: "registration", locator: "codex:profile:default", beforeArtifact: "registration.before", afterArtifact: "registration.after", expectedBeforeSha256: sha256("before-registration"), expectedAfterSha256: sha256("after-registration") },
+      { target: "backend", locator: "backend:managed", beforeArtifact: "backend.before", afterArtifact: "backend.after", expectedBeforeSha256: sha256("before-backend"), expectedAfterSha256: sha256("after-backend") },
+      { target: "metadata", locator: "management:stable-client", beforeArtifact: "metadata.before", afterArtifact: "metadata.after", expectedBeforeSha256: sha256("before-metadata"), expectedAfterSha256: sha256("after-metadata") },
     ],
   }, env);
 }
@@ -50,9 +51,9 @@ describe("managed client operation substrate", () => {
     const { home, env } = fixture();
     let manifest = operation(env);
     const lock = acquireClientOperationLock("codex", "stable-client", env);
-    manifest = writeClientOperationSnapshot(manifest.operationId, manifest, "registration.json", "before-registration", lock, env);
-    manifest = writeClientOperationSnapshot(manifest.operationId, manifest, "backend.snapshot", "before-backend", lock, env);
-    manifest = writeClientOperationSnapshot(manifest.operationId, manifest, "metadata.json", "before-metadata", lock, env);
+    manifest = writeClientOperationSnapshot(manifest.operationId, manifest, "registration.before", "before-registration", lock, env);
+    manifest = writeClientOperationSnapshot(manifest.operationId, manifest, "backend.before", "before-backend", lock, env);
+    manifest = writeClientOperationSnapshot(manifest.operationId, manifest, "metadata.before", "before-metadata", lock, env);
     expect(manifest).toMatchObject({ state: "prepared", revision: 3 });
     manifest = transitionClientOperation(manifest.operationId, manifest, "snapshotted", lock, env);
     expect(classifyClientOperationRestart(manifest, manifest.steps[0].expectedAfterSha256))
@@ -62,7 +63,7 @@ describe("managed client operation substrate", () => {
     expect(classifyClientOperationRestart(manifest, manifest.steps[0].expectedBeforeSha256)).toMatchObject({ stepIndex: 0, disposition: "retryable" });
     expect(classifyClientOperationRestart(manifest, manifest.steps[0].expectedAfterSha256)).toMatchObject({ stepIndex: 0, disposition: "advance" });
     expect(classifyClientOperationRestart(manifest, "f".repeat(64))).toMatchObject({ stepIndex: 0, disposition: "blocked" });
-    manifest = recordClientOperationStepApplied(manifest.operationId, manifest, 0, manifest.steps[0].expectedAfterSha256, lock, env);
+    manifest = recordClientOperationStepApplied(manifest.operationId, manifest, 0, "after-registration", lock, env);
     expect(manifest).toMatchObject({ state: "in-progress", revision: 6, steps: [{ state: "observed-applied" }, { state: "pending" }, { state: "pending" }] });
     expect(releaseClientOperationLock(lock)).toBe("released");
 
@@ -70,7 +71,7 @@ describe("managed client operation substrate", () => {
     if (process.platform !== "win32") {
       expect(statSync(directory).mode & 0o077).toBe(0);
       expect(statSync(join(directory, "manifest.json")).mode & 0o077).toBe(0);
-      expect(statSync(join(directory, "snapshots", "registration.json")).mode & 0o077).toBe(0);
+      expect(statSync(join(directory, "snapshots", "registration.before")).mode & 0o077).toBe(0);
     }
   });
 
@@ -148,17 +149,17 @@ describe("managed client operation substrate", () => {
     const secret = "AGENT_BRIDGE_TOKEN=top-secret";
     let manifest = createClientOperation({
       operationId: "33333333-3333-4333-8333-333333333333",
-      operation: "update", runtime: "codex", instance: "stable-client", steps: [
-        { target: "backend", locator: "backend:managed", snapshotArtifact: "backend.snapshot", expectedBeforeSha256: sha256(secret), expectedAfterSha256: sha256("after-backend") },
+      request: { kind: "update", release: "next" }, runtime: "codex", instance: "stable-client", steps: [
+        { target: "backend", locator: "backend:managed", beforeArtifact: "backend.before", afterArtifact: "backend.after", expectedBeforeSha256: sha256(secret), expectedAfterSha256: sha256("after-backend") },
       ],
     }, env);
     const lock = acquireClientOperationLock("codex", "stable-client", env);
-    manifest = writeClientOperationSnapshot(manifest.operationId, manifest, "backend.snapshot", secret, lock, env);
+    manifest = writeClientOperationSnapshot(manifest.operationId, manifest, "backend.before", secret, lock, env);
     const summary = inspectClientOperation(manifest.operationId, env);
     const listed = listClientOperations(env);
     expect(JSON.stringify({ summary, listed })).not.toContain("top-secret");
     expect(JSON.stringify({ summary, listed })).not.toContain("AGENT_BRIDGE_TOKEN");
-    expect(summary.artifacts[0]).toMatchObject({ name: "backend.snapshot", bytes: 29 });
+    expect(summary.artifacts[0]).toMatchObject({ name: "backend.before", bytes: 29 });
     releaseClientOperationLock(lock);
   });
 
@@ -174,7 +175,7 @@ describe("managed client operation substrate", () => {
     if (process.platform === "win32") return;
     const { home, env } = fixture(); let manifest = operation(env);
     const lock = acquireClientOperationLock("codex", "stable-client", env);
-    manifest = writeClientOperationSnapshot(manifest.operationId, manifest, "registration.json", "before-registration", lock, env);
+    manifest = writeClientOperationSnapshot(manifest.operationId, manifest, "registration.before", "before-registration", lock, env);
     const operationPath = join(home, ".agent-bridge", "operations", manifest.operationId);
     const original = join(home, "original-snapshots");
     const external = join(home, "external-snapshots");
@@ -198,8 +199,8 @@ describe("managed client operation substrate", () => {
     const filesystem = injected(() => {}, {
       syncDirectory: (path) => { if (path.endsWith("snapshots")) throw new Error("injected sync failure"); },
     });
-    expect(() => writeClientOperationSnapshot(manifest.operationId, manifest, "registration.json", "before-registration", lock, env, filesystem)).toThrow("could not be published durably");
-    expect(existsSync(join(home, ".agent-bridge", "operations", manifest.operationId, "snapshots", "registration.json"))).toBe(true);
+    expect(() => writeClientOperationSnapshot(manifest.operationId, manifest, "registration.before", "before-registration", lock, env, filesystem)).toThrow("could not be published durably");
+    expect(existsSync(join(home, ".agent-bridge", "operations", manifest.operationId, "snapshots", "registration.before"))).toBe(true);
     expect(inspectClientOperation(manifest.operationId, env)).toMatchObject({ state: "corrupt" });
   });
 
@@ -214,13 +215,13 @@ describe("managed client operation substrate", () => {
     writeFileSync(join(external, "do-not-touch"), "preserve", { mode: 0o600 });
     let swapped = false;
     const filesystem = injected((event, path) => {
-      if (event === "before-publish-link" && path.endsWith("registration.json") && !swapped) {
+      if (event === "before-publish-link" && path.endsWith("registration.before") && !swapped) {
         swapped = true; renameSync(snapshots, original); renameSync(external, snapshots);
       }
     });
-    expect(() => writeClientOperationSnapshot(manifest.operationId, manifest, "registration.json", "before-registration", lock, env, filesystem)).toThrow("operation directory changed");
+    expect(() => writeClientOperationSnapshot(manifest.operationId, manifest, "registration.before", "before-registration", lock, env, filesystem)).toThrow("operation directory changed");
     expect(readFileSync(join(snapshots, "do-not-touch"), "utf8")).toBe("preserve");
-    expect(existsSync(join(snapshots, "registration.json"))).toBe(false);
+    expect(existsSync(join(snapshots, "registration.before"))).toBe(false);
   });
 
   it("blocks after snapshot creation when manifest publication fails", () => {
@@ -229,8 +230,8 @@ describe("managed client operation substrate", () => {
     const filesystem = injected((event, path) => {
       if (event === "before-publish-rename" && path.endsWith("manifest.json")) throw new Error("injected manifest failure");
     });
-    expect(() => writeClientOperationSnapshot(manifest.operationId, manifest, "registration.json", "before-registration", lock, env, filesystem)).toThrow("snapshot publication left ambiguous");
-    expect(existsSync(join(home, ".agent-bridge", "operations", manifest.operationId, "snapshots", "registration.json"))).toBe(true);
+    expect(() => writeClientOperationSnapshot(manifest.operationId, manifest, "registration.before", "before-registration", lock, env, filesystem)).toThrow("snapshot publication left ambiguous");
+    expect(existsSync(join(home, ".agent-bridge", "operations", manifest.operationId, "snapshots", "registration.before"))).toBe(true);
     expect(inspectClientOperation(manifest.operationId, env)).toMatchObject({ state: "corrupt", recoverable: false });
   });
 
@@ -243,15 +244,15 @@ describe("managed client operation substrate", () => {
       }
     });
     expect(() => writeClientOperationSnapshot(
-      manifest.operationId, manifest, "registration.json", "before-registration", lock, env, filesystem,
+      manifest.operationId, manifest, "registration.before", "before-registration", lock, env, filesystem,
     )).toThrow("snapshot publication left ambiguous");
-    const snapshot = join(home, ".agent-bridge", "operations", manifest.operationId, "snapshots", "registration.json");
+    const snapshot = join(home, ".agent-bridge", "operations", manifest.operationId, "snapshots", "registration.before");
     expect(readFileSync(snapshot, "utf8")).toBe("before-registration");
     expect(() => writeClientOperationSnapshot(
-      manifest.operationId, manifest, "registration.json", "after-registration", lock, env,
+      manifest.operationId, manifest, "registration.before", "after-registration", lock, env,
     )).toThrow("snapshot does not match");
     expect(() => writeClientOperationSnapshot(
-      manifest.operationId, manifest, "registration.json", "before-registration", lock, env,
+      manifest.operationId, manifest, "registration.before", "before-registration", lock, env,
     )).toThrow("already exists outside the durable manifest");
     expect(readFileSync(snapshot, "utf8")).toBe("before-registration");
   });
@@ -260,7 +261,7 @@ describe("managed client operation substrate", () => {
     const { env } = fixture(); let manifest = operation(env);
     const lock = acquireClientOperationLock("codex", "stable-client", env);
     manifest = writeClientOperationSnapshot(
-      manifest.operationId, manifest, "registration.json", "before-registration", lock, env,
+      manifest.operationId, manifest, "registration.before", "before-registration", lock, env,
     );
     expect(() => transitionClientOperation(manifest.operationId, manifest, "snapshotted", lock, env))
       .toThrow("durable snapshot for every ordered step");
@@ -281,18 +282,56 @@ describe("managed client operation substrate", () => {
     })).toThrow("manifest is corrupt");
     expect(() => validateClientOperation({
       ...manifest,
-      artifacts: [{ name: "registration.json", bytes: 16 * 1024 * 1024 + 1, sha256: manifest.steps[0].expectedBeforeSha256 }],
+      artifacts: [{ ...manifest.artifacts[0], name: "registration.before", stepIndex: 0, phase: "before", bytes: 16 * 1024 * 1024 + 1, sha256: manifest.steps[0].expectedBeforeSha256, cleanupIntentAt: null, removedAt: null, directoryDurability: null }],
     })).toThrow("manifest is corrupt");
     expect(() => validateClientOperation({
       ...manifest,
-      artifacts: [{ name: "registration.json", bytes: 1, sha256: "f".repeat(64) }],
+      artifacts: [{ name: "registration.before", stepIndex: 0, phase: "before", bytes: 1, sha256: "f".repeat(64), cleanupIntentAt: null, removedAt: null, directoryDurability: null }],
     })).toThrow("manifest is corrupt");
     expect(() => validateClientOperation({
       ...manifest,
       steps: Array.from({ length: 129 }, (_, index) => ({
-        ...manifest.steps[0], index, snapshotArtifact: `snapshot-${index}.json`,
+        ...manifest.steps[0], index, beforeArtifact: `before-${index}.json`, afterArtifact: `after-${index}.json`,
       })),
     })).toThrow("manifest is corrupt");
+  });
+
+  it("rejects removed cleanup artifacts without a durability result", () => {
+    const { env } = fixture();
+    const created = createClientOperation({
+      request: { kind: "repair" }, runtime: "codex", instance: "one",
+      steps: [{ target: "metadata", locator: "management:one", beforeArtifact: "one.before", afterArtifact: "one.after", expectedBeforeSha256: sha256("before"), expectedAfterSha256: sha256("after") }],
+    }, env);
+    const now = new Date().toISOString();
+    const steps = created.steps.map((step) => ({
+      ...step, state: "observed-applied" as const, intentRecordedAt: now, observedAppliedAt: now,
+    }));
+    const artifacts = [
+      { name: "one.before", stepIndex: 0, phase: "before" as const, bytes: 6, sha256: sha256("before"), cleanupIntentAt: now, removedAt: now, directoryDurability: "durable" as const },
+      { name: "one.after", stepIndex: 0, phase: "after" as const, bytes: 5, sha256: sha256("after"), cleanupIntentAt: now, removedAt: now, directoryDurability: "durable" as const },
+    ];
+    expect(() => validateClientOperation({ ...created, state: "cleaning", steps, artifacts })).not.toThrow();
+    expect(() => validateClientOperation({
+      ...created, state: "cleaning", steps,
+      artifacts: artifacts.map((artifact, index) => index === 0 ? { ...artifact, directoryDurability: null } : artifact),
+    })).toThrow("manifest is corrupt");
+  });
+
+  it("accepts the maximum plan and artifact counts", () => {
+    const { env } = fixture(); const created = operation(env); const now = new Date().toISOString();
+    const steps = Array.from({ length: 128 }, (_, index) => ({
+      index, target: "metadata" as const, locator: `management:item-${index}`,
+      beforeArtifact: `item-${index}.before`, afterArtifact: `item-${index}.after`,
+      expectedBeforeSha256: sha256(`before-${index}`), expectedAfterSha256: sha256(`after-${index}`),
+      state: "observed-applied" as const, intentRecordedAt: now, observedAppliedAt: now,
+    }));
+    const artifacts = steps.flatMap((step) => [
+      { name: step.beforeArtifact, stepIndex: step.index, phase: "before" as const, bytes: 1, sha256: step.expectedBeforeSha256, cleanupIntentAt: null, removedAt: null, directoryDurability: null },
+      { name: step.afterArtifact, stepIndex: step.index, phase: "after" as const, bytes: 1, sha256: step.expectedAfterSha256, cleanupIntentAt: null, removedAt: null, directoryDurability: null },
+    ]);
+    const validated = validateClientOperation({ ...created, state: "applied", steps, artifacts });
+    expect(validated.steps).toHaveLength(128);
+    expect(validated.artifacts).toHaveLength(256);
   });
 
   it("preserves recoverable residue when manifest publication and cleanup both fail", () => {
@@ -301,25 +340,290 @@ describe("managed client operation substrate", () => {
       if (event === "after-snapshots-created") throw new Error("injected manifest publication failure");
     }, { remove: () => { throw new Error("injected cleanup failure"); } });
     expect(() => createClientOperation({
-      operationId: "22222222-2222-4222-8222-222222222222", operation: "repair", runtime: "codex", instance: "stable-client",
-      steps: [{ target: "metadata", locator: "management:stable-client", snapshotArtifact: "metadata.json", expectedBeforeSha256: "1".repeat(64), expectedAfterSha256: "2".repeat(64) }],
+      operationId: "22222222-2222-4222-8222-222222222222", request: { kind: "repair" }, runtime: "codex", instance: "stable-client",
+      steps: [{ target: "metadata", locator: "management:stable-client", beforeArtifact: "metadata.before", afterArtifact: "metadata.after", expectedBeforeSha256: "1".repeat(64), expectedAfterSha256: "2".repeat(64) }],
     }, env, filesystem)).toThrow("injected manifest publication failure");
     expect(existsSync(join(home, ".agent-bridge", "operations", "22222222-2222-4222-8222-222222222222", "snapshots"))).toBe(true);
+  });
+
+  it("preserves a published manifest when operation-root durability is uncertain", () => {
+    const { home, env } = fixture();
+    const filesystem = injected(() => {}, {
+      syncDirectory: (path) => { if (path.endsWith(join(".agent-bridge", "operations"))) throw new Error("injected root sync failure"); },
+    });
+    const operationId = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
+    expect(() => createClientOperation({
+      operationId, request: { kind: "repair" }, runtime: "codex", instance: "stable-client",
+      steps: [{ target: "metadata", locator: "management:stable-client", beforeArtifact: "metadata.before", afterArtifact: "metadata.after", expectedBeforeSha256: sha256("before"), expectedAfterSha256: sha256("after") }],
+    }, env, filesystem)).toThrow("injected root sync failure");
+    expect(readClientOperation(operationId, env)).toMatchObject({ operationId, state: "prepared" });
   });
 
   it("identifies registration, backend, and metadata as the exact pending crash step", () => {
     const { env } = fixture(); let manifest = operation(env);
     const lock = acquireClientOperationLock("codex", "stable-client", env);
-    for (const [artifact, contents] of [["registration.json", "before-registration"], ["backend.snapshot", "before-backend"], ["metadata.json", "before-metadata"]]) {
+    for (const [artifact, contents] of [["registration.before", "before-registration"], ["backend.before", "before-backend"], ["metadata.before", "before-metadata"]]) {
       manifest = writeClientOperationSnapshot(manifest.operationId, manifest, artifact, contents, lock, env);
     }
     manifest = transitionClientOperation(manifest.operationId, manifest, "snapshotted", lock, env);
     for (let index = 0; index < 3; index += 1) {
       manifest = recordClientOperationStepIntent(manifest.operationId, manifest, index, lock, env);
       expect(classifyClientOperationRestart(manifest, manifest.steps[index].expectedBeforeSha256)).toMatchObject({ stepIndex: index, disposition: "retryable" });
-      manifest = recordClientOperationStepApplied(manifest.operationId, manifest, index, manifest.steps[index].expectedAfterSha256, lock, env);
+      manifest = recordClientOperationStepApplied(manifest.operationId, manifest, index, ["after-registration", "after-backend", "after-metadata"][index], lock, env);
     }
-    expect(manifest.state).toBe("committed");
+    expect(manifest.state).toBe("applied");
     expect(classifyClientOperationRestart(manifest, "0".repeat(64))).toMatchObject({ stepIndex: null, disposition: "complete" });
+  });
+
+  it("begins under the client lock and refuses another unfinished operation", () => {
+    const { env } = fixture();
+    const input = {
+      operationId: "44444444-4444-4444-8444-444444444444", request: { kind: "repair" } as const,
+      runtime: "codex" as const, instance: "stable-client",
+      steps: [{ target: "metadata" as const, locator: "management:stable-client", beforeArtifact: "metadata.before", afterArtifact: "metadata.after", expectedBeforeSha256: sha256("before"), expectedAfterSha256: sha256("after") }],
+    };
+    const begun = beginClientOperation(input, env);
+    expect(() => beginClientOperation({ ...input, operationId: "55555555-5555-4555-8555-555555555555" }, env)).toThrow("client lock");
+    releaseClientOperationLock(begun.lock);
+    expect(() => beginClientOperation({ ...input, operationId: "55555555-5555-4555-8555-555555555555" }, env)).toThrow("unfinished operation");
+  });
+
+  it("enforces same-host resume and reports explicit inspection states", () => {
+    const { home, env } = fixture(); const manifest = operation(env);
+    expect(inspectClientOperation(manifest.operationId, env)).toMatchObject({ inspectionState: "resumable" });
+    const path = join(home, ".agent-bridge", "operations", manifest.operationId, "manifest.json");
+    const changed = JSON.parse(readFileSync(path, "utf8")); changed.host = "another-host.invalid";
+    writeFileSync(path, `${JSON.stringify(changed, null, 2)}\n`, { mode: 0o600 });
+    expect(inspectClientOperation(manifest.operationId, env)).toMatchObject({ inspectionState: "blocked" });
+    expect(() => resumeClientOperation(manifest.operationId, env)).toThrow("creating host");
+    const lock = acquireClientOperationLock("codex", "stable-client", env);
+    expect(() => writeClientOperationSnapshot(
+      manifest.operationId, manifest, "registration.before", "before-registration", lock, env,
+    )).toThrow("creating host");
+    releaseClientOperationLock(lock);
+  });
+
+  it("replays an exact no-replace after artifact after a manifest crash", () => {
+    const { env } = fixture(); let manifest = operation(env);
+    const lock = acquireClientOperationLock("codex", "stable-client", env);
+    for (const [artifact, contents] of [["registration.before", "before-registration"], ["backend.before", "before-backend"], ["metadata.before", "before-metadata"]]) {
+      manifest = writeClientOperationSnapshot(manifest.operationId, manifest, artifact, contents, lock, env);
+    }
+    manifest = transitionClientOperation(manifest.operationId, manifest, "snapshotted", lock, env);
+    manifest = recordClientOperationStepIntent(manifest.operationId, manifest, 0, lock, env);
+    let crashed = false;
+    const filesystem = injected((event, path) => {
+      if (!crashed && event === "before-publish-rename" && path.endsWith("manifest.json")) { crashed = true; throw new Error("crash"); }
+    });
+    expect(() => recordClientOperationStepApplied(manifest.operationId, manifest, 0, "after-registration", lock, env, filesystem)).toThrow("ambiguous");
+    releaseClientOperationLock(lock);
+    expect(inspectClientOperation(manifest.operationId, env)).toMatchObject({ inspectionState: "classification-required" });
+    const resumed = resumeClientOperation(manifest.operationId, env);
+    manifest = recordClientOperationStepApplied(manifest.operationId, resumed.manifest, 0, "after-registration", resumed.lock, env);
+    expect(manifest.steps[0].state).toBe("observed-applied");
+    releaseClientOperationLock(resumed.lock);
+  });
+
+  it("resumes per-artifact cleanup after unlink and retains a safe completion record", () => {
+    const { env } = fixture(); let manifest = operation(env);
+    const lock = acquireClientOperationLock("codex", "stable-client", env);
+    for (const [artifact, before] of [["registration.before", "before-registration"], ["backend.before", "before-backend"], ["metadata.before", "before-metadata"]]) {
+      manifest = writeClientOperationSnapshot(manifest.operationId, manifest, artifact, before, lock, env);
+    }
+    manifest = transitionClientOperation(manifest.operationId, manifest, "snapshotted", lock, env);
+    for (const [index, after] of ["after-registration", "after-backend", "after-metadata"].entries()) {
+      manifest = recordClientOperationStepIntent(manifest.operationId, manifest, index, lock, env);
+      manifest = recordClientOperationStepApplied(manifest.operationId, manifest, index, after, lock, env);
+    }
+    let crashed = false;
+    const filesystem = injected((event) => {
+      if (!crashed && event === "after-artifact-unlink") { crashed = true; throw new Error("crash after unlink"); }
+    });
+    expect(() => cleanupClientOperationArtifact(manifest.operationId, manifest, lock, env, filesystem)).toThrow("crash after unlink");
+    releaseClientOperationLock(lock);
+    expect(inspectClientOperation(manifest.operationId, env)).toMatchObject({ inspectionState: "resumable" });
+    const resumed = resumeClientOperation(manifest.operationId, env);
+    manifest = completeClientOperationCleanup(manifest.operationId, resumed.manifest, resumed.lock, env);
+    expect(manifest).toMatchObject({
+      state: "committed", request: null, artifacts: [], steps: [],
+      completion: { operation: "update", stepCount: 3, cleanupDirectoryDurability: process.platform === "win32" ? "unavailable" : "durable" },
+    });
+    expect(inspectClientOperation(manifest.operationId, env)).toMatchObject({
+      inspectionState: "complete", operation: "update", artifacts: [],
+      cleanupDirectoryDurability: process.platform === "win32" ? "unavailable" : "durable",
+    });
+    releaseClientOperationLock(resumed.lock);
+  });
+
+  it("blocks a snapshot that disappeared before its cleanup intent", () => {
+    const { home, env } = fixture(); let manifest = operation(env);
+    const lock = acquireClientOperationLock("codex", "stable-client", env);
+    for (const [artifact, before] of [["registration.before", "before-registration"], ["backend.before", "before-backend"], ["metadata.before", "before-metadata"]]) {
+      manifest = writeClientOperationSnapshot(manifest.operationId, manifest, artifact, before, lock, env);
+    }
+    manifest = transitionClientOperation(manifest.operationId, manifest, "snapshotted", lock, env);
+    for (const [index, after] of ["after-registration", "after-backend", "after-metadata"].entries()) {
+      manifest = recordClientOperationStepIntent(manifest.operationId, manifest, index, lock, env);
+      manifest = recordClientOperationStepApplied(manifest.operationId, manifest, index, after, lock, env);
+    }
+    rmSync(join(home, ".agent-bridge", "operations", manifest.operationId, "snapshots", "registration.before"));
+    expect(() => cleanupClientOperationArtifact(manifest.operationId, manifest, lock, env))
+      .toThrow("disappeared before cleanup intent");
+    expect(readClientOperation(manifest.operationId, env).artifacts[0].cleanupIntentAt).toBeNull();
+    releaseClientOperationLock(lock);
+  });
+
+  it("rejects an after artifact for a step that was not observed applied", () => {
+    const { env } = fixture(); const manifest = operation(env);
+    expect(() => validateClientOperation({
+      ...manifest,
+      artifacts: [{
+        name: "registration.after", stepIndex: 0, phase: "after", bytes: 18,
+        sha256: sha256("after-registration"), cleanupIntentAt: null, removedAt: null, directoryDurability: null,
+      }],
+    })).toThrow("manifest is corrupt");
+  });
+
+  it("re-syncs an adopted after artifact before recording it", () => {
+    const { env } = fixture(); let manifest = operation(env);
+    const lock = acquireClientOperationLock("codex", "stable-client", env);
+    for (const [artifact, before] of [["registration.before", "before-registration"], ["backend.before", "before-backend"], ["metadata.before", "before-metadata"]]) {
+      manifest = writeClientOperationSnapshot(manifest.operationId, manifest, artifact, before, lock, env);
+    }
+    manifest = transitionClientOperation(manifest.operationId, manifest, "snapshotted", lock, env);
+    manifest = recordClientOperationStepIntent(manifest.operationId, manifest, 0, lock, env);
+    let snapshotSyncs = 0;
+    const filesystem = injected(() => {}, {
+      syncDirectory: (path) => {
+        if (path.endsWith("snapshots") && ++snapshotSyncs === 1) throw new Error("injected sync failure");
+      },
+    });
+    expect(() => recordClientOperationStepApplied(
+      manifest.operationId, manifest, 0, "after-registration", lock, env, filesystem,
+    )).toThrow("durably");
+    releaseClientOperationLock(lock);
+    const resumed = resumeClientOperation(manifest.operationId, env);
+    manifest = recordClientOperationStepApplied(
+      manifest.operationId, resumed.manifest, 0, "after-registration", resumed.lock, env, filesystem,
+    );
+    expect(snapshotSyncs).toBe(2);
+    expect(manifest.steps[0].state).toBe("observed-applied");
+    releaseClientOperationLock(resumed.lock);
+  });
+
+  it("rejects request fields that can carry credentials", () => {
+    const { env } = fixture();
+    const step = [{
+      target: "metadata" as const, locator: "management:one", beforeArtifact: "one.before", afterArtifact: "one.after",
+      expectedBeforeSha256: sha256("before"), expectedAfterSha256: sha256("after"),
+    }];
+    expect(() => createClientOperation({
+      request: { kind: "migrate", endpoint: "https://bridge.example/mcp?access_token=secret", workspace: "one" },
+      runtime: "codex", instance: "one", steps: step,
+    }, env)).toThrow("manifest is corrupt");
+    expect(() => createClientOperation({
+      request: { kind: "migrate", endpoint: "https://bridge.example/mcp", workspace: "https://token.invalid" },
+      runtime: "codex", instance: "one", steps: step,
+    }, env)).toThrow("manifest is corrupt");
+    expect(() => createClientOperation({
+      request: { kind: "update", release: "token=secret" }, runtime: "codex", instance: "one", steps: step,
+    }, env)).toThrow("manifest is corrupt");
+  });
+
+  it("treats committed history as complete across hosts", () => {
+    const { home, env } = fixture(); let manifest = createClientOperation({
+      operationId: "77777777-7777-4777-8777-777777777777", request: { kind: "repair" }, runtime: "codex", instance: "one",
+      steps: [{ target: "metadata", locator: "management:one", beforeArtifact: "one.before", afterArtifact: "one.after", expectedBeforeSha256: sha256("before"), expectedAfterSha256: sha256("after") }],
+    }, env);
+    const lock = acquireClientOperationLock("codex", "one", env);
+    manifest = writeClientOperationSnapshot(manifest.operationId, manifest, "one.before", "before", lock, env);
+    manifest = transitionClientOperation(manifest.operationId, manifest, "snapshotted", lock, env);
+    manifest = recordClientOperationStepIntent(manifest.operationId, manifest, 0, lock, env);
+    manifest = recordClientOperationStepApplied(manifest.operationId, manifest, 0, "after", lock, env);
+    manifest = completeClientOperationCleanup(manifest.operationId, manifest, lock, env);
+    releaseClientOperationLock(lock);
+    const path = join(home, ".agent-bridge", "operations", manifest.operationId, "manifest.json");
+    const changed = JSON.parse(readFileSync(path, "utf8")); changed.host = "another-host.invalid";
+    writeFileSync(path, `${JSON.stringify(changed, null, 2)}\n`, { mode: 0o600 });
+    expect(inspectClientOperation(manifest.operationId, env)).toMatchObject({ inspectionState: "complete", operation: "repair" });
+    const next = beginClientOperation({
+      operationId: "88888888-8888-4888-8888-888888888888", request: { kind: "repair" }, runtime: "codex", instance: "one",
+      steps: [{ target: "metadata", locator: "management:one", beforeArtifact: "two.before", afterArtifact: "two.after", expectedBeforeSha256: sha256("before"), expectedAfterSha256: sha256("after") }],
+    }, env);
+    releaseClientOperationLock(next.lock);
+  });
+
+  it("fences new mutations when any operation is corrupt", () => {
+    const { home, env } = fixture(); const manifest = operation(env);
+    writeFileSync(join(home, ".agent-bridge", "operations", manifest.operationId, "manifest.json"), "not-json", { mode: 0o600 });
+    expect(() => beginClientOperation({
+      request: { kind: "repair" }, runtime: "claude-code", instance: "other",
+      steps: [{ target: "metadata", locator: "management:other", beforeArtifact: "other.before", afterArtifact: "other.after", expectedBeforeSha256: sha256("before"), expectedAfterSha256: sha256("after") }],
+    }, env)).toThrow("blocked operation");
+  });
+
+  it("does not clean a replacement operation root after create failure", () => {
+    if (process.platform === "win32") return;
+    const { home, env } = fixture();
+    const root = join(home, ".agent-bridge", "operations");
+    const original = join(home, "original-operations");
+    const operationId = "99999999-9999-4999-8999-999999999999";
+    const filesystem = injected((event) => {
+      if (event !== "after-snapshots-created") return;
+      renameSync(root, original);
+      mkdirSync(join(root, "locks"), { recursive: true, mode: 0o700 });
+      securePrivatePath(root, "directory"); securePrivatePath(join(root, "locks"), "directory");
+      mkdirSync(join(root, operationId), { mode: 0o700 }); securePrivatePath(join(root, operationId), "directory");
+      writeFileSync(join(root, operationId, "do-not-touch"), "preserve", { mode: 0o600 });
+    });
+    expect(() => createClientOperation({
+      operationId, request: { kind: "repair" }, runtime: "codex", instance: "one",
+      steps: [{ target: "metadata", locator: "management:one", beforeArtifact: "one.before", afterArtifact: "one.after", expectedBeforeSha256: sha256("before"), expectedAfterSha256: sha256("after") }],
+    }, env, filesystem)).toThrow("operation directory changed");
+    expect(readFileSync(join(root, operationId, "do-not-touch"), "utf8")).toBe("preserve");
+  });
+
+  it("does not unlink through a replacement operation root during cleanup", () => {
+    if (process.platform === "win32") return;
+    const { home, env } = fixture(); let manifest = createClientOperation({
+      operationId: "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb", request: { kind: "repair" }, runtime: "codex", instance: "one",
+      steps: [{ target: "metadata", locator: "management:one", beforeArtifact: "one.before", afterArtifact: "one.after", expectedBeforeSha256: sha256("before"), expectedAfterSha256: sha256("after") }],
+    }, env);
+    const lock = acquireClientOperationLock("codex", "one", env);
+    manifest = writeClientOperationSnapshot(manifest.operationId, manifest, "one.before", "before", lock, env);
+    manifest = transitionClientOperation(manifest.operationId, manifest, "snapshotted", lock, env);
+    manifest = recordClientOperationStepIntent(manifest.operationId, manifest, 0, lock, env);
+    manifest = recordClientOperationStepApplied(manifest.operationId, manifest, 0, "after", lock, env);
+    const root = join(home, ".agent-bridge", "operations");
+    const original = join(home, "cleanup-original-operations");
+    let swapped = false;
+    const filesystem = injected((event) => {
+      if (event !== "before-artifact-unlink" || swapped) return;
+      swapped = true; renameSync(root, original);
+      mkdirSync(join(root, "locks"), { recursive: true, mode: 0o700 });
+      mkdirSync(join(root, manifest.operationId, "snapshots"), { recursive: true, mode: 0o700 });
+      for (const directory of [root, join(root, "locks"), join(root, manifest.operationId), join(root, manifest.operationId, "snapshots")]) {
+        securePrivatePath(directory, "directory");
+      }
+      writeFileSync(join(root, manifest.operationId, "snapshots", "do-not-touch"), "preserve", { mode: 0o600 });
+    });
+    expect(() => cleanupClientOperationArtifact(manifest.operationId, manifest, lock, env, filesystem))
+      .toThrow("operation directory changed");
+    expect(readFileSync(join(root, manifest.operationId, "snapshots", "do-not-touch"), "utf8")).toBe("preserve");
+  });
+
+  it("records POSIX cleanup durability or explicit Windows unavailability", () => {
+    const { env } = fixture();
+    let manifest = createClientOperation({
+      operationId: "66666666-6666-4666-8666-666666666666", request: { kind: "uninstall" }, runtime: "codex", instance: "one",
+      steps: [{ target: "metadata", locator: "management:one", beforeArtifact: "one.before", afterArtifact: "one.after", expectedBeforeSha256: sha256("before"), expectedAfterSha256: sha256("after") }],
+    }, env);
+    const lock = acquireClientOperationLock("codex", "one", env);
+    manifest = writeClientOperationSnapshot(manifest.operationId, manifest, "one.before", "before", lock, env);
+    manifest = transitionClientOperation(manifest.operationId, manifest, "snapshotted", lock, env);
+    manifest = recordClientOperationStepIntent(manifest.operationId, manifest, 0, lock, env);
+    manifest = recordClientOperationStepApplied(manifest.operationId, manifest, 0, "after", lock, env);
+    manifest = cleanupClientOperationArtifact(manifest.operationId, manifest, lock, env);
+    expect(manifest.artifacts[0].directoryDurability).toBe(process.platform === "win32" ? "unavailable" : "durable");
   });
 });

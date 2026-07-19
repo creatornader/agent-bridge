@@ -51,6 +51,13 @@ Local mode relies on operating-system account isolation and private file permiss
 Anyone who can act as the same operating-system user can generally read or replace that
 user's Agent Bridge state. Local mode is not a hostile multi-user boundary.
 
+Managed-client mutations may cache a successful native Windows ACL check while one
+operation lock remains held. The cache is bound to the verified directory identity and is
+discarded with the lock. New locks, resumed operations, and passive inspection check
+the ACL again. POSIX permission checks are not cached. A same-user process can still
+change an ACL on an unchanged object or replace a directory with one that reuses the
+same filesystem identity. Both actions are within the local-mode trust boundary.
+
 ### Gateway mode
 
 Gateway credentials bind one workspace and principal. The gateway derives remote

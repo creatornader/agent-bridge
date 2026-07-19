@@ -77,30 +77,25 @@ enrollment still refuses an existing backend file or MCP registration, so adopti
 cannot weaken first-install collision protection. This unit does not add repair,
 update, uninstall, credential rotation, or endpoint mutation.
 
-The next lifecycle unit adds only the crash-safe operation substrate and read-only
-inspection. Revisioned manifests live below the owner-private
-`~/.agent-bridge/operations/<uuid>` tree, snapshot contents remain private, and locks
-serialize by runtime and stable instance. Stale recovery requires same-host PID-death
-proof, with operation-root and locks identities pinned throughout recovery. Sensitive
-file access pins its immediate directory, and snapshot enumeration and reads pin the
-snapshots directory. The manifest contains an immutable ordered plan whose steps record
-target kind, non-sensitive locator, unique snapshot artifact, expected before/after
-digests, durable pre-write intent, and durable post-verification observed-applied state.
-Snapshot publication is atomic and no-replace. Every bounded before-state snapshot must
-match its step before mutation can start. Restart names the exact pending step: matching
-before-state is retryable, matching after-state advances only after durable intent, and
-every other state blocks as ambiguous. Linked, replaced, corrupt, oversized,
-contradictory, or ambiguous state fails closed without changing external files, while
-`clients operations [<operation-id>]` returns only safe summaries.
+The operation substrate remains internal with read-only inspection. Revisioned
+manifests contain typed credential-agnostic requests, non-sensitive locators, and
+unique no-replace before/after artifacts. Begin holds the runtime-plus-instance lock
+while refusing another unfinished operation; a blocked journal fences new mutations.
+Resume is same-host only. Journal states
+are prepared, snapshotted, in-progress, applied, cleaning, and committed. Inspection
+separately reports resumable, classification-required, blocked, or complete.
 
-Public repair, update, uninstall, and endpoint-migration mutations remain deferred and
-cannot ship before terminal snapshot cleanup. Active or ambiguous operations retain
-their artifacts. After a terminal manifest is durable, cleanup must verify and unlink
-each artifact, sync the directory where supported, and report uncertain durability.
-Rollback status remains unavailable until reverse steps record durable intent and
-verify restored bytes. Physical erasure is outside the filesystem contract. Future
-commands must minimize credential-bearing snapshots and rotate credentials when
-retained copies contained them.
+Creation pins the operation root before it publishes state. Cleanup pins that root,
+the operation directory, and the snapshots directory before it records intent or
+unlinks anything. Cleanup records durable intent per artifact, verifies and unlinks the pinned file, and
+records POSIX directory sync or explicit Windows unavailability. An absent artifact is
+safe only when intent predates the cleanup attempt. Inspection recognizes a verified
+after artifact for the current intent-recorded step, but rejects other missing or extra
+files. Committed means verified writes and removed artifacts. It drops requests, steps,
+locators, digests, and artifact metadata while retaining a bounded credential-free
+completion record for audit. Public repair,
+update, uninstall, and endpoint migration remain deferred; this unit adds no public
+mutator and no rolled-back state. Physical erasure is outside the contract.
 
 ## Consequences
 

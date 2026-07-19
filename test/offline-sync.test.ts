@@ -969,7 +969,7 @@ describe("offline SQLite synchronization", () => {
     await Promise.all(Array.from({ length: 8 }, () => execFileAsync(
       process.execPath,
       ["--input-type=module", "--eval", script],
-      { env: { ...process.env, AGENT_BRIDGE_TEST_DB: path } },
+      { env: { ...process.env, AGENT_BRIDGE_TEST_DB: path }, timeout: 30_000 },
     )));
 
     const upgraded = new DatabaseSync(path);
@@ -981,5 +981,5 @@ describe("offline SQLite synchronization", () => {
       (contract) => contract.id === "current-upgraded-project-column",
     )!.sha256);
     upgraded.close();
-  }, 15_000);
+  }, process.platform === "win32" ? 45_000 : 15_000);
 });

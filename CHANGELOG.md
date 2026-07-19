@@ -8,6 +8,11 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and 
 
 ### Added
 
+- Give local and edge SQLite initialization a 15-second minimum busy-retry window
+  for concurrent first-start schema work. Normal database operations retain their
+  configured timeout. Concurrency tests also terminate hung child processes before
+  temporary-directory cleanup.
+
 - Add the crash-safe managed-client operation substrate and read-only `clients
   operations [<operation-id>]` inspection. Owner-private revisioned manifests,
   immutable ordered step plans, snapshot artifacts, pinned directory identities,
@@ -15,8 +20,17 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and 
   and errors. Restart classification distinguishes exact before-state retries,
   verified after-state advancement, and blocked ambiguity. Snapshot publication never
   replaces residue, every step requires a verified before-state snapshot, and bounded
-  manifests reject contradictory state. Mutating lifecycle commands remain blocked on
-  terminal snapshot cleanup.
+  manifests reject contradictory state. Typed credential-agnostic requests,
+  no-replace before/after artifacts, lock-covered begin, and same-host resume now feed
+  distinct resumable, classification-required, blocked, and complete inspection.
+  Crash-restartable per-artifact cleanup advances `applied` through `cleaning` to a
+  `committed` manifest after verified unlink and POSIX directory sync, or an explicit
+  Windows unavailable-durability result. Exact after-publication and post-intent unlink
+  residue can resume; every other missing or extra artifact blocks. Terminal manifests
+  retain a bounded credential-free completion record. Windows mutations reuse native
+  ACL results only within one held lock and for the same verified directory path
+  identity. File checks, new or resumed locks, and passive inspection recheck the
+  policy. POSIX checks remain per-access. Public mutators remain unavailable.
 
 - Add read-only `clients inspect` and plan-first `clients adopt` for Codex, Claude
   Code, and Claude Desktop. Exact unmanaged registrations can be adopted only with

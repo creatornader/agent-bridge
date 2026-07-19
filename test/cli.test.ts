@@ -86,7 +86,7 @@ describe("agent-bridge CLI", () => {
     const home = mkdtempSync(join(tmpdir(), "agent-bridge-cli-operations-")); homes.push(home);
     const result = runAt(home, ["clients", "operations"]);
     expect(result.status).toBe(0);
-    expect(JSON.parse(result.stdout)).toEqual({ schemaVersion: 1, operations: [] });
+    expect(JSON.parse(result.stdout)).toEqual({ schemaVersion: 2, operations: [] });
     expect(result.stderr).toBe("");
     expect(existsSync(join(home, ".agent-bridge", "operations"))).toBe(false);
 
