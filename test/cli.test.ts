@@ -86,7 +86,7 @@ describe("agent-bridge CLI", () => {
     const home = mkdtempSync(join(tmpdir(), "agent-bridge-cli-operations-")); homes.push(home);
     const result = runAt(home, ["clients", "operations"]);
     expect(result.status).toBe(0);
-    expect(JSON.parse(result.stdout)).toEqual({ schemaVersion: 3, operations: [] });
+    expect(JSON.parse(result.stdout)).toEqual({ schemaVersion: 4, operations: [] });
     expect(result.stderr).toBe("");
     expect(existsSync(join(home, ".agent-bridge", "operations"))).toBe(false);
 
@@ -100,7 +100,7 @@ describe("agent-bridge CLI", () => {
     expect(undocumentedAlias.stderr).toContain("clients <install|inspect|adopt|repair|update|uninstall>");
   });
 
-  it("rejects caller authority flags for managed repair, update, uninstall, and generic resume", () => {
+  it("rejects caller authority flags for managed repair, update, uninstall, rollback, and generic resume", () => {
     const repair = run([
       "clients", "repair", "codex", "--identity", "codex", "--instance", "stable",
       "--backend-config", "/tmp/forbidden",
@@ -121,6 +121,19 @@ describe("agent-bridge CLI", () => {
     ]);
     expect(uninstall.status).toBe(1);
     expect(uninstall.stderr).toContain("--backend-config is not valid for clients uninstall");
+
+    const rollback = run([
+      "clients", "rollback", "11111111-1111-4111-8111-111111111111", "--identity", "codex",
+      "--backend-config", "/tmp/forbidden",
+    ]);
+    expect(rollback.status).toBe(1);
+    expect(rollback.stderr).toContain("--backend-config is not valid for clients rollback");
+
+    const recoveryWithoutApply = run([
+      "clients", "rollback", "11111111-1111-4111-8111-111111111111", "--identity", "codex", "--recover-lock",
+    ]);
+    expect(recoveryWithoutApply.status).toBe(1);
+    expect(recoveryWithoutApply.stderr).toContain("--recover-lock requires --apply");
 
     const resume = run([
       "clients", "resume", "11111111-1111-4111-8111-111111111111", "--identity", "forbidden",

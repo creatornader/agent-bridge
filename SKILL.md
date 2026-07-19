@@ -95,10 +95,20 @@ deletes the already private backend file, then deletes metadata. It refuses a ba
 that needs privacy repair and never recreates an earlier target after a later failure.
 Desktop removes only its Agent Bridge entry. Backend content never enters the journal.
 
+Use `clients rollback <update-operation-id> --identity <name>` to inspect an explicit
+reverse plan for a committed same-host v4 update. Add `--apply` only after reviewing
+that plan. The source record retains only prior nonsecret managed metadata, its exact
+registration contract, and forward-state digests. Rollback verifies those digests
+against the current registration, then creates a separate reverse journal. Native
+rollback removes the forward entry, adds the prior entry, and writes prior metadata
+last. Claude Desktop replaces only its Agent Bridge entry and preserves unrelated JSON.
+Repair has no rollback. Uninstall remains forward-only, so recovery is re-enrollment.
+
 Resume an action-specific operation with the same action, runtime, instance, and
 identity: `--apply --resume <uuid>`. The stored request controls resume. Do not supply
 a new command unless it exactly matches the recorded update request. Use
-`clients resume <uuid> [--recover-lock]` to resume from the v3 request alone. It does
+`clients resume <uuid> [--recover-lock]` to resume from a recorded v3 or supported v4
+request alone. It does
 not accept replacement client authority. Use the generic form after uninstall has
 deleted metadata. `--recover-lock` on an action-specific command also requires
 `--apply`; it only recovers a stale same-host lock after process-death proof. Never

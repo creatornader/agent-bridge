@@ -8,6 +8,16 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and 
 
 ### Added
 
+- Add explicit, plan-first `clients rollback <update-operation-id> --identity <name>`
+  for committed same-host v4 updates. `--apply` creates a separate reverse journal.
+  It verifies the source inverse contract and current forward metadata and
+  registration before it removes the forward native entry, restores the prior entry,
+  and writes prior metadata last. Claude Desktop replaces only its Agent Bridge entry.
+  Generic `clients resume` also resumes a reverse journal. The v4 source completion
+  keeps only a bounded credential-free inverse contract. Repair remains monotonic,
+  uninstall stays forward-only, and endpoint migration is still unavailable. Managed
+  operation summaries now report schema version 4 and include the `rollback` kind.
+
 - Add forward-only `clients uninstall` for metadata-owned Codex, Claude Code, and
   Claude Desktop registrations. Uninstall proves and removes the managed
   registration, deletes an already private backend file, then deletes management
@@ -15,11 +25,12 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and 
   deletion syncs the private parent directory. Windows verifies deletion and records
   unavailable directory durability. Native and Desktop writes retain their documented
   same-user advisory race boundaries.
-  Add `clients resume <operation-id> [--recover-lock]`, which derives repair, update,
-  or uninstall authority from the recorded v3 request. It accepts no replacement
-  identity, runtime, instance, launch, or file locator. Version 2 journals remain
-  inspectable only. Generic resume also completes an uninstall interrupted after its
-  final metadata deletion.
+  Add `clients resume <operation-id> [--recover-lock]`, which derives repair and
+  uninstall authority from recorded v3 requests, and update or rollback authority
+  from recorded v4 requests. It also accepts pre-v4 update journals. It accepts no
+  replacement identity, runtime, instance, launch, or file locator. Version 2
+  journals remain inspectable only. Generic resume also completes an uninstall
+  interrupted after its final metadata deletion.
 
 - Add plan-first `clients repair` and `clients update` for metadata-owned Codex,
   Claude Code, and Claude Desktop registrations. Runtime and stable instance locate

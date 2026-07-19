@@ -11,7 +11,12 @@ import {
   recoverClientOperationLock,
 } from "../src/client-operation.js";
 import { adoptClient } from "../src/client-lifecycle.js";
-import { repairManagedClient, uninstallManagedClient } from "../src/client-maintenance.js";
+import {
+  repairManagedClient,
+  rollbackManagedClient,
+  uninstallManagedClient,
+  updateManagedClient,
+} from "../src/client-maintenance.js";
 import {
   acquireEnrollmentLock,
   createPendingEnrollment,
@@ -25,6 +30,7 @@ const roots: string[] = [];
 const packageRoot = dirname(fileURLToPath(new URL("../package.json", import.meta.url)));
 const cli = join(packageRoot, "bin", "agent-bridge");
 const nativeTestTimeout = 90_000;
+const nativeMaintenanceTestTimeout = 180_000;
 
 function root(prefix: string): { home: string; env: NodeJS.ProcessEnv } {
   const home = mkdtempSync(join(tmpdir(), prefix));
@@ -198,7 +204,7 @@ describe("Windows native private path smoke", () => {
     expect(operations.status, operations.stderr).toBe(0);
     expect(operations.stderr).toBe("");
     expect(JSON.parse(operations.stdout)).toMatchObject({
-      schemaVersion: 3,
+      schemaVersion: 4,
       operations: [{
         operationId,
         operation: "repair",
@@ -253,7 +259,7 @@ describe("Windows native private path smoke", () => {
     expect(existsSync(lock.lockPath)).toBe(false);
   }, nativeTestTimeout);
 
-  it.skipIf(process.platform !== "win32")("repairs a managed native registration with native private paths", () => {
+  it.skipIf(process.platform !== "win32")("repairs, updates, and rolls back a managed native registration", () => {
     const { home, env } = root("agent-bridge-native-maintenance-");
     const clients = join(home, ".agent-bridge", "clients");
     mkdirSync(clients, { recursive: true });
@@ -297,9 +303,20 @@ describe("Windows native private path smoke", () => {
       apply: true, env: lifecycleEnv, execute,
     })).toMatchObject({ action: "repair", applied: true });
     expect(registration).toEqual({ present: true, command: "agent-bridge-mcp" });
+    const updated = updateManagedClient({
+      runtime: "codex", identity: "codex", instance: "native-maintenance",
+      command: "new-agent-bridge-mcp", apply: true, env: lifecycleEnv, execute,
+    });
+    expect(updated).toMatchObject({ action: "update", applied: true });
+    expect(registration).toEqual({ present: true, command: "new-agent-bridge-mcp" });
+    expect(rollbackManagedClient({
+      sourceOperationId: updated.operationId!, identity: "codex",
+      apply: true, env: lifecycleEnv, execute,
+    })).toMatchObject({ action: "rollback", applied: true });
+    expect(registration).toEqual({ present: true, command: "agent-bridge-mcp" });
     verifyPrivatePathAccess(adopted.metadataPath, "file");
     verifyPrivatePathAccess(backendConfigPath, "file");
-  }, nativeTestTimeout);
+  }, nativeMaintenanceTestTimeout);
 
   it.skipIf(process.platform !== "win32")("uninstalls a managed native registration with native private paths", () => {
     const { home, env } = root("agent-bridge-native-uninstall-");

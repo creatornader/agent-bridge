@@ -590,6 +590,27 @@ describe("managed client operation substrate", () => {
     });
   });
 
+  it("rejects rollback as a terminal v3 completion operation", () => {
+    const { env } = fixture();
+    const prepared = operation(env);
+    const invalid = {
+      ...prepared,
+      request: null,
+      state: "committed",
+      revision: prepared.revision + 1,
+      steps: [],
+      artifacts: [],
+      completion: {
+        operation: "rollback",
+        stepCount: 1,
+        completedAt: new Date().toISOString(),
+        cleanupDirectoryDurability: process.platform === "win32" ? "unavailable" : "durable",
+      },
+    };
+    expect(invalid.version).toBe(3);
+    expect(() => validateClientOperation(invalid)).toThrow("operation manifest is corrupt");
+  });
+
   it("treats committed history as complete across hosts", () => {
     const { home, env } = fixture(); let manifest = createClientOperation({
       operationId: "77777777-7777-4777-8777-777777777777", request: { kind: "repair", identity: "test-worker" }, runtime: "codex", instance: "one",

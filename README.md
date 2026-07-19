@@ -449,6 +449,8 @@ agent-bridge clients update codex --identity codex --instance <stable-key> \
 agent-bridge clients repair codex --identity codex --instance <stable-key> \
   --apply --resume <operation-uuid>
 agent-bridge clients uninstall codex --identity codex --instance <stable-key> --apply
+agent-bridge clients rollback <update-operation-uuid> --identity codex
+agent-bridge clients rollback <update-operation-uuid> --identity codex --apply
 agent-bridge clients resume <operation-uuid>
 ```
 
@@ -475,21 +477,33 @@ directory. Windows verifies the result but records unavailable directory durabil
 Node cannot make pathname-based deletion atomic against an uncooperative same-user
 writer, so that boundary remains advisory.
 
+Rollback is explicit and update-only. A committed v4 update retains a bounded
+credential-free inverse contract: its prior managed metadata, prior exact
+registration contract, and digests for the forward metadata and registration state.
+`clients rollback` uses only the source operation UUID and matching identity. It first
+returns a plan. With `--apply`, it creates a separate reverse journal after it proves
+the source is same-host, the source is a committed v4 update, and the current state
+still matches the recorded forward state. Native reversal removes the forward entry,
+adds the prior entry, then writes prior metadata. Claude Desktop replaces only its
+Agent Bridge entry and writes prior metadata last. A reverse journal can resume with
+`clients resume`; a second rollback fails because the forward state is no longer
+present. Repair remains monotonic. Uninstall recovery requires re-enrollment.
+
 `--resume` must name an unfinished operation for the same action, runtime, instance,
 and identity. It uses the recorded request instead of new flags. `--recover-lock`
 requires `--apply` and only removes an old same-host lock after the process-death
 proof succeeds. Never delete a lock manually.
 
-`clients resume <operation-uuid>` takes only the recorded v3 operation authority and
+`clients resume <operation-uuid>` takes only recorded v3 or supported v4 operation authority and
 an optional `--recover-lock`. It does not accept a replacement action, runtime,
 instance, identity, command, backend path, scope, or config locator. Use it for every
 generic resume. It is also required when an uninstall has already deleted its final
 metadata file, because the action-specific command has no metadata record left to
 assert.
 
-New repair, update, and uninstall journals use operation format version 3. Existing version 2
-journals remain inspectable. A non-terminal version 2 journal lacks the required
-identity-bound request, so it is blocked rather than resumed by these commands.
+Repair and uninstall create v3 journals. New update and reverse rollback journals use
+v4. Existing v2 journals remain inspectable. A non-terminal v2 journal lacks the
+required identity-bound request, so it is blocked rather than resumed by these commands.
 
 Managed-client operations now have a crash-safe local substrate under the owner-only
 `~/.agent-bridge/operations/` directory. `agent-bridge clients operations` lists safe
@@ -527,9 +541,10 @@ records unavailable directory durability. A missing artifact is safe to resume o
 when cleanup intent predated the attempt. Inspection accepts only two exact crash
 residues: that authorized absence, or the verified after artifact for the current
 intent-recorded step. A terminal manifest removes request, step, digest, locator, and
-artifact metadata but retains the operation kind, step count, completion time, and
-cleanup durability as a credential-free audit record. Completed records remain readable
-across hosts. Repair, update, and uninstall use this journal. Endpoint migration
+artifact metadata. A v4 update retains only its explicit credential-free inverse
+contract. Other terminal operations retain the operation kind, step count, completion
+time, and cleanup durability. Completed records remain readable across hosts. Repair,
+update, rollback, and uninstall use this journal. Endpoint migration
 remains unavailable. Agent Bridge cannot promise physical erasure
 on SSDs or journaled filesystems, so future commands must minimize credential-bearing
 snapshots and rotate credentials when retained copies contained them. Inspection
