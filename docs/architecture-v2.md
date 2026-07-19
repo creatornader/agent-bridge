@@ -293,8 +293,14 @@ Enrollment-based first-time provisioning retains strict registration and backend
 collision refusal. See
 [ADR 0004](decisions/0004-client-lifecycle-and-endpoint-migration.md).
 
-Managed-client mutations have a local crash-safe substrate even though public
-mutation commands remain pending. Owner-private revisioned manifests live under
+Managed-client repair and update use a local crash-safe substrate. Strict
+owner-private metadata is the mutation authority. Runtime plus stable instance locate
+the metadata, and identity must match both the record and the immutable repair or
+update request. Repair restores its launch contract. Update validates a new launch
+before it creates the journal and stores only the identity, normalized command,
+arguments, scope, and fixed Agent Bridge environment key names.
+Caller backend, scope, and host-config flags are rejected. Owner-private revisioned
+manifests live under
 `~/.agent-bridge/operations/<uuid>` with private snapshots and an exclusive lock keyed
 by runtime plus stable instance. Manifest publication fsyncs files, atomically renames,
 verifies private paths, and fsyncs directories where supported. Snapshot publication
@@ -304,11 +310,38 @@ target identities remain pinned throughout creation and destructive cleanup. The
 and locks identities remain pinned throughout stale recovery, and the artifact-directory
 identity remains pinned across enumeration and every read. A typed credential-agnostic
 request and immutable plan record non-sensitive locators, unique no-replace before and
-after artifacts, and expected digests. Request validation rejects URL credential
-surfaces and unsafe release selectors. Begin is lock-covered and refuses another
-unfinished operation; any blocked journal fences new mutation. Resume is same-host only. The journal advances through prepared,
+after artifacts, and expected digests. Backend artifacts contain only a role, file
+identity, and private or repairable policy state. They never contain backend bytes,
+credentials, URLs, or workspace values. Begin is lock-covered and refuses another
+unfinished operation; any blocked journal fences new mutation, including resume. Resume
+is same-host only. The journal advances through prepared,
 snapshotted, in-progress, applied, cleaning, and committed. Inspection separately
 reports resumable, classification-required, blocked, or complete.
+
+New repair and update journals use operation format version 3. Version 2 manifests
+retain their released request interpretation and remain inspectable. A non-terminal
+version 2 record is blocked because it cannot prove the identity-bound request needed
+for these public mutations.
+
+Before a mutation, repair and update compare the full strict metadata record after
+acquiring the lock. Each non-metadata step repeats that authority check. Registration
+proofs include a bounded observation of the Agent Bridge entry and its full target
+contract. Unknown environment keys, malformed values, unsafe arguments, an unexpected
+scope, or an opaque registration shape stop before a journal is created.
+
+Native repair and update remove the managed entry, prove absence, add the exact target,
+and change metadata last when the launch changes. A native update command is one
+executable contract. Bare commands cannot contain argument separators, while absolute
+paths must resolve to executable files before an update is journaled. Codex runs get,
+remove, and add with the recorded profile home over the supplied environment. Claude
+Code uses its recorded scope, working directory, and supplied environment. Claude
+Desktop reads its recorded config without following links or link ancestors, replaces
+only `mcpServers.agent-bridge`, writes through an operation-scoped private temporary
+file, and verifies the published entry. Node cannot make that update atomic with an
+uncooperative same-user Desktop writer. The code pins and rechecks the file and parent
+identities immediately before rename, but this is an advisory race boundary, not an OS
+transaction guarantee. Windows accepts an already owner-private backend path and
+refuses a non-private backend instead of claiming a safe permission tightening.
 
 Native Windows ACL checks start uncached for each acquired or resumed mutation lock.
 While that lock remains held, later directory checks may reuse the result only for the
@@ -325,8 +358,8 @@ is resumable only when intent predates the cleanup attempt. Inspection also reco
 one verified after artifact left by an interrupted manifest publication. Other missing
 or extra files block. Committed means verified writes and removed artifacts. Its
 manifest drops requests, steps, locators, digests, and artifact metadata while retaining
-the operation kind, step count, completion time, and cleanup durability for audit. No
-public mutator or rolled-back state is added. Physical erasure remains outside the
+the operation kind, step count, completion time, and cleanup durability for audit.
+Uninstall, endpoint migration, and rolled-back state remain unavailable. Physical erasure remains outside the
 filesystem contract.
 
 ### v1 compatibility is additive

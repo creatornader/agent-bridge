@@ -43,6 +43,15 @@ published and the supported clients pass a fresh end-to-end check.
   registration comparison, immutable nonsecret host locators, and a re-inspected
   adoption postcondition.
 
+- Plan-first managed-client repair and update for Codex, Claude Code, and Claude
+  Desktop. Mutation authority comes only from strict private metadata selected by
+  runtime and instance, then bound to the exact managed identity. Applied work uses
+  the crash-safe journal, fixed-key credential-free update requests, full metadata and
+  bounded registration proofs, exact restart classification, monotonic POSIX backend
+  privacy repair, and metadata-last launch updates. Windows accepts only an already
+  private backend path. Desktop publication has a documented same-user advisory race.
+  Uninstall and endpoint migration remain out of scope.
+
 - A pinned, non-root gateway image and a Compose development stack with ordered
   migration, restricted runtime-role bootstrap, health checks, private secret files,
   and a persistent PostgreSQL volume.
@@ -69,10 +78,8 @@ published and the supported clients pass a fresh end-to-end check.
 
 ### Installation and operations
 
-- Build repair, update, and uninstall on the implemented crash-safe operation substrate
-  (typed requests, immutable ordered steps, exact restart classification, and
-  crash-restartable terminal artifact cleanup) and released inspect/adopt ownership
-  boundary. Public mutators remain a separate future unit.
+- Build uninstall on the implemented crash-safe operation substrate and released
+  inspect/adopt/repair/update ownership boundary.
 - Add endpoint migration tooling that does not strand an existing SQLite outbox.
 - Publish a maintained client compatibility matrix.
 

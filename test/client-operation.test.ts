@@ -13,7 +13,7 @@ import {
   inspectClientOperation, listClientOperations, readClientOperation,
   recordClientOperationStepApplied, recordClientOperationStepIntent,
   recoverClientOperationLock, releaseClientOperationLock, resumeClientOperation, transitionClientOperation,
-  validateClientOperation, writeClientOperationSnapshot,
+  validateClientOperation, writeClientOperationSnapshot, type ClientOperationRequest,
 } from "../src/client-operation.js";
 import { securePrivatePath } from "../src/private-path.js";
 import { privatePathIt } from "./private-path-policy.js";
@@ -28,10 +28,18 @@ function fixture() {
   return { home, env: { HOME: home } };
 }
 const sha256 = (value: string) => createHash("sha256").update(value).digest("hex");
+const updateRequest: ClientOperationRequest = {
+  kind: "update" as const,
+  identity: "test-worker",
+  launch: {
+    command: "agent-bridge-mcp", args: [], scope: null,
+    envKeys: ["AGENT_BRIDGE_AGENT", "AGENT_BRIDGE_CONFIG", "AGENT_BRIDGE_INSTANCE"],
+  },
+};
 function operation(env: NodeJS.ProcessEnv) {
   return createClientOperation({
     operationId: "11111111-1111-4111-8111-111111111111",
-    request: { kind: "update", release: "next" }, runtime: "codex", instance: "stable-client", steps: [
+    request: updateRequest, runtime: "codex", instance: "stable-client", steps: [
       { target: "registration", locator: "codex:profile:default", beforeArtifact: "registration.before", afterArtifact: "registration.after", expectedBeforeSha256: sha256("before-registration"), expectedAfterSha256: sha256("after-registration") },
       { target: "backend", locator: "backend:managed", beforeArtifact: "backend.before", afterArtifact: "backend.after", expectedBeforeSha256: sha256("before-backend"), expectedAfterSha256: sha256("after-backend") },
       { target: "metadata", locator: "management:stable-client", beforeArtifact: "metadata.before", afterArtifact: "metadata.after", expectedBeforeSha256: sha256("before-metadata"), expectedAfterSha256: sha256("after-metadata") },
@@ -152,7 +160,7 @@ describe("managed client operation substrate", () => {
     const secret = "AGENT_BRIDGE_TOKEN=top-secret";
     let manifest = createClientOperation({
       operationId: "33333333-3333-4333-8333-333333333333",
-      request: { kind: "update", release: "next" }, runtime: "codex", instance: "stable-client", steps: [
+      request: updateRequest, runtime: "codex", instance: "stable-client", steps: [
         { target: "backend", locator: "backend:managed", beforeArtifact: "backend.before", afterArtifact: "backend.after", expectedBeforeSha256: sha256(secret), expectedAfterSha256: sha256("after-backend") },
       ],
     }, env);
@@ -302,7 +310,7 @@ describe("managed client operation substrate", () => {
   it("rejects removed cleanup artifacts without a durability result", () => {
     const { env } = fixture();
     const created = createClientOperation({
-      request: { kind: "repair" }, runtime: "codex", instance: "one",
+      request: { kind: "repair", identity: "test-worker" }, runtime: "codex", instance: "one",
       steps: [{ target: "metadata", locator: "management:one", beforeArtifact: "one.before", afterArtifact: "one.after", expectedBeforeSha256: sha256("before"), expectedAfterSha256: sha256("after") }],
     }, env);
     const now = new Date().toISOString();
@@ -343,7 +351,7 @@ describe("managed client operation substrate", () => {
       if (event === "after-snapshots-created") throw new Error("injected manifest publication failure");
     }, { remove: () => { throw new Error("injected cleanup failure"); } });
     expect(() => createClientOperation({
-      operationId: "22222222-2222-4222-8222-222222222222", request: { kind: "repair" }, runtime: "codex", instance: "stable-client",
+      operationId: "22222222-2222-4222-8222-222222222222", request: { kind: "repair", identity: "test-worker" }, runtime: "codex", instance: "stable-client",
       steps: [{ target: "metadata", locator: "management:stable-client", beforeArtifact: "metadata.before", afterArtifact: "metadata.after", expectedBeforeSha256: "1".repeat(64), expectedAfterSha256: "2".repeat(64) }],
     }, env, filesystem)).toThrow("injected manifest publication failure");
     expect(existsSync(join(home, ".agent-bridge", "operations", "22222222-2222-4222-8222-222222222222", "snapshots"))).toBe(true);
@@ -356,7 +364,7 @@ describe("managed client operation substrate", () => {
     });
     const operationId = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
     expect(() => createClientOperation({
-      operationId, request: { kind: "repair" }, runtime: "codex", instance: "stable-client",
+      operationId, request: { kind: "repair", identity: "test-worker" }, runtime: "codex", instance: "stable-client",
       steps: [{ target: "metadata", locator: "management:stable-client", beforeArtifact: "metadata.before", afterArtifact: "metadata.after", expectedBeforeSha256: sha256("before"), expectedAfterSha256: sha256("after") }],
     }, env, filesystem)).toThrow("injected root sync failure");
     expect(readClientOperation(operationId, env)).toMatchObject({ operationId, state: "prepared" });
@@ -381,7 +389,7 @@ describe("managed client operation substrate", () => {
   it("begins under the client lock and refuses another unfinished operation", () => {
     const { env } = fixture();
     const input = {
-      operationId: "44444444-4444-4444-8444-444444444444", request: { kind: "repair" } as const,
+      operationId: "44444444-4444-4444-8444-444444444444", request: { kind: "repair", identity: "test-worker" } as const,
       runtime: "codex" as const, instance: "stable-client",
       steps: [{ target: "metadata" as const, locator: "management:stable-client", beforeArtifact: "metadata.before", afterArtifact: "metadata.after", expectedBeforeSha256: sha256("before"), expectedAfterSha256: sha256("after") }],
     };
@@ -529,13 +537,58 @@ describe("managed client operation substrate", () => {
       runtime: "codex", instance: "one", steps: step,
     }, env)).toThrow("manifest is corrupt");
     expect(() => createClientOperation({
-      request: { kind: "update", release: "token=secret" }, runtime: "codex", instance: "one", steps: step,
+      request: { kind: "update", release: "token=secret" } as unknown as ClientOperationRequest,
+      runtime: "codex", instance: "one", steps: step,
     }, env)).toThrow("manifest is corrupt");
+  });
+
+  it("keeps released v2 manifests inspectable without allowing identity-free resume", () => {
+    const { home, env } = fixture();
+    const prepared = operation(env);
+    const preparedPath = join(home, ".agent-bridge", "operations", prepared.operationId, "manifest.json");
+    const legacyPrepared = {
+      ...prepared,
+      version: 2,
+      request: { kind: "repair" },
+    };
+    writeFileSync(preparedPath, `${JSON.stringify(legacyPrepared, null, 2)}\n`, { mode: 0o600 });
+    expect(validateClientOperation(legacyPrepared)).toMatchObject({ version: 2, request: { kind: "repair" } });
+    expect(inspectClientOperation(prepared.operationId, env)).toMatchObject({
+      state: "prepared", inspectionState: "blocked", recoverable: false,
+      reason: "legacy operation lacks an identity-bound request and cannot resume",
+    });
+    expect(() => resumeClientOperation(prepared.operationId, env)).toThrow("identity-bound request");
+
+    const completed = createClientOperation({
+      operationId: "99999999-9999-4999-8999-999999999998",
+      request: { kind: "repair", identity: "test-worker" }, runtime: "claude-code", instance: "legacy-complete",
+      steps: [{ target: "metadata", locator: "management:legacy-complete", beforeArtifact: "before", afterArtifact: "after", expectedBeforeSha256: sha256("before"), expectedAfterSha256: sha256("after") }],
+    }, env);
+    const completedPath = join(home, ".agent-bridge", "operations", completed.operationId, "manifest.json");
+    const legacyCompleted = {
+      ...completed,
+      version: 2,
+      request: null,
+      state: "committed",
+      steps: [],
+      artifacts: [],
+      completion: {
+        operation: "repair",
+        stepCount: 1,
+        completedAt: new Date().toISOString(),
+        cleanupDirectoryDurability: process.platform === "win32" ? "unavailable" : "durable",
+      },
+    };
+    writeFileSync(completedPath, `${JSON.stringify(legacyCompleted, null, 2)}\n`, { mode: 0o600 });
+    expect(validateClientOperation(legacyCompleted)).toMatchObject({ version: 2, state: "committed" });
+    expect(inspectClientOperation(completed.operationId, env)).toMatchObject({
+      inspectionState: "complete", operation: "repair", recoverable: false,
+    });
   });
 
   it("treats committed history as complete across hosts", () => {
     const { home, env } = fixture(); let manifest = createClientOperation({
-      operationId: "77777777-7777-4777-8777-777777777777", request: { kind: "repair" }, runtime: "codex", instance: "one",
+      operationId: "77777777-7777-4777-8777-777777777777", request: { kind: "repair", identity: "test-worker" }, runtime: "codex", instance: "one",
       steps: [{ target: "metadata", locator: "management:one", beforeArtifact: "one.before", afterArtifact: "one.after", expectedBeforeSha256: sha256("before"), expectedAfterSha256: sha256("after") }],
     }, env);
     const lock = acquireClientOperationLock("codex", "one", env);
@@ -550,7 +603,7 @@ describe("managed client operation substrate", () => {
     writeFileSync(path, `${JSON.stringify(changed, null, 2)}\n`, { mode: 0o600 });
     expect(inspectClientOperation(manifest.operationId, env)).toMatchObject({ inspectionState: "complete", operation: "repair" });
     const next = beginClientOperation({
-      operationId: "88888888-8888-4888-8888-888888888888", request: { kind: "repair" }, runtime: "codex", instance: "one",
+      operationId: "88888888-8888-4888-8888-888888888888", request: { kind: "repair", identity: "test-worker" }, runtime: "codex", instance: "one",
       steps: [{ target: "metadata", locator: "management:one", beforeArtifact: "two.before", afterArtifact: "two.after", expectedBeforeSha256: sha256("before"), expectedAfterSha256: sha256("after") }],
     }, env);
     releaseClientOperationLock(next.lock);
@@ -560,9 +613,42 @@ describe("managed client operation substrate", () => {
     const { home, env } = fixture(); const manifest = operation(env);
     writeFileSync(join(home, ".agent-bridge", "operations", manifest.operationId, "manifest.json"), "not-json", { mode: 0o600 });
     expect(() => beginClientOperation({
-      request: { kind: "repair" }, runtime: "claude-code", instance: "other",
+      request: { kind: "repair", identity: "test-worker" }, runtime: "claude-code", instance: "other",
       steps: [{ target: "metadata", locator: "management:other", beforeArtifact: "other.before", afterArtifact: "other.after", expectedBeforeSha256: sha256("before"), expectedAfterSha256: sha256("after") }],
     }, env)).toThrow("blocked operation");
+  });
+
+  it("fences resume when another operation is corrupt", () => {
+    const { home, env } = fixture(); const resumable = operation(env);
+    const blocked = createClientOperation({
+      operationId: "cccccccc-cccc-4ccc-8ccc-cccccccccccc", request: { kind: "repair", identity: "test-worker" }, runtime: "claude-code", instance: "other",
+      steps: [{ target: "metadata", locator: "management:other", beforeArtifact: "other.before", afterArtifact: "other.after", expectedBeforeSha256: sha256("before"), expectedAfterSha256: sha256("after") }],
+    }, env);
+    writeFileSync(join(home, ".agent-bridge", "operations", blocked.operationId, "manifest.json"), "not-json", { mode: 0o600 });
+    expect(() => resumeClientOperation(resumable.operationId, env)).toThrow("blocked operation");
+  });
+
+  it("validates update launch shape against its runtime before publishing a manifest", () => {
+    const { env } = fixture();
+    const step = [{ target: "metadata" as const, locator: "management:one", beforeArtifact: "one.before", afterArtifact: "one.after", expectedBeforeSha256: sha256("before"), expectedAfterSha256: sha256("after") }];
+    expect(() => createClientOperation({
+      request: { kind: "update", identity: "test-worker", launch: {
+        command: "agent-bridge-mcp", args: [], scope: "user",
+        envKeys: ["AGENT_BRIDGE_AGENT", "AGENT_BRIDGE_CONFIG", "AGENT_BRIDGE_INSTANCE"],
+      } }, runtime: "codex", instance: "one", steps: step,
+    }, env)).toThrow("manifest");
+    expect(() => createClientOperation({
+      request: { kind: "update", identity: "test-worker", launch: {
+        command: "agent-bridge-mcp", args: [], scope: null,
+        envKeys: ["AGENT_BRIDGE_AGENT", "AGENT_BRIDGE_CONFIG", "AGENT_BRIDGE_INSTANCE"],
+      } }, runtime: "claude-code", instance: "one", steps: step,
+    }, env)).toThrow("manifest");
+    expect(() => createClientOperation({
+      request: { kind: "update", identity: "test-worker", launch: {
+        command: "agent-bridge-mcp --token=secret", args: [], scope: null,
+        envKeys: ["AGENT_BRIDGE_AGENT", "AGENT_BRIDGE_CONFIG", "AGENT_BRIDGE_INSTANCE"],
+      } }, runtime: "codex", instance: "one", steps: step,
+    }, env)).toThrow("launch command");
   });
 
   it("does not clean a replacement operation root after create failure", () => {
@@ -580,7 +666,7 @@ describe("managed client operation substrate", () => {
       writeFileSync(join(root, operationId, "do-not-touch"), "preserve", { mode: 0o600 });
     });
     expect(() => createClientOperation({
-      operationId, request: { kind: "repair" }, runtime: "codex", instance: "one",
+      operationId, request: { kind: "repair", identity: "test-worker" }, runtime: "codex", instance: "one",
       steps: [{ target: "metadata", locator: "management:one", beforeArtifact: "one.before", afterArtifact: "one.after", expectedBeforeSha256: sha256("before"), expectedAfterSha256: sha256("after") }],
     }, env, filesystem)).toThrow("operation directory changed");
     expect(readFileSync(join(root, operationId, "do-not-touch"), "utf8")).toBe("preserve");
@@ -589,7 +675,7 @@ describe("managed client operation substrate", () => {
   it("does not unlink through a replacement operation root during cleanup", () => {
     if (process.platform === "win32") return;
     const { home, env } = fixture(); let manifest = createClientOperation({
-      operationId: "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb", request: { kind: "repair" }, runtime: "codex", instance: "one",
+      operationId: "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb", request: { kind: "repair", identity: "test-worker" }, runtime: "codex", instance: "one",
       steps: [{ target: "metadata", locator: "management:one", beforeArtifact: "one.before", afterArtifact: "one.after", expectedBeforeSha256: sha256("before"), expectedAfterSha256: sha256("after") }],
     }, env);
     const lock = acquireClientOperationLock("codex", "one", env);

@@ -5,7 +5,7 @@ import {
 } from "node:fs";
 import { createHash, randomUUID } from "node:crypto";
 import { homedir, hostname } from "node:os";
-import { basename, dirname, join, parse, relative, resolve, sep } from "node:path";
+import { basename, dirname, isAbsolute, join, parse, relative, resolve, sep } from "node:path";
 import {
   createPrivateDirectoryAccessCache, PrivatePathError, securePrivatePath, type PrivateDirectoryAccessCache,
   verifyPrivatePathAccess,
@@ -13,15 +13,27 @@ import {
 import type { InstallableRuntime } from "./client-installer.js";
 
 export const CLIENT_OPERATION_SCHEMA = "agent-bridge.client-operation";
-export const CLIENT_OPERATION_VERSION = 2;
+export const CLIENT_OPERATION_VERSION = 3;
 export type ClientOperationState =
   | "prepared" | "snapshotted" | "in-progress" | "applied" | "cleaning" | "committed";
 export type ClientOperationKind = "repair" | "update" | "uninstall" | "migrate";
+export interface ClientOperationLaunch {
+  command: string;
+  args: string[];
+  scope: "local" | "user" | "project" | null;
+  envKeys: ["AGENT_BRIDGE_AGENT", "AGENT_BRIDGE_CONFIG", "AGENT_BRIDGE_INSTANCE"];
+}
 export type ClientOperationRequest =
+  | { kind: "repair"; identity: string }
+  | { kind: "update"; identity: string; launch: ClientOperationLaunch }
+  | { kind: "uninstall" }
+  | { kind: "migrate"; endpoint: string; workspace: string };
+type LegacyClientOperationRequest =
   | { kind: "repair" }
   | { kind: "update"; release: string }
   | { kind: "uninstall" }
   | { kind: "migrate"; endpoint: string; workspace: string };
+type RecordedClientOperationRequest = ClientOperationRequest | LegacyClientOperationRequest;
 export interface ClientOperationCompletion {
   operation: ClientOperationKind;
   stepCount: number;
@@ -57,9 +69,9 @@ export interface ClientOperationArtifact {
 
 export interface ClientOperationManifest {
   schema: typeof CLIENT_OPERATION_SCHEMA;
-  version: typeof CLIENT_OPERATION_VERSION;
+  version: 2 | typeof CLIENT_OPERATION_VERSION;
   operationId: string;
-  request: ClientOperationRequest | null;
+  request: RecordedClientOperationRequest | null;
   runtime: InstallableRuntime;
   instance: string;
   state: ClientOperationState;
@@ -73,7 +85,7 @@ export interface ClientOperationManifest {
 }
 
 export interface ClientOperationSummary {
-  schemaVersion: 2;
+  schemaVersion: 3;
   operationId: string;
   operation: ClientOperationKind | null;
   runtime: InstallableRuntime | null;
@@ -154,6 +166,17 @@ function safeText(value: unknown, label: string, maximum = 128): string {
   if (typeof value !== "string" || !value || value !== value.trim()
     || value.length > maximum || /[\u0000-\u001f\u007f]/.test(value)) fail("INVALID_MANIFEST", `${label} is invalid`);
   return value;
+}
+function safeIdentity(value: unknown): string {
+  return safeText(value, "identity", 128);
+}
+function safeNativeLaunchCommand(value: unknown): string {
+  const command = safeText(value, "launch command", 1024);
+  if (/[?=#]/.test(command) || /:\/\//.test(command)
+    || (!isAbsolute(command) && /\s/.test(command))) {
+    fail("INVALID_MANIFEST", "launch command is invalid");
+  }
+  return command;
 }
 function rejectLinks(path: string): void {
   const root = parse(path).root;
@@ -304,17 +327,83 @@ function validateStep(value: unknown, index: number): ClientOperationStep {
     observedAppliedAt: step.observedAppliedAt as string | null,
   };
 }
-function validateRequest(value: unknown): ClientOperationRequest {
+function validateRequest(
+  value: unknown, runtime?: InstallableRuntime, version: 2 | typeof CLIENT_OPERATION_VERSION = CLIENT_OPERATION_VERSION,
+): RecordedClientOperationRequest {
   if (!value || typeof value !== "object" || Array.isArray(value)) fail("CORRUPT_OPERATION", "operation manifest is corrupt");
   const request = value as Record<string, unknown>;
   if (!OPERATIONS.includes(request.kind as ClientOperationKind)) fail("CORRUPT_OPERATION", "operation manifest is corrupt");
   const keys = Object.keys(request).sort().join(",");
-  if ((request.kind === "repair" || request.kind === "uninstall") && keys !== "kind") fail("CORRUPT_OPERATION", "operation manifest is corrupt");
+  if (version === 2) {
+    if (request.kind === "repair") {
+      if (keys !== "kind") fail("CORRUPT_OPERATION", "operation manifest is corrupt");
+      return { kind: "repair" };
+    }
+    if (request.kind === "update") {
+      if (keys !== "kind,release") fail("CORRUPT_OPERATION", "operation manifest is corrupt");
+      const release = safeText(request.release, "release", 128);
+      if (!/^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/.test(release)) {
+        fail("CORRUPT_OPERATION", "operation manifest is corrupt");
+      }
+      return { kind: "update", release };
+    }
+    if (request.kind === "uninstall") {
+      if (keys !== "kind") fail("CORRUPT_OPERATION", "operation manifest is corrupt");
+      return { kind: "uninstall" };
+    }
+    if (keys !== "endpoint,kind,workspace") fail("CORRUPT_OPERATION", "operation manifest is corrupt");
+    const endpoint = safeText(request.endpoint, "endpoint", 512);
+    let parsed: URL;
+    try { parsed = new URL(endpoint); } catch { fail("CORRUPT_OPERATION", "operation manifest is corrupt"); }
+    if (parsed.protocol !== "https:" || parsed.username || parsed.password || parsed.search || parsed.hash) {
+      fail("CORRUPT_OPERATION", "operation manifest is corrupt");
+    }
+    const workspace = safeText(request.workspace, "workspace");
+    if (!/^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/.test(workspace)) fail("CORRUPT_OPERATION", "operation manifest is corrupt");
+    return { kind: "migrate", endpoint: parsed.toString(), workspace };
+  }
+  if (request.kind === "repair") {
+    if (keys !== "identity,kind") fail("CORRUPT_OPERATION", "operation manifest is corrupt");
+    return { kind: "repair", identity: safeIdentity(request.identity) };
+  }
+  if (request.kind === "uninstall" && keys !== "kind") fail("CORRUPT_OPERATION", "operation manifest is corrupt");
   if (request.kind === "update") {
-    if (keys !== "kind,release") fail("CORRUPT_OPERATION", "operation manifest is corrupt");
-    const release = safeText(request.release, "release", 128);
-    if (!/^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/.test(release)) fail("CORRUPT_OPERATION", "operation manifest is corrupt");
-    return { kind: "update", release };
+    if (keys !== "identity,kind,launch" || !request.launch || typeof request.launch !== "object"
+      || Array.isArray(request.launch)) fail("CORRUPT_OPERATION", "operation manifest is corrupt");
+    const launch = request.launch as Record<string, unknown>;
+    if (Object.keys(launch).sort().join(",") !== "args,command,envKeys,scope") {
+      fail("CORRUPT_OPERATION", "operation manifest is corrupt");
+    }
+    const command = safeText(launch.command, "launch command", 1024);
+    if (!Array.isArray(launch.args) || launch.args.length > 16
+      || launch.args.some((arg) => {
+        try { safeText(arg, "launch argument", 1024); return false; } catch { return true; }
+      })
+      || !Array.isArray(launch.envKeys)
+      || launch.envKeys.join(",") !== "AGENT_BRIDGE_AGENT,AGENT_BRIDGE_CONFIG,AGENT_BRIDGE_INSTANCE"
+      || ![null, "local", "user", "project"].includes(launch.scope as null | string)) {
+      fail("CORRUPT_OPERATION", "operation manifest is corrupt");
+    }
+    if ((runtime === "codex" || runtime === "claude-code")
+      && ((launch.args as unknown[]).length !== 0
+        || (runtime === "claude-code" ? !["local", "user", "project"].includes(launch.scope as string)
+          : launch.scope !== null))) {
+      fail("CORRUPT_OPERATION", "operation manifest is corrupt");
+    }
+    if (runtime === "codex" || runtime === "claude-code") safeNativeLaunchCommand(command);
+    if (runtime === "claude-desktop" && (launch.scope !== null || !isAbsolute(command))) {
+      fail("CORRUPT_OPERATION", "operation manifest is corrupt");
+    }
+    return {
+      kind: "update",
+      identity: safeIdentity(request.identity),
+      launch: {
+        command,
+        args: [...launch.args] as string[],
+        scope: launch.scope as "local" | "user" | "project" | null,
+        envKeys: ["AGENT_BRIDGE_AGENT", "AGENT_BRIDGE_CONFIG", "AGENT_BRIDGE_INSTANCE"],
+      },
+    };
   }
   if (request.kind === "migrate") {
     if (keys !== "endpoint,kind,workspace") fail("CORRUPT_OPERATION", "operation manifest is corrupt");
@@ -328,7 +417,7 @@ function validateRequest(value: unknown): ClientOperationRequest {
     if (!/^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/.test(workspace)) fail("CORRUPT_OPERATION", "operation manifest is corrupt");
     return { kind: "migrate", endpoint: parsed.toString(), workspace };
   }
-  return { kind: request.kind as "repair" | "uninstall" };
+  return { kind: "uninstall" };
 }
 function validateCompletion(value: unknown): ClientOperationCompletion {
   if (!value || typeof value !== "object" || Array.isArray(value)) fail("CORRUPT_OPERATION", "operation manifest is corrupt");
@@ -350,7 +439,7 @@ function validateCompletion(value: unknown): ClientOperationCompletion {
 export function validateClientOperation(value: unknown): ClientOperationManifest {
   if (!value || typeof value !== "object" || Array.isArray(value)) fail("CORRUPT_OPERATION", "operation manifest is corrupt");
   const file = value as Record<string, unknown>;
-  if (file.schema !== CLIENT_OPERATION_SCHEMA || file.version !== CLIENT_OPERATION_VERSION
+  if (file.schema !== CLIENT_OPERATION_SCHEMA || (file.version !== 2 && file.version !== CLIENT_OPERATION_VERSION)
     || !UUID.test(String(file.operationId))
     || !RUNTIMES.includes(file.runtime as InstallableRuntime) || !STATES.includes(file.state as ClientOperationState)
     || !Number.isSafeInteger(file.revision) || Number(file.revision) < 0
@@ -361,7 +450,8 @@ export function validateClientOperation(value: unknown): ClientOperationManifest
   const updatedAt = safeText(file.updatedAt, "updatedAt", 64);
   if (!Number.isFinite(Date.parse(createdAt)) || !Number.isFinite(Date.parse(updatedAt))) fail("CORRUPT_OPERATION", "operation manifest is corrupt");
   const terminal = file.state === "committed";
-  const request = terminal && file.request === null ? null : validateRequest(file.request);
+  const version = file.version as 2 | typeof CLIENT_OPERATION_VERSION;
+  const request = terminal && file.request === null ? null : validateRequest(file.request, file.runtime as InstallableRuntime, version);
   const completion = terminal ? validateCompletion(file.completion) : null;
   const artifacts = file.artifacts.map(validateArtifact);
   const steps = file.steps.map(validateStep);
@@ -409,7 +499,7 @@ export function validateClientOperation(value: unknown): ClientOperationManifest
     fail("CORRUPT_OPERATION", "operation manifest is corrupt");
   }
   return {
-    schema: CLIENT_OPERATION_SCHEMA, version: CLIENT_OPERATION_VERSION,
+    schema: CLIENT_OPERATION_SCHEMA, version,
     operationId: String(file.operationId).toLowerCase(), request,
     runtime: file.runtime as InstallableRuntime, instance: safeText(file.instance, "instance"),
     state: file.state as ClientOperationState, revision: Number(file.revision),
@@ -548,7 +638,7 @@ cache?: PrivateDirectoryAccessCache): ClientOperationManifest {
   if (!UUID.test(operationId) || !RUNTIMES.includes(input.runtime)) {
     fail("INVALID_OPERATION", "operation request is invalid");
   }
-  const request = validateRequest(input.request);
+  const request = validateRequest(input.request, input.runtime, CLIENT_OPERATION_VERSION) as ClientOperationRequest;
   const instance = safeText(input.instance.trim(), "instance");
   const pinned = pinOperationRoot(env, true, cache);
   const directory = join(pinned.root, operationId);
@@ -625,9 +715,16 @@ export function beginClientOperation(input: Parameters<typeof createClientOperat
 export function resumeClientOperation(operationId: string, env: NodeJS.ProcessEnv = process.env, filesystem: ClientOperationFilesystem = filesystemDefaults): BegunClientOperation {
   const manifest = readClientOperation(operationId, env);
   if (manifest.state === "committed") fail("OPERATION_COMPLETE", "committed operation cannot be resumed");
+  if (manifest.version !== CLIENT_OPERATION_VERSION) {
+    fail("LEGACY_OPERATION", "legacy operation cannot resume without an identity-bound request");
+  }
   if (manifest.host !== hostname()) fail("CROSS_HOST_RESUME", "operation can only resume on its creating host");
   const lock = acquireClientOperationLock(manifest.runtime, manifest.instance, env);
   try {
+    const operations = listClientOperations(env, filesystem);
+    if (operations.some((summary) => summary.inspectionState === "blocked")) {
+      fail("BLOCKED_OPERATION", "a blocked operation must be resolved before another client mutation can resume");
+    }
     const summary = inspectClientOperation(operationId, env, filesystem);
     if (summary.inspectionState === "blocked") fail("OPERATION_BLOCKED", summary.reason);
     const resumed = readClientOperation(operationId, env);
@@ -1110,11 +1207,12 @@ export function inspectClientOperation(operationId: string, env: NodeJS.ProcessE
     const pending = pendingStep(manifest);
     const ambiguous = pending?.state === "intent-recorded";
     const sameHost = manifest.host === hostname();
+    const legacy = manifest.version !== CLIENT_OPERATION_VERSION && manifest.state !== "committed";
     const inspectionState: ClientOperationSummary["inspectionState"] = !intact
       ? "blocked" : manifest.state === "committed" ? "complete" : !sameHost
-        ? "blocked" : ambiguous ? "classification-required" : "resumable";
+        ? "blocked" : legacy ? "blocked" : ambiguous ? "classification-required" : "resumable";
     return {
-      schemaVersion: 2, operationId: manifest.operationId,
+      schemaVersion: 3, operationId: manifest.operationId,
       operation: manifest.request?.kind ?? manifest.completion?.operation ?? null,
       runtime: manifest.runtime, instance: manifest.instance,
       state: intact ? manifest.state : "corrupt", inspectionState, revision: manifest.revision,
@@ -1125,6 +1223,7 @@ export function inspectClientOperation(operationId: string, env: NodeJS.ProcessE
       recoverable: inspectionState === "resumable" || inspectionState === "classification-required",
       reason: !intact ? "operation artifacts do not match the durable manifest"
         : !sameHost ? "operation can only resume on its creating host"
+        : legacy ? "legacy operation lacks an identity-bound request and cannot resume"
         : ambiguous ? `operation stopped at ordered step ${pending.index} and requires external-state classification`
           : manifest.state === "committed" ? "operation is complete and retains a credential-free audit record"
           : artifactInspection.resumableResidue ? "operation contains expected crash residue and can resume safely"
@@ -1132,7 +1231,7 @@ export function inspectClientOperation(operationId: string, env: NodeJS.ProcessE
     };
   } catch (error) {
     if (!(error instanceof ClientOperationError) || error.code === "INVALID_OPERATION_ID") throw error;
-    return { schemaVersion: 2, operationId: operationId.toLowerCase(), operation: null, runtime: null, instance: null, state: "corrupt", inspectionState: "blocked", revision: null, createdAt: null, updatedAt: null, completedAt: null, cleanupDirectoryDurability: null, artifacts: [], pendingStep: null, recoverable: false, reason: "operation state is corrupt or insecure" };
+    return { schemaVersion: 3, operationId: operationId.toLowerCase(), operation: null, runtime: null, instance: null, state: "corrupt", inspectionState: "blocked", revision: null, createdAt: null, updatedAt: null, completedAt: null, cleanupDirectoryDurability: null, artifacts: [], pendingStep: null, recoverable: false, reason: "operation state is corrupt or insecure" };
   }
 }
 export function reconcileClientOperation(operationId: string, env: NodeJS.ProcessEnv = process.env): ClientOperationSummary {

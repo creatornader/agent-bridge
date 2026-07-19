@@ -1,6 +1,6 @@
 import { createHash, randomUUID } from "node:crypto";
 import { spawnSync } from "node:child_process";
-import { closeSync, existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { closeSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -10,6 +10,8 @@ import {
   createClientOperation,
   recoverClientOperationLock,
 } from "../src/client-operation.js";
+import { adoptClient } from "../src/client-lifecycle.js";
+import { repairManagedClient } from "../src/client-maintenance.js";
 import {
   acquireEnrollmentLock,
   createPendingEnrollment,
@@ -180,7 +182,7 @@ describe("Windows native private path smoke", () => {
     const sha256 = (value: string) => createHash("sha256").update(value).digest("hex");
     createClientOperation({
       operationId,
-      request: { kind: "repair" },
+      request: { kind: "repair", identity: "codex" },
       runtime: "codex",
       instance: "native-smoke",
       steps: [{
@@ -196,7 +198,7 @@ describe("Windows native private path smoke", () => {
     expect(operations.status, operations.stderr).toBe(0);
     expect(operations.stderr).toBe("");
     expect(JSON.parse(operations.stdout)).toMatchObject({
-      schemaVersion: 2,
+      schemaVersion: 3,
       operations: [{
         operationId,
         operation: "repair",
@@ -228,7 +230,7 @@ describe("Windows native private path smoke", () => {
     const sha256 = (value: string) => createHash("sha256").update(value).digest("hex");
     createClientOperation({
       operationId: "11111111-1111-4111-8111-111111111111",
-      request: { kind: "repair" },
+      request: { kind: "repair", identity: "codex" },
       runtime: "codex",
       instance: "native-smoke",
       steps: [{
@@ -249,5 +251,53 @@ describe("Windows native private path smoke", () => {
     lock.released = true;
     recoverClientOperationLock("codex", "native-smoke", env, Date.now());
     expect(existsSync(lock.lockPath)).toBe(false);
+  }, nativeTestTimeout);
+
+  it.skipIf(process.platform !== "win32")("repairs a managed native registration with native private paths", () => {
+    const { home, env } = root("agent-bridge-native-maintenance-");
+    const clients = join(home, ".agent-bridge", "clients");
+    mkdirSync(clients, { recursive: true });
+    securePrivatePath(join(home, ".agent-bridge"), "directory");
+    securePrivatePath(clients, "directory");
+    const backendConfigPath = join(clients, "codex-native.config");
+    writeFileSync(backendConfigPath, "AGENT_BRIDGE_PROVIDER=local\n", { mode: 0o600 });
+    securePrivatePath(backendConfigPath, "file");
+    const registration = { present: true, command: "agent-bridge-mcp" };
+    const execute = (_command: string, args: string[]) => {
+      if (args[1] === "get") {
+        if (!registration.present) {
+          return { pid: 1, output: [], stdout: "Error: No MCP server named 'agent-bridge' found.\n", stderr: "", status: 1, signal: null };
+        }
+        return {
+          pid: 1, output: [], stderr: "", status: 0, signal: null,
+          stdout: JSON.stringify({
+            name: "agent-bridge", enabled: true,
+            transport: { type: "stdio", command: registration.command, args: [], env: {
+              AGENT_BRIDGE_AGENT: "codex", AGENT_BRIDGE_INSTANCE: "native-maintenance",
+              AGENT_BRIDGE_CONFIG: backendConfigPath,
+            }, env_vars: [], cwd: null },
+          }),
+        };
+      }
+      if (args[1] === "remove") {
+        registration.present = false;
+        return { pid: 1, output: [], stdout: "", stderr: "", status: 0, signal: null };
+      }
+      registration.present = true;
+      registration.command = args[args.length - 1]!;
+      return { pid: 1, output: [], stdout: "", stderr: "", status: 0, signal: null };
+    };
+    const lifecycleEnv = { ...env, CODEX_HOME: join(home, "codex-profile") };
+    const adopted = adoptClient("codex", "codex", {
+      instance: "native-maintenance", backendConfigPath, apply: true, env: lifecycleEnv,
+    }, execute);
+    registration.command = "drifted-agent-bridge-mcp";
+    expect(repairManagedClient({
+      runtime: "codex", identity: "codex", instance: "native-maintenance",
+      apply: true, env: lifecycleEnv, execute,
+    })).toMatchObject({ action: "repair", applied: true });
+    expect(registration).toEqual({ present: true, command: "agent-bridge-mcp" });
+    verifyPrivatePathAccess(adopted.metadataPath, "file");
+    verifyPrivatePathAccess(backendConfigPath, "file");
   }, nativeTestTimeout);
 });
