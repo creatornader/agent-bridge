@@ -1,6 +1,6 @@
 # Agent Bridge v2 architecture
 
-Status: living architecture. Version 0.3.1 was released on July 15, 2026.
+Status: living architecture for the 0.4.x package line.
 
 ## Product boundary
 
@@ -387,17 +387,18 @@ is resumable only when intent predates the cleanup attempt. Inspection also reco
 one verified after artifact left by an interrupted manifest publication. Other missing
 or extra files block. Committed means verified writes and removed artifacts. Its
 manifest drops requests, steps, locators, digests, and artifact metadata. A v4 update
-completion retains only its inverse contract. Other terminal completions retain the
-operation kind, step count, completion time, and cleanup durability for audit. Endpoint
-migration remains unavailable. Uninstall adds no rolled-back state. Physical
-erasure remains outside the filesystem contract.
+completion retains only its inverse contract. A v5 stage and a v6 migration phase
+retain bounded credential-free contracts. Other terminal completions retain the
+operation kind, step count, completion time, and cleanup durability for audit. Uninstall
+adds no rolled-back state. Physical erasure remains outside the filesystem contract.
 
 `clients resume <operation-id>` accepts stored v3 repair, update, and uninstall
-operations plus supported v4 update and rollback operations, with optional same-host
-stale-lock recovery. It derives authority from the immutable request. It rejects v2
-records and cannot take replacement caller authority. Generic resume finishes an
-uninstall interrupted after metadata deletion and a reverse rollback interrupted after
-any recorded boundary.
+operations, supported v4 update and rollback operations, a committed v5 migration
+stage, and v6 endpoint-migration operations, with optional same-host stale-lock
+recovery. It derives authority from the immutable request. It rejects v2 records and
+cannot take replacement caller authority. Generic resume finishes an uninstall
+interrupted after metadata deletion and a reverse rollback interrupted after any
+recorded boundary.
 
 ### Gateway client migration staging prepares a later cutover
 
@@ -427,6 +428,39 @@ logical authority. The authority identifier must survive clone and restore. Movi
 an independent database requires a separate owner-mediated fence and is outside this
 staging command. A copied authority identifier does not prove that a live clone is
 fenced.
+
+### Endpoint cutover uses a separate v6 journal
+
+`clients migrate cutover <stage-operation-id> --exclusive-edge --apply` accepts only a
+committed v5 stage with its retained contract. It checks both live gateway status
+responses under HTTP 2.1. Each response must bind the recorded workspace, principal,
+and credential ID, and both must return the recorded immutable authority ID. The
+successor must grant `status:read` and `messages:write`. The source issues a direct
+predecessor-to-successor route challenge that the target consumes before the command
+changes an edge gate or host registration.
+
+The forward journal records full credential-free source and target metadata and
+registration proofs, source and target edge paths, a normalized credential-free source
+gateway URL, the v5 stage contract, and digest bindings for each proof. Once that
+journal exists, every mutation uses a fresh same-successor route proof issued from the
+retained source URL and consumed by the target. The source edge replays through the
+target gateway with the successor credential. It creates a durable source drain lease.
+The edge rejects new outbox inserts while draining. The lease worker must publish all
+work and prove a zero outbox before a native remove or add, a Desktop replacement, or
+the metadata-last switch. The command renews and reasserts the lease immediately before
+each host write. It rechecks the live target authority before every mutation. Source
+and target edge files must be distinct private regular files. The command rejects a
+managed cohort that shares the source edge, including a hardlink alias.
+`--exclusive-edge` covers unmanaged publishers that cannot be enumerated.
+
+Finalization requires a fresh assertion after the grace cutoff. It verifies the
+successor's live status binding and retires the retained source edge. Returning to a
+former endpoint requires a new owner credential rotation and a separate forward
+cutover. Cutover and finalization use exact durable before and after proofs for restart
+classification. A replacement worker can resume a draining edge only after the prior
+lease expires. Dry runs use read-only edge inspection. They do not initialize SQLite,
+create sidecars, or contact gateways. A dry run refuses an edge with live WAL sidecars
+because an immutable read could miss uncheckpointed outbox state.
 
 ### v1 compatibility is additive
 
@@ -506,9 +540,18 @@ challenge, expected authority UUID, and direct active successor credential. The
 successor consumes the same commitment with its active transaction-bound authority.
 PostgreSQL hashes the challenge with a domain separator before persistence and retains
 no raw challenge in records, events, or replies. Challenges expire within 60 seconds,
-can be consumed once, and do not establish database authority or permit endpoint
-cutover. The migration extends the credential-security catalog and records endpoint
-and owner-control v5 attestations before readiness succeeds.
+can be consumed once, and do not permit endpoint cutover. The migration 018
+predecessor-to-successor relation alone does not prove that two distinct URLs share
+live database state. The migration extends the credential-security catalog and records
+endpoint and owner-control v5 attestations before readiness succeeds.
+
+Migration 019 keeps the direct predecessor-to-successor challenge for initial
+preflight and also permits one active successor credential to issue and consume a
+challenge across the retained source and target URLs. It preserves the migration 018
+challenge data, events, security boundaries, and native DR treatment. Endpoint v2 and
+owner-control v6 attestations seal the updated catalog. Authenticated HTTP 2.1
+capabilities report the credential's granted scopes so cutover can reject a successor
+that lacks `status:read` or `messages:write` before it begins a journal.
 
 The domain savepoint separates expected rejected domain work from security effects: expected scope and rate accounting can commit while failed domain mutations are rolled back. An abort before commit rolls the whole request back. Once commit dispatch begins, the gateway never retries and reports `mutation_outcome_unknown` if the outcome is ambiguous. A failed rollback discards the pooled connection.
 

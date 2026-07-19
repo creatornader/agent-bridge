@@ -13,11 +13,12 @@ import {
 import type { InstallableRuntime } from "./client-installer.js";
 
 export const CLIENT_OPERATION_SCHEMA = "agent-bridge.client-operation";
-export const CLIENT_OPERATION_VERSION = 5;
-export type ClientOperationVersion = 2 | 3 | 4 | typeof CLIENT_OPERATION_VERSION;
+export const CLIENT_OPERATION_VERSION = 6;
+export type ClientOperationVersion = 2 | 3 | 4 | 5 | typeof CLIENT_OPERATION_VERSION;
 export type ClientOperationState =
   | "prepared" | "snapshotted" | "in-progress" | "applied" | "cleaning" | "committed";
-export type ClientOperationKind = "repair" | "update" | "uninstall" | "rollback" | "migrate";
+export type ClientOperationKind = "repair" | "update" | "uninstall" | "rollback" | "migrate"
+  | "migrate-cutover" | "migrate-finalize";
 export interface ClientOperationLaunch {
   command: string;
   args: string[];
@@ -85,12 +86,49 @@ export interface ClientMigrationStageRequest {
   predecessorCredentialId: string;
   successorCredentialId: string;
 }
+/** Credential-free authority for one v6 endpoint transition. */
+export interface ClientMigrationCutoverRequest extends Omit<ClientMigrationStageRequest, "kind"> {
+  kind: "migrate-cutover" | "migrate-finalize";
+  /** The manifest ID selected before the request is journaled. */
+  migrationOperationId: string;
+  stageOperationId: string;
+  /** The completed forward cutover that authorizes finalization. */
+  sourceCutoverOperationId: string | null;
+  /** Exact target edge selected from the staged private backend before journaling. */
+  targetEdgeDatabasePath: string;
+  /** Credential-free normalized source route retained for successor-only recovery. */
+  sourceGatewayUrl: string;
+  gatewayAuthorityId: string;
+  /** Operator acknowledgement that unmanaged publishers cannot be enumerated. */
+  exclusiveEdgeAssertion: true;
+  /** The bounded v5 source of authority. It is retained through every v6 phase. */
+  stageContract: ClientMigrationStageContract;
+  /** Full credential-free source and target registration contracts. */
+  sourceMetadata: ClientOperationManagedMetadata;
+  targetMetadata: ClientOperationManagedMetadata;
+  sourceRegistration: ClientOperationRegistrationProof;
+  targetRegistration: ClientOperationRegistrationProof;
+  sourceMetadataSha256: string;
+  targetMetadataSha256: string;
+  sourceRegistrationSha256: string;
+  targetRegistrationSha256: string;
+}
+/** Immutable, credential-free bridge from an inert v5 stage into v6. */
+export interface ClientMigrationStageContract {
+  schema: "agent-bridge.client-migration-stage-contract";
+  version: 1;
+  stageOperationId: string;
+  request: ClientMigrationStageRequest;
+  stageRecordSha256: string;
+  targetBackendProjectionSha256: string;
+}
 export type ClientOperationRequest =
   | { kind: "repair"; identity: string }
   | { kind: "update"; identity: string; launch: ClientOperationLaunch; rollback?: ClientOperationRollbackContract }
   | { kind: "uninstall"; identity: string }
   | { kind: "rollback"; identity: string; sourceOperationId: string; rollback: ClientOperationRollbackContract }
-  | ClientMigrationStageRequest;
+  | ClientMigrationStageRequest
+  | ClientMigrationCutoverRequest;
 type LegacyClientOperationRequest =
   | { kind: "repair" }
   | { kind: "update"; release: string }
@@ -103,9 +141,11 @@ export interface ClientOperationCompletion {
   completedAt: string;
   cleanupDirectoryDurability: "durable" | "unavailable";
   rollback?: ClientOperationRollbackContract | null;
+  /** Retains only credential-free v5/v6 migration authority after cleanup. */
+  migration?: ClientMigrationStageContract | ClientMigrationCutoverRequest | null;
 }
 export type ClientOperationTargetKind = "registration" | "backend" | "metadata"
-  | "stage-backend" | "stage-record" | "enrollment";
+  | "stage-backend" | "stage-record" | "enrollment" | "edge-gate";
 export type ClientOperationStepState = "pending" | "intent-recorded" | "observed-applied";
 
 export interface ClientOperationStep {
@@ -150,7 +190,8 @@ export interface ClientOperationManifest {
 }
 
 export interface ClientOperationSummary {
-  schemaVersion: typeof CLIENT_OPERATION_VERSION;
+  /** Version of the inspected durable manifest, including retained v5 stages. */
+  schemaVersion: ClientOperationVersion;
   operationId: string;
   operation: ClientOperationKind | null;
   runtime: InstallableRuntime | null;
@@ -214,13 +255,17 @@ const MAX_LISTED_OPERATIONS = 1000;
 const MAX_SNAPSHOT_BYTES = 16 * 1024 * 1024;
 const MAX_TOTAL_SNAPSHOT_BYTES = 64 * 1024 * 1024;
 const STATES: ClientOperationState[] = ["prepared", "snapshotted", "in-progress", "applied", "cleaning", "committed"];
-const OPERATIONS: ClientOperationKind[] = ["repair", "update", "uninstall", "rollback", "migrate"];
+const OPERATIONS: ClientOperationKind[] = [
+  "repair", "update", "uninstall", "rollback", "migrate",
+  "migrate-cutover", "migrate-finalize",
+];
 const RUNTIMES: InstallableRuntime[] = ["codex", "claude-code", "claude-desktop"];
 const RESUMABLE_OPERATION_KINDS: Readonly<Record<ClientOperationVersion, ReadonlySet<ClientOperationKind>>> = {
   2: new Set(),
   3: new Set(["repair", "update", "uninstall"]),
   4: new Set(["update", "rollback"]),
   5: new Set(["migrate"]),
+  6: new Set(["migrate-cutover", "migrate-finalize"]),
 };
 
 function fail(code: string, message: string): never { throw new ClientOperationError(code, message); }
@@ -372,7 +417,9 @@ function validateStep(value: unknown, index: number, version: ClientOperationVer
   const step = value as Record<string, unknown>;
   const targets: ClientOperationTargetKind[] = version === 5
     ? ["stage-backend", "stage-record", "enrollment"]
-    : ["registration", "backend", "metadata"];
+    : version === 6
+      ? ["edge-gate", "registration", "metadata"]
+      : ["registration", "backend", "metadata"];
   const states: ClientOperationStepState[] = ["pending", "intent-recorded", "observed-applied"];
   const locator = safeText(step.locator, "step locator", 512);
   const beforeArtifact = safeText(step.beforeArtifact, "before artifact", 80);
@@ -658,17 +705,17 @@ function validateRequest(
     return { kind: "migrate", endpoint: parsed.toString(), workspace };
   }
   if (request.kind === "repair") {
-    if (version === 4 || version === 5) fail("CORRUPT_OPERATION", "operation manifest is corrupt");
+    if (version === 4 || version === 5 || version === 6) fail("CORRUPT_OPERATION", "operation manifest is corrupt");
     if (keys !== "identity,kind") fail("CORRUPT_OPERATION", "operation manifest is corrupt");
     return { kind: "repair", identity: safeIdentity(request.identity) };
   }
   if (request.kind === "uninstall") {
-    if (version === 4 || version === 5) fail("CORRUPT_OPERATION", "operation manifest is corrupt");
+    if (version === 4 || version === 5 || version === 6) fail("CORRUPT_OPERATION", "operation manifest is corrupt");
     if (keys !== "identity,kind") fail("CORRUPT_OPERATION", "operation manifest is corrupt");
     return { kind: "uninstall", identity: safeIdentity(request.identity) };
   }
   if (request.kind === "update") {
-    if (version === 5) fail("CORRUPT_OPERATION", "operation manifest is corrupt");
+    if (version === 5 || version === 6) fail("CORRUPT_OPERATION", "operation manifest is corrupt");
     const expectedKeys = version === 4 ? "identity,kind,launch,rollback" : "identity,kind,launch";
     if (keys !== expectedKeys || !request.launch || typeof request.launch !== "object"
       || Array.isArray(request.launch)) fail("CORRUPT_OPERATION", "operation manifest is corrupt");
@@ -733,9 +780,15 @@ function validateRequest(
     if (rollback.identity !== safeIdentity(request.identity)) fail("CORRUPT_OPERATION", "operation manifest is corrupt");
     return { kind: "rollback", identity: rollback.identity, sourceOperationId, rollback };
   }
-  if (request.kind === "migrate") {
-    if (version === 5) {
-      if (keys !== "enrollmentPath,enrollmentRequestId,identity,kind,predecessorCredentialId,predecessorGraceUntil,sourceBackendPath,sourceEdgeDatabasePath,sourceEndpointSha256,sourceScopeKey,stageRecordPath,successorCredentialId,targetBackendPath,targetEndpointSha256,targetWorkspace") {
+  if (["migrate", "migrate-cutover", "migrate-finalize"].includes(String(request.kind))) {
+    if (version === 5 || version === 6) {
+      const v5Keys = "enrollmentPath,enrollmentRequestId,identity,kind,predecessorCredentialId,predecessorGraceUntil,sourceBackendPath,sourceEdgeDatabasePath,sourceEndpointSha256,sourceScopeKey,stageRecordPath,successorCredentialId,targetBackendPath,targetEndpointSha256,targetWorkspace";
+      const v6Keys = "enrollmentPath,enrollmentRequestId,exclusiveEdgeAssertion,gatewayAuthorityId,identity,kind,migrationOperationId,predecessorCredentialId,predecessorGraceUntil,sourceBackendPath,sourceCutoverOperationId,sourceEdgeDatabasePath,sourceEndpointSha256,sourceGatewayUrl,sourceMetadata,sourceMetadataSha256,sourceRegistration,sourceRegistrationSha256,sourceScopeKey,stageContract,stageOperationId,stageRecordPath,successorCredentialId,targetBackendPath,targetEdgeDatabasePath,targetEndpointSha256,targetMetadata,targetMetadataSha256,targetRegistration,targetRegistrationSha256,targetWorkspace";
+      if (keys !== (version === 5 ? v5Keys : v6Keys)) {
+        fail("CORRUPT_OPERATION", "operation manifest is corrupt");
+      }
+      if ((version === 5 && request.kind !== "migrate")
+        || (version === 6 && !["migrate-cutover", "migrate-finalize"].includes(String(request.kind)))) {
         fail("CORRUPT_OPERATION", "operation manifest is corrupt");
       }
       const absolute = (item: unknown, label: string): string => safeAbsolutePath(item, label);
@@ -753,7 +806,7 @@ function validateRequest(
       const targetEndpointSha256 = hash(request.targetEndpointSha256);
       const sourceScopeKey = hash(request.sourceScopeKey);
       if (sourceEndpointSha256 === targetEndpointSha256) fail("CORRUPT_OPERATION", "operation manifest is corrupt");
-      return {
+      const stage: ClientMigrationStageRequest = {
         kind: "migrate",
         identity: safeIdentity(request.identity),
         enrollmentPath: absolute(request.enrollmentPath, "enrollment path"),
@@ -774,6 +827,83 @@ function validateRequest(
         predecessorCredentialId: id(request.predecessorCredentialId, "predecessor credential ID"),
         successorCredentialId: id(request.successorCredentialId, "successor credential ID"),
       };
+      if (version === 5) return stage;
+      if (!runtime || !instance) fail("CORRUPT_OPERATION", "operation manifest is corrupt");
+      const migrationOperationId = id(request.migrationOperationId, "migration operation ID");
+      const stageOperationId = id(request.stageOperationId, "stage operation ID");
+      const targetEdgeDatabasePath = absolute(request.targetEdgeDatabasePath, "target edge database path");
+      if (targetEdgeDatabasePath === stage.sourceEdgeDatabasePath) fail("CORRUPT_OPERATION", "operation manifest is corrupt");
+      const sourceGatewayUrl = safeText(request.sourceGatewayUrl, "source gateway URL", 2048);
+      let parsedSourceGatewayUrl: URL;
+      try { parsedSourceGatewayUrl = new URL(sourceGatewayUrl); }
+      catch { fail("CORRUPT_OPERATION", "operation manifest is corrupt"); }
+      if (parsedSourceGatewayUrl.username || parsedSourceGatewayUrl.password || parsedSourceGatewayUrl.search
+        || parsedSourceGatewayUrl.hash || sourceGatewayUrl !== parsedSourceGatewayUrl.toString().replace(/\/$/, "")) {
+        fail("CORRUPT_OPERATION", "operation manifest is corrupt");
+      }
+      if (createHash("sha256").update(sourceGatewayUrl, "utf8").digest("hex") !== sourceEndpointSha256) {
+        fail("CORRUPT_OPERATION", "operation manifest is corrupt");
+      }
+      const sourceCutoverOperationId = request.sourceCutoverOperationId === null
+        ? null
+        : id(request.sourceCutoverOperationId, "source cutover operation ID");
+      if ((request.kind === "migrate-cutover") !== (sourceCutoverOperationId === null)) {
+        fail("CORRUPT_OPERATION", "operation manifest is corrupt");
+      }
+      if (sourceCutoverOperationId === migrationOperationId) {
+        fail("CORRUPT_OPERATION", "operation manifest is corrupt");
+      }
+      const stageContract = validateStageContract(request.stageContract, runtime, instance);
+      if (stageContract.stageOperationId !== stageOperationId
+        || !sameCanonicalValue(stageContract.request, stage)) {
+        fail("CORRUPT_OPERATION", "operation manifest is corrupt");
+      }
+      const sourceMetadata = validateOperationMetadata(request.sourceMetadata, runtime, instance);
+      const targetMetadata = validateOperationMetadata(request.targetMetadata, runtime, instance);
+      if (sourceMetadata.identity !== stage.identity || targetMetadata.identity !== stage.identity
+        || sourceMetadata.backendConfigPath !== stage.sourceBackendPath
+        || targetMetadata.backendConfigPath !== stage.targetBackendPath
+        || sameCanonicalValue(sourceMetadata, targetMetadata)) {
+        fail("CORRUPT_OPERATION", "operation manifest is corrupt");
+      }
+      const sourceRegistration = validateRegistrationProof(request.sourceRegistration, sourceMetadata);
+      const targetRegistration = validateRegistrationProof(request.targetRegistration, targetMetadata);
+      const contractDigest = (value: unknown): string => {
+        const recorded = hash(value);
+        return recorded;
+      };
+      const sourceMetadataSha256 = contractDigest(request.sourceMetadataSha256);
+      const targetMetadataSha256 = contractDigest(request.targetMetadataSha256);
+      const sourceRegistrationSha256 = contractDigest(request.sourceRegistrationSha256);
+      const targetRegistrationSha256 = contractDigest(request.targetRegistrationSha256);
+      if (sourceMetadataSha256 !== canonicalDigest({ role: "metadata", metadata: sourceMetadata })
+        || targetMetadataSha256 !== canonicalDigest({ role: "metadata", metadata: targetMetadata })
+        || sourceRegistrationSha256 !== canonicalDigest({ role: "registration", observation: sourceRegistration })
+        || targetRegistrationSha256 !== canonicalDigest({ role: "registration", observation: targetRegistration })) {
+        fail("CORRUPT_OPERATION", "operation manifest is corrupt");
+      }
+      return {
+        ...stage,
+        kind: request.kind as ClientMigrationCutoverRequest["kind"],
+        migrationOperationId,
+        stageOperationId,
+        sourceCutoverOperationId,
+        targetEdgeDatabasePath,
+        sourceGatewayUrl,
+        gatewayAuthorityId: id(request.gatewayAuthorityId, "gateway authority ID"),
+        exclusiveEdgeAssertion: request.exclusiveEdgeAssertion === true
+          ? true
+          : fail("CORRUPT_OPERATION", "operation manifest is corrupt"),
+        stageContract,
+        sourceMetadata,
+        targetMetadata,
+        sourceRegistration,
+        targetRegistration,
+        sourceMetadataSha256,
+        targetMetadataSha256,
+        sourceRegistrationSha256,
+        targetRegistrationSha256,
+      };
     }
     if (version === 4) fail("CORRUPT_OPERATION", "operation manifest is corrupt");
     if (keys !== "endpoint,kind,workspace") fail("CORRUPT_OPERATION", "operation manifest is corrupt");
@@ -789,13 +919,35 @@ function validateRequest(
   }
   fail("CORRUPT_OPERATION", "operation manifest is corrupt");
 }
+function validateStageContract(value: unknown, runtime: InstallableRuntime, instance: string): ClientMigrationStageContract {
+  if (!value || typeof value !== "object" || Array.isArray(value)) fail("CORRUPT_OPERATION", "operation manifest is corrupt");
+  const contract = value as Record<string, unknown>;
+  if (Object.keys(contract).sort().join(",") !== "request,schema,stageOperationId,stageRecordSha256,targetBackendProjectionSha256,version"
+    || contract.schema !== "agent-bridge.client-migration-stage-contract" || contract.version !== 1) {
+    fail("CORRUPT_OPERATION", "operation manifest is corrupt");
+  }
+  const stageOperationId = safeText(contract.stageOperationId, "stage operation ID", 36).toLowerCase();
+  if (!UUID.test(stageOperationId)
+    || typeof contract.stageRecordSha256 !== "string" || !/^[0-9a-f]{64}$/.test(contract.stageRecordSha256)
+    || typeof contract.targetBackendProjectionSha256 !== "string" || !/^[0-9a-f]{64}$/.test(contract.targetBackendProjectionSha256)) {
+    fail("CORRUPT_OPERATION", "operation manifest is corrupt");
+  }
+  const request = validateRequest(contract.request, runtime, 5, instance) as ClientMigrationStageRequest;
+  if (request.kind !== "migrate" || request.stageRecordPath !== resolve(request.stageRecordPath)) fail("CORRUPT_OPERATION", "operation manifest is corrupt");
+  return { schema: "agent-bridge.client-migration-stage-contract", version: 1, stageOperationId, request,
+    stageRecordSha256: contract.stageRecordSha256, targetBackendProjectionSha256: contract.targetBackendProjectionSha256 };
+}
 function validateCompletion(value: unknown, version: ClientOperationVersion, runtime: InstallableRuntime, instance: string): ClientOperationCompletion {
   if (!value || typeof value !== "object" || Array.isArray(value)) fail("CORRUPT_OPERATION", "operation manifest is corrupt");
   const completion = value as Record<string, unknown>;
+  const completionKeys = Object.keys(completion).sort().join(",");
   const expectedKeys = version === 4
     ? "cleanupDirectoryDurability,completedAt,operation,rollback,stepCount"
-    : "cleanupDirectoryDurability,completedAt,operation,stepCount";
-  if (Object.keys(completion).sort().join(",") !== expectedKeys
+    : version === 5 || version === 6
+      ? "cleanupDirectoryDurability,completedAt,migration,operation,stepCount"
+      : "cleanupDirectoryDurability,completedAt,operation,stepCount";
+  if ((completionKeys !== expectedKeys
+      && !(version === 5 && completionKeys === "cleanupDirectoryDurability,completedAt,operation,stepCount"))
     || !OPERATIONS.includes(completion.operation as ClientOperationKind)
     || !Number.isSafeInteger(completion.stepCount) || Number(completion.stepCount) < 1
     || Number(completion.stepCount) > MAX_OPERATION_STEPS
@@ -806,10 +958,19 @@ function validateCompletion(value: unknown, version: ClientOperationVersion, run
   const rollback = version === 4
     ? completion.rollback === null ? null : validateRollbackContract(completion.rollback, runtime, instance)
     : undefined;
+  const migration = version === 5 || version === 6
+    ? completion.migration === null || completion.migration === undefined
+      ? null
+      : version === 5
+        ? validateStageContract(completion.migration, runtime, instance)
+        : validateRequest(completion.migration, runtime, version, instance) as ClientMigrationCutoverRequest
+    : undefined;
   const allowedOperations = version === 4
     ? ["update", "rollback"]
     : version === 5
       ? ["migrate"]
+      : version === 6
+        ? ["migrate-cutover", "migrate-finalize"]
       : ["repair", "update", "uninstall", "migrate"];
   if (!allowedOperations.includes(String(completion.operation))) {
     fail("CORRUPT_OPERATION", "operation manifest is corrupt");
@@ -822,12 +983,13 @@ function validateCompletion(value: unknown, version: ClientOperationVersion, run
     stepCount: Number(completion.stepCount), completedAt: completion.completedAt,
     cleanupDirectoryDurability: completion.cleanupDirectoryDurability as "durable" | "unavailable",
     ...(version === 4 ? { rollback } : {}),
+    ...(version === 5 || version === 6 ? { migration } : {}),
   };
 }
 export function validateClientOperation(value: unknown): ClientOperationManifest {
   if (!value || typeof value !== "object" || Array.isArray(value)) fail("CORRUPT_OPERATION", "operation manifest is corrupt");
   const file = value as Record<string, unknown>;
-  if (file.schema !== CLIENT_OPERATION_SCHEMA || ![2, 3, 4, CLIENT_OPERATION_VERSION].includes(Number(file.version))
+  if (file.schema !== CLIENT_OPERATION_SCHEMA || ![2, 3, 4, 5, CLIENT_OPERATION_VERSION].includes(Number(file.version))
     || !UUID.test(String(file.operationId))
     || !RUNTIMES.includes(file.runtime as InstallableRuntime) || !STATES.includes(file.state as ClientOperationState)
     || !Number.isSafeInteger(file.revision) || Number(file.revision) < 0
@@ -853,6 +1015,17 @@ export function validateClientOperation(value: unknown): ClientOperationManifest
   if (terminal && version === 4 && completion?.operation === "update" && completion.rollback === null) {
     fail("CORRUPT_OPERATION", "operation manifest is corrupt");
   }
+  if (terminal && version === 6 && completion?.migration === null) {
+    fail("CORRUPT_OPERATION", "operation manifest is corrupt");
+  }
+  if (version === 6) {
+    const migration = terminal
+      ? completion?.migration as ClientMigrationCutoverRequest | null | undefined
+      : request as ClientMigrationCutoverRequest;
+    if (!migration || migration.migrationOperationId !== String(file.operationId).toLowerCase()) {
+      fail("CORRUPT_OPERATION", "operation manifest is corrupt");
+    }
+  }
   if (!terminal && version === 5) {
     const migration = request as ClientMigrationStageRequest;
     const expected = [
@@ -862,6 +1035,16 @@ export function validateClientOperation(value: unknown): ClientOperationManifest
     ] as const;
     if (steps.length !== expected.length || steps.some((step, index) => step.target !== expected[index]![0]
       || step.locator !== expected[index]![1])) {
+      fail("CORRUPT_OPERATION", "operation manifest is corrupt");
+    }
+  }
+  if (!terminal && version === 6) {
+    const migration = request as ClientMigrationCutoverRequest;
+    const native = file.runtime !== "claude-desktop";
+    const expected = migration.kind === "migrate-cutover"
+      ? native ? ["edge-gate", "registration", "registration", "metadata"] : ["edge-gate", "registration", "metadata"]
+      : ["edge-gate"];
+    if (steps.length !== expected.length || steps.some((step, index) => step.target !== expected[index])) {
       fail("CORRUPT_OPERATION", "operation manifest is corrupt");
     }
   }
@@ -1036,7 +1219,7 @@ function publishAfterArtifact(
 }
 
 function createClientOperationWithCache(input: {
-  operationId?: string; createdAt?: string; version?: 3 | 4 | typeof CLIENT_OPERATION_VERSION; request: ClientOperationRequest; runtime: InstallableRuntime; instance: string;
+  operationId?: string; createdAt?: string; version?: 3 | 4 | 5 | typeof CLIENT_OPERATION_VERSION; request: ClientOperationRequest; runtime: InstallableRuntime; instance: string;
   steps: Array<Pick<ClientOperationStep, "target" | "locator" | "beforeArtifact" | "afterArtifact" | "expectedBeforeSha256" | "expectedAfterSha256">>;
 }, env: NodeJS.ProcessEnv = process.env, filesystem: ClientOperationFilesystem = filesystemDefaults,
 cache?: PrivateDirectoryAccessCache): ClientOperationManifest {
@@ -1093,7 +1276,7 @@ cache?: PrivateDirectoryAccessCache): ClientOperationManifest {
 }
 
 export function createClientOperation(input: {
-  operationId?: string; createdAt?: string; version?: 3 | 4 | typeof CLIENT_OPERATION_VERSION; request: ClientOperationRequest; runtime: InstallableRuntime; instance: string;
+  operationId?: string; createdAt?: string; version?: 3 | 4 | 5 | typeof CLIENT_OPERATION_VERSION; request: ClientOperationRequest; runtime: InstallableRuntime; instance: string;
   steps: Array<Pick<ClientOperationStep, "target" | "locator" | "beforeArtifact" | "afterArtifact" | "expectedBeforeSha256" | "expectedAfterSha256">>;
 }, env: NodeJS.ProcessEnv = process.env, filesystem: ClientOperationFilesystem = filesystemDefaults): ClientOperationManifest {
   return createClientOperationWithCache(input, env, filesystem);
@@ -1455,6 +1638,18 @@ function cleanupClientOperationArtifactWithCache(
     const rollback = disk.version === 4 && disk.request?.kind === "update" && "rollback" in disk.request
       ? disk.request.rollback ?? null
       : null;
+    const migration = disk.version === 5 && disk.request?.kind === "migrate"
+      ? {
+          schema: "agent-bridge.client-migration-stage-contract" as const,
+          version: 1 as const,
+          stageOperationId: disk.operationId,
+          request: disk.request as ClientMigrationStageRequest,
+          stageRecordSha256: disk.steps[1]!.expectedAfterSha256,
+          targetBackendProjectionSha256: disk.steps[0]!.expectedAfterSha256,
+        }
+      : disk.version === 6 && ["migrate-cutover", "migrate-finalize"].includes(String(disk.request?.kind))
+        ? disk.request as ClientMigrationCutoverRequest
+        : null;
     const completion: ClientOperationCompletion = {
       operation: disk.request!.kind,
       stepCount: disk.steps.length,
@@ -1462,6 +1657,7 @@ function cleanupClientOperationArtifactWithCache(
       cleanupDirectoryDurability: disk.artifacts.some((item) => item.directoryDurability === "unavailable")
         ? "unavailable" : "durable",
       ...(disk.version === 4 ? { rollback } : {}),
+      ...(disk.version === 5 || disk.version === 6 ? { migration } : {}),
     };
     const terminal = validateClientOperation({
       ...disk, request: null, state: "committed", revision: disk.revision + 1,
@@ -1632,7 +1828,7 @@ export function inspectClientOperation(operationId: string, env: NodeJS.ProcessE
       ? "blocked" : manifest.state === "committed" ? "complete" : !sameHost
         ? "blocked" : unsupported ? "blocked" : ambiguous ? "classification-required" : "resumable";
     return {
-      schemaVersion: CLIENT_OPERATION_VERSION, operationId: manifest.operationId,
+      schemaVersion: manifest.version, operationId: manifest.operationId,
       operation: manifest.request?.kind ?? manifest.completion?.operation ?? null,
       runtime: manifest.runtime, instance: manifest.instance,
       state: intact ? manifest.state : "corrupt", inspectionState, revision: manifest.revision,

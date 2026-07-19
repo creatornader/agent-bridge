@@ -2021,12 +2021,12 @@ integration("PostgreSQL BridgeStore integration", () => {
   it("records the endpoint migration challenge as the final migration state", async () => {
     const directory = fileURLToPath(new URL("../sql/migrations", import.meta.url));
     const plan = await loadMigrationPlan(directory);
-    expect(plan.at(-1)).toMatchObject({ version: 18, name: "endpoint_migration_challenges" });
+    expect(plan.at(-1)).toMatchObject({ version: 19, name: "endpoint_migration_same_successor" });
     expect(await migrationsReady(pool!, plan)).toBe(true);
     expect(await migrationsReady(pool!, plan.slice(0, -1))).toBe(false);
     expect((await pool!.query<{ version: number; name: string }>(
       "SELECT version,name FROM agent_bridge.schema_migrations ORDER BY version DESC LIMIT 1",
-    )).rows).toEqual([{ version: 18, name: "endpoint_migration_challenges" }]);
+    )).rows).toEqual([{ version: 19, name: "endpoint_migration_same_successor" }]);
     expect((await pool!.query<{ authority_id: string }>(
       "SELECT authority_id::text FROM agent_bridge.gateway_authority",
     )).rows).toEqual([{
@@ -2041,9 +2041,17 @@ integration("PostgreSQL BridgeStore integration", () => {
        WHERE name='owner-control-v5'`,
     )).rows).toEqual([{ name: "owner-control-v5" }]);
     expect((await pool!.query<{ name: string }>(
+      `SELECT name FROM agent_bridge.owner_control_attestations
+       WHERE name='owner-control-v6'`,
+    )).rows).toEqual([{ name: "owner-control-v6" }]);
+    expect((await pool!.query<{ name: string }>(
       `SELECT name FROM agent_bridge.endpoint_migration_challenge_attestations
        WHERE name='endpoint-migration-v1'`,
     )).rows).toEqual([{ name: "endpoint-migration-v1" }]);
+    expect((await pool!.query<{ name: string }>(
+      `SELECT name FROM agent_bridge.endpoint_migration_challenge_attestations
+       WHERE name='endpoint-migration-v2'`,
+    )).rows).toEqual([{ name: "endpoint-migration-v2" }]);
     expect((await pool!.query<{ name: string }>(
       `SELECT name FROM agent_bridge.portable_archive_attestations
        WHERE name='portable-archive-v3'`,
@@ -2088,7 +2096,7 @@ integration("PostgreSQL BridgeStore integration", () => {
       await pool!.query(`GRANT ${await runtimeRole(pool!)} TO ${login}`);
       runtime = new pg.Pool({ connectionString: runtimeUrl.toString(), max: 1 });
       const requestAuthority = new PostgresRequestAuthority(runtime);
-      const challenge = "a".repeat(64);
+      const challenge = createHash("sha256").update(randomUUID()).digest("hex");
       const issue = async () => requestAuthority.run(
         issuer.rows[0]!.id, hashCredential(issuerToken), randomUUID(), new AbortController().signal,
         async (context) => {
@@ -2103,13 +2111,18 @@ integration("PostgreSQL BridgeStore integration", () => {
       const replay = await issue();
       expect(replay).toEqual(first);
       expect((await pool!.query<{ count: number }>(
-        "SELECT count(*)::integer AS count FROM agent_bridge.endpoint_migration_challenge_events WHERE event_type='issued'",
+        "SELECT count(*)::integer AS count FROM agent_bridge.endpoint_migration_challenge_events WHERE event_type='issued' AND issuer_credential_id=$1",
+        [issuer.rows[0]!.id],
       )).rows[0]!.count).toBe(1);
       const storedChallenge = await pool!.query<{ valid_ttl: boolean; record: unknown; events: unknown }>(
         `SELECT (SELECT bool_and(expires_at>issued_at AND expires_at<=issued_at+interval '60 seconds')
-           FROM agent_bridge.endpoint_migration_challenges) AS valid_ttl,
-          (SELECT jsonb_agg(challenge) FROM agent_bridge.endpoint_migration_challenges challenge) AS record,
-          (SELECT jsonb_agg(event) FROM agent_bridge.endpoint_migration_challenge_events event) AS events`,
+           FROM agent_bridge.endpoint_migration_challenges
+           WHERE issuer_credential_id=$1) AS valid_ttl,
+          (SELECT jsonb_agg(challenge) FROM agent_bridge.endpoint_migration_challenges challenge
+           WHERE challenge.issuer_credential_id=$1) AS record,
+          (SELECT jsonb_agg(event) FROM agent_bridge.endpoint_migration_challenge_events event
+           WHERE event.issuer_credential_id=$1) AS events`,
+        [issuer.rows[0]!.id],
       );
       expect(storedChallenge.rows[0]!.valid_ttl).toBe(true);
       expect(JSON.stringify(storedChallenge.rows[0]!)).not.toContain(challenge);
@@ -2135,6 +2148,37 @@ integration("PostgreSQL BridgeStore integration", () => {
         },
       );
       expect(replayedConsume.consumed).toBe(false);
+      const successorChallenge = "c".repeat(64);
+      const successorIssue = await requestAuthority.run(
+        verifier.rows[0]!.credential_id, hashCredential(verifierToken), randomUUID(), new AbortController().signal,
+        async (context) => {
+          await context.security.consume(context.credential.id, "issue_endpoint_migration_challenge", randomUUID());
+          await context.beginDomainWork();
+          return context.endpointMigrationChallenges!.issue({
+            challenge: successorChallenge, expectedGatewayAuthorityId: authorityId,
+            verifierCredentialId: verifier.rows[0]!.credential_id,
+          });
+        },
+      );
+      expect(successorIssue).toMatchObject({
+        issuerCredentialId: verifier.rows[0]!.credential_id,
+        verifierCredentialId: verifier.rows[0]!.credential_id,
+      });
+      const successorConsume = await requestAuthority.run(
+        verifier.rows[0]!.credential_id, hashCredential(verifierToken), randomUUID(), new AbortController().signal,
+        async (context) => {
+          await context.security.consume(context.credential.id, "consume_endpoint_migration_challenge", randomUUID());
+          await context.beginDomainWork();
+          return context.endpointMigrationChallenges!.consume({
+            challenge: successorChallenge, expectedGatewayAuthorityId: authorityId,
+            issuerCredentialId: verifier.rows[0]!.credential_id,
+          });
+        },
+      );
+      expect(successorConsume).toMatchObject({
+        consumed: true, issuerCredentialId: verifier.rows[0]!.credential_id,
+        verifierCredentialId: verifier.rows[0]!.credential_id,
+      });
       await expect(runtime.query(
         "SELECT * FROM agent_bridge.issue_endpoint_migration_challenge($1::uuid,$2::uuid,$3::text)",
         [authorityId, verifier.rows[0]!.credential_id, challenge],
@@ -2456,7 +2500,7 @@ integration("PostgreSQL BridgeStore integration", () => {
           "SELECT 1 FROM agent_bridge.schema_migrations WHERE version=17",
         )).rowCount).toBe(0);
         await fence.query("SELECT pg_advisory_unlock($1::bigint)", [NATIVE_DR_ADVISORY_LOCK_KEY]);
-        await expect(migration).resolves.toHaveLength(18);
+        await expect(migration).resolves.toHaveLength(19);
       } finally {
         await fence.query("SELECT pg_advisory_unlock($1::bigint)", [NATIVE_DR_ADVISORY_LOCK_KEY]).catch(() => {});
         fence.release();
@@ -2944,12 +2988,14 @@ integration("PostgreSQL BridgeStore integration", () => {
       const nativeDrFenceMigration = plan[15]!;
       const gatewayAuthorityMigration = plan[16]!;
       const endpointMigrationChallengeMigration = plan[17]!;
+      const endpointMigrationSameSuccessorMigration = plan[18]!;
       expect(rowIsolationMigration).toMatchObject({ version: 13, name: "row_isolation" });
       expect(ownerControlPlaneMigration).toMatchObject({ version: 14, name: "owner_control_plane" });
       expect(portableArchiveMigration).toMatchObject({ version: 15, name: "portable_archives" });
       expect(nativeDrFenceMigration).toMatchObject({ version: 16, name: "native_dr_fence" });
       expect(gatewayAuthorityMigration).toMatchObject({ version: 17, name: "gateway_authority_binding" });
       expect(endpointMigrationChallengeMigration).toMatchObject({ version: 18, name: "endpoint_migration_challenges" });
+      expect(endpointMigrationSameSuccessorMigration).toMatchObject({ version: 19, name: "endpoint_migration_same_successor" });
 
       const workspaceId = "upgrade-row-isolation";
       const messageId = "018f4a70-0000-7000-8000-000000000201";
@@ -3065,6 +3111,11 @@ integration("PostgreSQL BridgeStore integration", () => {
         endpointMigrationChallengeMigration.source
           .split("__AGENT_BRIDGE_MIGRATION_CHECKSUM__")
           .join(endpointMigrationChallengeMigration.checksum),
+      );
+      await upgrade.query(
+        endpointMigrationSameSuccessorMigration.source
+          .split("__AGENT_BRIDGE_MIGRATION_CHECKSUM__")
+          .join(endpointMigrationSameSuccessorMigration.checksum),
       );
       expect(await migrationsReady(upgrade, plan)).toBe(true);
       expect(await runtimeSchemaReady(upgrade, { allowPrivilegedCaller: true })).toBe(true);

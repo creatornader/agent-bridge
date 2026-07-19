@@ -6,14 +6,28 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and 
 
 ## [Unreleased]
 
+## [0.4.0] - 2026-07-19
+
 ### Added
 
-- Add migration 018 with two gateway-only HTTP 2.1 endpoint-migration challenge
-  operations. An active issuer and direct active successor use the same 64-character
-  challenge against the immutable gateway authority UUID. PostgreSQL stores only a
-  domain-separated commitment, expires it within 60 seconds, and keeps issue, consume,
-  and expiration events append-only. The challenge does not authorize client endpoint
-  cutover.
+- Add v6 managed-client endpoint cutover and finalization commands. A
+  committed v5 stage authorizes a credential-free v6 journal only after both live
+  gateways negotiate HTTP 2.1, bind the recorded principal and credential IDs, report
+  one immutable authority ID, and complete a route challenge. Cutover drains the
+  source edge under an exclusive lease before changing a host registration. The initial
+  proof uses the predecessor and successor. Once a journal exists, every proof and
+  replay uses the successor credential at both URLs, then drains the source edge
+  through the target gateway. Finalization retires the source only after the
+  predecessor grace cutoff. Dry runs inspect edge state without opening SQLite for
+  write access or contacting a gateway. Resume classifies durable before and after
+  proofs and cannot take over a live lease.
+
+- Add migration 019 for successor-only endpoint-migration challenges. A challenge now
+  accepts either a direct predecessor-to-successor pair or the same active successor
+  credential on both endpoints. The migration preserves the migration 018 challenge
+  records and readiness controls, adds v2 endpoint and v6 owner attestations, and does
+  not grant cutover authority. Authenticated HTTP 2.1 capabilities now return the
+  credential's `grantedScopes`.
 
 - Add migration 017 with an immutable PostgreSQL gateway authority UUID. Production
   request authority now uses a bound opener without changing the released opener's
@@ -37,9 +51,9 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and 
   registration before it removes the forward native entry, restores the prior entry,
   and writes prior metadata last. Claude Desktop replaces only its Agent Bridge entry.
   Generic `clients resume` also resumes a reverse journal. The v4 source completion
-  keeps only a bounded credential-free inverse contract. Repair remains monotonic,
-  uninstall stays forward-only, and endpoint cutover is still unavailable. Managed
-  operation summaries now report schema version 5 and include the `rollback` kind.
+  keeps only a bounded credential-free inverse contract. Repair remains monotonic and
+  uninstall stays forward-only. Managed operation summaries preserve the durable
+  manifest version and include the `rollback` kind.
 
 - Add forward-only `clients uninstall` for metadata-owned Codex, Claude Code, and
   Claude Desktop registrations. Uninstall proves and removes the managed
@@ -266,7 +280,8 @@ First tagged release. Marks the point where agent-bridge has shipped its initial
 - Narrative-leak detection in CI + on commit via `creatornader/textleaks@v0.2.0` (renamed from leakguard).
 
 [0.1.0]: https://github.com/creatornader/agent-bridge/releases/tag/v0.1.0
-[Unreleased]: https://github.com/creatornader/agent-bridge/compare/v0.3.1...HEAD
+[Unreleased]: https://github.com/creatornader/agent-bridge/compare/v0.4.0...HEAD
+[0.4.0]: https://github.com/creatornader/agent-bridge/compare/v0.3.1...v0.4.0
 [0.3.1]: https://github.com/creatornader/agent-bridge/compare/v0.3.0...v0.3.1
 [0.3.0]: https://github.com/creatornader/agent-bridge/compare/v0.2.0...v0.3.0
 [0.2.0]: https://github.com/creatornader/agent-bridge/compare/v0.1.0...v0.2.0

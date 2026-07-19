@@ -392,7 +392,16 @@ export function createGateway(options: GatewayOptions) {
             rowIsolation = false;
           }
         }
-        sendOperation(response, 200, "capabilities", capabilityDocument({ surface: "http", provider: "gateway", selectedProtocolVersion: String(response.getHeader(PROTOCOL_HEADER)), requestAuthority: Boolean(options.requestAuthority), rowIsolation }), requestId); return;
+        sendOperation(response, 200, "capabilities", {
+          ...capabilityDocument({
+            surface: "http",
+            provider: "gateway",
+            selectedProtocolVersion: String(response.getHeader(PROTOCOL_HEADER)),
+            requestAuthority: Boolean(options.requestAuthority),
+            rowIsolation,
+          }),
+          grantedScopes: [...credential.scopes],
+        }, requestId); return;
       }
 
       if (req.method === "GET" && url.pathname === "/v2/status") {

@@ -77,6 +77,11 @@ describe("agent-bridge CLI", () => {
       const result = runAt(home, invocation, { AGENT_BRIDGE_DB: database });
       expect(result.status, `${invocation.join(" ")}: ${result.stderr}`).toBe(0);
       expect(result.stdout).toContain("agent-bridge: provider-neutral agent messaging");
+      expect(result.stdout).toContain("clients migrate stage <codex|claude-code|claude-desktop>");
+      expect(result.stdout).toContain("clients migrate cutover <stage-operation-id> --exclusive-edge [--apply] [--recover-lock]");
+      expect(result.stdout).not.toContain("clients migrate reverse");
+      expect(result.stdout).toContain("clients migrate finalize <cutover-operation-id> --exclusive-edge [--apply] [--recover-lock]");
+      expect(result.stdout).toContain("clients resume <operation-id> [--recover-lock]");
       expect(result.stderr).toBe("");
       expect(existsSync(database)).toBe(false);
     }
@@ -86,7 +91,7 @@ describe("agent-bridge CLI", () => {
     const home = mkdtempSync(join(tmpdir(), "agent-bridge-cli-operations-")); homes.push(home);
     const result = runAt(home, ["clients", "operations"]);
     expect(result.status).toBe(0);
-    expect(JSON.parse(result.stdout)).toEqual({ schemaVersion: 5, operations: [] });
+    expect(JSON.parse(result.stdout)).toEqual({ schemaVersion: 6, operations: [] });
     expect(result.stderr).toBe("");
     expect(existsSync(join(home, ".agent-bridge", "operations"))).toBe(false);
 
@@ -140,6 +145,17 @@ describe("agent-bridge CLI", () => {
     ]);
     expect(resume.status).toBe(1);
     expect(resume.stderr).toContain("--identity is not valid for clients resume");
+  });
+
+  it("requires --apply before client migration lock recovery", () => {
+    const operationId = "11111111-1111-4111-8111-111111111111";
+    for (const action of ["cutover", "finalize"]) {
+      const result = run([
+        "clients", "migrate", action, operationId, "--exclusive-edge", "--recover-lock",
+      ]);
+      expect(result.status).toBe(1);
+      expect(result.stderr).toContain("--recover-lock requires --apply");
+    }
   });
 
   it("exports, verifies, dry-runs, and applies a local portable archive", () => {

@@ -87,7 +87,7 @@ The canonical v2 operation registry generates [JSON Schema](schemas/agent-bridge
 
 Protocol 2.1 uses a gateway-first rollout. An upgraded gateway continues to serve released 2.0 clients, including headerless requests and their direct or null delivery results. A 2.1 client probes before mutation and proceeds only when complete, consistent response headers select 2.1 and advertise 2.1 support. It rejects mutation against a headerless or 2.0 gateway instead of downgrading. Upgrade the gateway before installing or starting 2.1 clients.
 
-Two gateway-only HTTP 2.1 operations establish a short-lived endpoint-migration challenge. The issuer supplies a caller-generated 64-character lowercase hexadecimal challenge, the expected gateway authority ID, and a direct successor credential. The successor consumes the same challenge with the expected authority ID and issuer credential. Both calls require active transaction-bound authority and use the canonical credential and operation rate buckets. PostgreSQL stores only a domain-separated SHA-256 commitment. A challenge expires within 60 seconds and does not authorize endpoint cutover.
+Two gateway-only HTTP 2.1 operations establish a short-lived endpoint-migration challenge. Initial preflight uses a direct predecessor and successor. After a cutover journal exists, the same active successor credential can issue at the retained source URL and consume at the target URL. Both calls require active transaction-bound authority and use the canonical credential and operation rate buckets. PostgreSQL stores only a domain-separated SHA-256 commitment. A challenge expires within 60 seconds and does not authorize endpoint cutover. Authenticated HTTP 2.1 capabilities include the credential's `grantedScopes`.
 
 The OpenAPI paths describe protocol 2.1. The embedded `x-agent-bridge-protocol-2.0` and `x-agent-bridge-schemas-2.0` vendor extensions contain frozen compatibility schema metadata for released 2.0 clients. They are not a second OpenAPI description. Gateway credentials enforce the operation scopes declared by the canonical registry. Local mode uses process identity, and legacy mode uses its configured key. Provider-neutral artifacts report this difference instead of claiming one authorization model for every backend.
 
@@ -457,6 +457,9 @@ agent-bridge clients rollback <update-operation-uuid> --identity codex --apply
 agent-bridge clients resume <operation-uuid>
 agent-bridge clients migrate stage codex --identity codex --instance <stable-key> \\
   --enrollment-file <private-path>
+agent-bridge clients migrate cutover <stage-operation-uuid> --exclusive-edge
+agent-bridge clients migrate cutover <stage-operation-uuid> --exclusive-edge --apply
+agent-bridge clients migrate finalize <cutover-operation-uuid> --exclusive-edge --apply
 ```
 
 These commands return a plan by default. A managed registration that is already exact
@@ -499,9 +502,9 @@ and identity. It uses the recorded request instead of new flags. `--recover-lock
 requires `--apply` and only removes an old same-host lock after the process-death
 proof succeeds. Never delete a lock manually.
 
-`clients resume <operation-uuid>` takes only recorded v3, supported v4, or v5
-migration-stage operation authority and an optional `--recover-lock`. It does not
-accept a replacement action, runtime,
+`clients resume <operation-uuid>` takes only recorded v3, supported v4, v5
+migration-stage, or v6 endpoint-migration operation authority and an optional
+`--recover-lock`. It does not accept a replacement action, runtime,
 instance, identity, command, backend path, scope, or config locator. Use it for every
 generic resume. It is also required when an uninstall has already deleted its final
 metadata file, because the action-specific command has no metadata record left to
@@ -548,10 +551,10 @@ when cleanup intent predated the attempt. Inspection accepts only two exact cras
 residues: that authorized absence, or the verified after artifact for the current
 intent-recorded step. A terminal manifest removes request, step, digest, locator, and
 artifact metadata. A v4 update retains only its explicit credential-free inverse
-contract. Other terminal operations retain the operation kind, step count, completion
-time, and cleanup durability. Completed records remain readable across hosts. Repair,
-update, rollback, and uninstall use this journal. Endpoint migration
-remains unavailable. Agent Bridge cannot promise physical erasure
+contract. A committed v5 stage retains its credential-free stage contract. A committed
+v6 phase retains its credential-free cutover contract. Completed records remain
+readable across hosts. Repair, update, rollback, uninstall, and endpoint migration use
+this journal. Agent Bridge cannot promise physical erasure
 on SSDs or journaled filesystems, so future commands must minimize credential-bearing
 snapshots and rotate credentials when retained copies contained them. Inspection
 changes no registration, backend, metadata, or snapshot file.
@@ -567,12 +570,36 @@ recorded in [ADR 0004](docs/decisions/0004-client-lifecycle-and-endpoint-migrati
 
 `clients migrate stage <runtime> --identity <name> --instance <key>
 --enrollment-file <path> --apply` prepares a private gateway successor from a rotation
-enrollment. It does not change the active registration or backend, and it does not
-authorize cutover. Staging records endpoint digests, credential IDs, the source edge
-path and scope key, and the predecessor grace cutoff without recording tokens or raw
-gateway URLs. These artifacts may support a later, separate drain. The stage is inert
-and does not prove that source and target reach the same database authority. A later
-cutover is limited to alternate URLs and must dynamically attest one logical authority.
+enrollment. It does not change the active registration or backend. Staging records
+endpoint digests, credential IDs, the source edge path and scope key, and the
+predecessor grace cutoff without recording tokens or raw gateway URLs.
+
+`clients migrate cutover <stage-operation-uuid> --exclusive-edge --apply` consumes a
+committed v5 stage. Before it creates a journal, it verifies both live gateways under
+HTTP 2.1, including the recorded workspace, principal, credential ID, immutable gateway
+authority ID, and the successor credential's `status:read` and `messages:write` grants.
+The endpoints then exchange a direct predecessor-to-successor route challenge. The
+durable journal retains the normalized source gateway URL without a token. Every later
+route challenge uses the successor credential at both URLs, and it drains the source
+edge through the target gateway. The source edge changes to `draining`, receives an
+exclusive lease, and must reach an exact zero-work outbox before any host registration
+changes. The command removes and adds native registrations, or replaces the Claude
+Desktop entry, then changes managed metadata last. It rechecks the authority and lease
+before every host write.
+
+Every cutover phase requires `--exclusive-edge`. Agent Bridge can enumerate managed
+registrations that share an edge file, including hardlink aliases, but it cannot see
+unmanaged publishers. The flag records the operator's assertion for that remaining
+cohort. The forward phase also requires an active source edge and an active, empty
+target edge.
+
+`clients migrate finalize <cutover-operation-uuid> --exclusive-edge --apply` works
+only after the predecessor grace cutoff and retires the retained source edge. To return
+to an earlier endpoint, first rotate a new owner credential for that endpoint, then run
+an ordinary forward cutover with it as the successor. Use `clients resume
+<operation-uuid>` after a crash. Resume waits for a live drain lease to expire before
+another worker can take it. Dry inspection refuses an edge with live WAL sidecars rather
+than opening it in a mode that could miss uncheckpointed outbox state.
 Moving to an independent database needs a separate owner-mediated process.
 The source backend must name an absolute, normalized edge database file. Relative and
 in-memory edge paths cannot identify one durable outbox and are rejected.
@@ -964,7 +991,7 @@ Each gateway operation checks the scopes in the canonical registry. `capabilitie
 
 Migration 012 makes PostgreSQL the authority for each production gateway request that passes credential preflight. Node hashes the bearer credential before PostgreSQL receives it. The gateway checks out one connection, opens one explicit transaction, matches the credential ID and hash inside a narrow security-definer function, and derives the workspace, principal, and scopes from current database state. Security accounting and domain work share that transaction and backend. Delivery claim, cancel, and requeue reuse it without nested `BEGIN`. Runtime logins cannot read credential hashes, agent records, workspace records, or request-authority records.
 
-Migration 017 adds one immutable PostgreSQL authority UUID. The released request-authority opener keeps its return shape. Production gateway requests use a bound opener that returns the authority UUID with the database-derived credential. Authenticated gateway `/v2/status` replies include `gatewayAuthorityId` and `credentialId` when transaction-bound request authority is active. These additive fields remain optional in HTTP 2.1, and capabilities do not expose them. Migration 018 uses the same bound authority to issue and consume an expiring challenge for a direct credential successor. The challenge proves neither a database migration nor endpoint cutover.
+Migration 017 adds one immutable PostgreSQL authority UUID. The released request-authority opener keeps its return shape. Production gateway requests use a bound opener that returns the authority UUID with the database-derived credential. Authenticated gateway `/v2/status` replies include `gatewayAuthorityId` and `credentialId` when transaction-bound request authority is active. Authenticated HTTP 2.1 capabilities return `grantedScopes` for that credential. Migration 018 uses the same bound authority to issue and consume an expiring challenge for a direct credential successor. Migration 019 also permits the same active successor credential at both endpoints after a cutover journal begins. Neither challenge proves a database migration or authorizes endpoint cutover.
 
 Migration 013 enables and forces row-level security on messages, receipts, deliveries, delivery events, and presence. Policies read workspace and principal from the transaction-bound request authority. The runtime role cannot set that authority through session variables, inherit a table-owner role, or bypass RLS. Separate no-login roles own domain tables, read request context, and write delivery audit events. Delivery identity and publisher bindings are immutable. A trigger lets recipients perform recipient lifecycle actions and reserves cancel and requeue for publishers.
 

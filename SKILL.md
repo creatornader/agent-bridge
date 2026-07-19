@@ -8,8 +8,9 @@ description: Share context and reliable work between agents across runtimes and 
 Discover the active v2 operation contract with MCP `capabilities`, CLI `agent-bridge capabilities`, or authenticated `GET /v2/capabilities`. Released 2.0 clients continue to work after the gateway is upgraded. A new 2.1 client must receive complete, consistent negotiation headers that select and advertise 2.1 before it mutates remote state. If the probe is headerless, selects 2.0, or returns partial or contradictory headers, do not mutate. Upgrade the gateway first instead of downgrading the client.
 
 An authenticated PostgreSQL gateway status response can include `gatewayAuthorityId`
-and `credentialId`. They are additive in HTTP 2.1. Do not use them to switch a gateway
-endpoint until a later endpoint-migration client requires and validates both fields.
+and `credentialId`. They are additive in HTTP 2.1. `clients migrate cutover`
+requires and validates both fields before it switches a managed gateway endpoint.
+Do not switch an endpoint by editing its backend file.
 
 Use the Agent Bridge MCP tools for normal traffic. Let the active runtime supply its own identity. Do not pass a literal source unless a standalone CLI process has no configured identity.
 
@@ -120,12 +121,35 @@ edge database path, not `:memory:`. Resume an interrupted stage with `clients re
 recovery only after the recorded same-host process has stopped. Never remove a lock
 manually.
 
+Use `clients migrate cutover <stage-operation-id> --exclusive-edge` to inspect the
+host switch. Add `--apply` only after checking the plan. The applied command requires
+an active source edge and an active empty target edge. It verifies both HTTP 2.1
+gateways against the recorded workspace, principal, credential IDs, and authority ID.
+It also requires the successor `status:read` and `messages:write` grants, then completes
+a direct predecessor-to-successor route challenge. Once its journal exists, it uses the
+retained normalized source URL with the successor credential for route proofs and
+source-edge replay through the target gateway. It leases and drains the source edge to
+exact zero outbox work before changing a host registration. Native clients remove the
+source and add the target. Claude Desktop replaces its one Agent Bridge entry. Managed
+metadata changes last. The command rechecks gateway authority and the source lease
+before each host write.
+
+Every phase needs `--exclusive-edge`. Agent Bridge verifies the managed registrations
+that share the edge file, including hardlink aliases. It cannot enumerate unmanaged
+publishers, so the operator must assert that cohort is exclusive. `clients migrate
+finalize <cutover-operation-id> --exclusive-edge --apply` works after
+grace expires and retires the source edge. To return to a previous endpoint, rotate a
+new owner credential and cut forward to it as a new successor. Resume any interrupted
+v6 phase with `clients resume <operation-id> [--recover-lock]`. A new worker must wait
+for the held drain lease to expire. Dry planning never contacts a gateway or writes
+SQLite. It refuses an edge with live WAL sidecars rather than read stale outbox state.
+
 Resume an action-specific operation with the same action, runtime, instance, and
 identity: `--apply --resume <uuid>`. The stored request controls resume. Do not supply
 a new command unless it exactly matches the recorded update request. Use
 `clients resume <uuid> [--recover-lock]` to resume from a recorded v3, supported v4,
-or v5 migration-stage request alone. It does
-not accept replacement client authority. Use the generic form after uninstall has
+v5 migration-stage, or v6 endpoint-migration request alone. It does not accept
+replacement client authority. Use the generic form after uninstall has
 deleted metadata. `--recover-lock` on an action-specific command also requires
 `--apply`; it only recovers a stale same-host lock after process-death proof. Never
 remove operation locks by hand.
