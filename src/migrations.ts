@@ -57,8 +57,25 @@ const REQUIRED_COLUMNS = new Map([
   ["request_authorities.principal", "text"],
   ["request_authorities.scopes", "_text"],
   ["request_authorities.opened_session_user", "name"],
+  ["request_authorities.authorized_endpoint_migration_operation", "text"],
   ["gateway_authority.singleton", "bool"],
   ["gateway_authority.authority_id", "uuid"],
+  ["endpoint_migration_challenges.challenge_hash", "bpchar"],
+  ["endpoint_migration_challenges.authority_id", "uuid"],
+  ["endpoint_migration_challenges.workspace_id", "text"],
+  ["endpoint_migration_challenges.principal", "text"],
+  ["endpoint_migration_challenges.issuer_credential_id", "uuid"],
+  ["endpoint_migration_challenges.verifier_credential_id", "uuid"],
+  ["endpoint_migration_challenges.issued_at", "timestamptz"],
+  ["endpoint_migration_challenges.expires_at", "timestamptz"],
+  ["endpoint_migration_challenges.consumed_at", "timestamptz"],
+  ["endpoint_migration_challenge_events.sequence", "int8"],
+  ["endpoint_migration_challenge_events.event_id", "uuid"],
+  ["endpoint_migration_challenge_events.request_id", "uuid"],
+  ["endpoint_migration_challenge_events.event_type", "text"],
+  ["endpoint_migration_challenge_events.created_at", "timestamptz"],
+  ["endpoint_migration_challenge_attestations.name", "text"],
+  ["endpoint_migration_challenge_attestations.catalog_definition", "text"],
   ["row_isolation_attestations.name", "text"],
   ["row_isolation_attestations.catalog_definition", "text"],
   ["row_isolation_attestations.attested_at", "timestamptz"],
@@ -212,6 +229,7 @@ export const REQUIRED_MIGRATIONS = [
   { version: 15, name: "portable_archives" },
   { version: 16, name: "native_dr_fence" },
   { version: 17, name: "gateway_authority_binding" },
+  { version: 18, name: "endpoint_migration_challenges" },
 ] as const;
 
 function withNativeDrSharedLock(source: string): string {
@@ -792,6 +810,67 @@ export async function runtimeSchemaReady(
     row.principalTablesHidden && row.authorityTablesLocked && row.gatewayAuthorityPublicLocked &&
     row.authorityCatalog
   )) return false;
+  const endpointChallenge = await db.query<{
+    tables: boolean;
+    functions: boolean;
+    grants: boolean;
+    marker: boolean;
+  }>(`
+    WITH names AS (
+      SELECT ('agent_bridge_runtime_' || substr(md5(current_database()),1,16))::name AS runtime_role
+    ) SELECT
+      to_regclass('agent_bridge.endpoint_migration_challenges') IS NOT NULL
+        AND to_regclass('agent_bridge.endpoint_migration_challenge_events') IS NOT NULL
+        AND to_regclass('agent_bridge.endpoint_migration_challenge_attestations') IS NOT NULL AS tables,
+      to_regprocedure('agent_bridge.issue_endpoint_migration_challenge(uuid,uuid,text)') IS NOT NULL
+        AND to_regprocedure('agent_bridge.consume_endpoint_migration_challenge(uuid,uuid,text)') IS NOT NULL
+        AND to_regprocedure('agent_bridge.endpoint_migration_challenge_ready()') IS NOT NULL AS functions,
+      NOT EXISTS (
+        SELECT 1
+        FROM unnest(ARRAY[
+          'agent_bridge.endpoint_migration_challenges',
+          'agent_bridge.endpoint_migration_challenge_events',
+          'agent_bridge.endpoint_migration_challenge_attestations'
+        ]) relation_name
+        CROSS JOIN unnest(ARRAY['SELECT','INSERT','UPDATE','DELETE','TRUNCATE','REFERENCES','TRIGGER']) privilege
+        WHERE has_table_privilege((SELECT runtime_role FROM names),relation_name,privilege)
+          OR has_table_privilege('public',relation_name,privilege)
+      )
+        AND has_function_privilege((SELECT runtime_role FROM names),
+          'agent_bridge.issue_endpoint_migration_challenge(uuid,uuid,text)','EXECUTE')
+        AND has_function_privilege((SELECT runtime_role FROM names),
+          'agent_bridge.consume_endpoint_migration_challenge(uuid,uuid,text)','EXECUTE')
+        AND NOT has_function_privilege('public',
+          'agent_bridge.issue_endpoint_migration_challenge(uuid,uuid,text)','EXECUTE')
+        AND NOT has_function_privilege('public',
+          'agent_bridge.consume_endpoint_migration_challenge(uuid,uuid,text)','EXECUTE')
+        AND NOT EXISTS (
+          SELECT 1
+          FROM pg_catalog.pg_proc procedure
+          JOIN pg_catalog.pg_namespace namespace ON namespace.oid=procedure.pronamespace
+          WHERE namespace.nspname='agent_bridge'
+            AND procedure.proname IN (
+              'guard_endpoint_migration_challenge',
+              'reject_endpoint_migration_challenge_truncate',
+              'reject_endpoint_migration_challenge_event_mutation',
+              'reject_endpoint_migration_challenge_attestation_mutation',
+              'cleanup_endpoint_migration_challenges',
+              'endpoint_migration_challenge_active_credential',
+              'endpoint_migration_challenge_direct_lineage',
+              'endpoint_migration_challenge_catalog_definition',
+              'endpoint_migration_challenge_ready'
+            )
+            AND has_function_privilege((SELECT runtime_role FROM names),procedure.oid,'EXECUTE')
+        ) AS grants,
+      EXISTS (
+        SELECT 1 FROM pg_catalog.pg_attribute
+        WHERE attrelid='agent_bridge.request_authorities'::regclass
+          AND attname='authorized_endpoint_migration_operation'
+          AND NOT attnotnull
+      ) AS marker
+  `);
+  const endpoint = endpointChallenge.rows[0];
+  if (!endpoint?.tables || !endpoint.functions || !endpoint.grants || !endpoint.marker) return false;
   try {
     const security = await db.query<{ ready: boolean }>(
       "SELECT agent_bridge.security_schema_ready() AS ready",

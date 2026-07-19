@@ -2018,15 +2018,15 @@ integration("PostgreSQL BridgeStore integration", () => {
     );
   });
 
-  it("records the gateway authority binding as the final migration state", async () => {
+  it("records the endpoint migration challenge as the final migration state", async () => {
     const directory = fileURLToPath(new URL("../sql/migrations", import.meta.url));
     const plan = await loadMigrationPlan(directory);
-    expect(plan.at(-1)).toMatchObject({ version: 17, name: "gateway_authority_binding" });
+    expect(plan.at(-1)).toMatchObject({ version: 18, name: "endpoint_migration_challenges" });
     expect(await migrationsReady(pool!, plan)).toBe(true);
     expect(await migrationsReady(pool!, plan.slice(0, -1))).toBe(false);
     expect((await pool!.query<{ version: number; name: string }>(
       "SELECT version,name FROM agent_bridge.schema_migrations ORDER BY version DESC LIMIT 1",
-    )).rows).toEqual([{ version: 17, name: "gateway_authority_binding" }]);
+    )).rows).toEqual([{ version: 18, name: "endpoint_migration_challenges" }]);
     expect((await pool!.query<{ authority_id: string }>(
       "SELECT authority_id::text FROM agent_bridge.gateway_authority",
     )).rows).toEqual([{
@@ -2037,9 +2037,128 @@ integration("PostgreSQL BridgeStore integration", () => {
        WHERE name='owner-control-v4'`,
     )).rows).toEqual([{ name: "owner-control-v4" }]);
     expect((await pool!.query<{ name: string }>(
+      `SELECT name FROM agent_bridge.owner_control_attestations
+       WHERE name='owner-control-v5'`,
+    )).rows).toEqual([{ name: "owner-control-v5" }]);
+    expect((await pool!.query<{ name: string }>(
+      `SELECT name FROM agent_bridge.endpoint_migration_challenge_attestations
+       WHERE name='endpoint-migration-v1'`,
+    )).rows).toEqual([{ name: "endpoint-migration-v1" }]);
+    expect((await pool!.query<{ name: string }>(
       `SELECT name FROM agent_bridge.portable_archive_attestations
        WHERE name='portable-archive-v3'`,
     )).rows).toEqual([{ name: "portable-archive-v3" }]);
+  });
+
+  it("binds endpoint migration challenges to forward credential replacement authority", async () => {
+    const workspaceId = await workspace();
+    const agent = await pool!.query<{ id: string }>(
+      "INSERT INTO agent_bridge.agents(workspace_id,principal) VALUES($1,'endpoint-migration') RETURNING id",
+      [workspaceId],
+    );
+    const issuerToken = `endpoint-issuer-${randomUUID()}`;
+    const issuer = await pool!.query<{ id: string }>(
+      `INSERT INTO agent_bridge.credentials(workspace_id,agent_id,token_hash,expires_at,scopes,scope_set_name)
+       VALUES($1,$2,$3,clock_timestamp()+interval '1 hour',
+         (SELECT scopes FROM agent_bridge.credential_scope_sets WHERE name='release-a-full'),'release-a-full')
+       RETURNING id`,
+      [workspaceId, agent.rows[0]!.id, hashCredential(issuerToken)],
+    );
+    const verifierToken = `endpoint-verifier-${randomUUID()}`;
+    const verifier = await pool!.query<{ credential_id: string; succeeded: boolean }>(
+      `SELECT succeeded,credential_id FROM agent_bridge.replace_credential(
+        $1::uuid,$2::character(64),
+        (SELECT scopes FROM agent_bridge.credential_scope_sets WHERE name='release-a-full'),
+        'release-a-full','endpoint-verifier',clock_timestamp()+interval '1 hour',
+        clock_timestamp()+interval '30 minutes','test',gen_random_uuid())`,
+      [issuer.rows[0]!.id, hashCredential(verifierToken)],
+    );
+    expect(verifier.rows[0]).toMatchObject({ succeeded: true });
+    const authorityId = (await pool!.query<{ authority_id: string }>(
+      "SELECT authority_id::text FROM agent_bridge.gateway_authority WHERE singleton",
+    )).rows[0]!.authority_id;
+    const login = `bridge_endpoint_${randomUUID().replaceAll('-', '')}`;
+    const password = randomUUID();
+    await pool!.query(`CREATE ROLE ${login} LOGIN PASSWORD '${password}'`);
+    const runtimeUrl = new URL(databaseUrl!);
+    runtimeUrl.username = login;
+    runtimeUrl.password = password;
+    let runtime: pg.Pool | undefined;
+    try {
+      await pool!.query(`GRANT ${await runtimeRole(pool!)} TO ${login}`);
+      runtime = new pg.Pool({ connectionString: runtimeUrl.toString(), max: 1 });
+      const requestAuthority = new PostgresRequestAuthority(runtime);
+      const challenge = "a".repeat(64);
+      const issue = async () => requestAuthority.run(
+        issuer.rows[0]!.id, hashCredential(issuerToken), randomUUID(), new AbortController().signal,
+        async (context) => {
+          await context.security.consume(context.credential.id, "issue_endpoint_migration_challenge", randomUUID());
+          await context.beginDomainWork();
+          return context.endpointMigrationChallenges!.issue({
+            challenge, expectedGatewayAuthorityId: authorityId, verifierCredentialId: verifier.rows[0]!.credential_id,
+          });
+        },
+      );
+      const first = await issue();
+      const replay = await issue();
+      expect(replay).toEqual(first);
+      expect((await pool!.query<{ count: number }>(
+        "SELECT count(*)::integer AS count FROM agent_bridge.endpoint_migration_challenge_events WHERE event_type='issued'",
+      )).rows[0]!.count).toBe(1);
+      const storedChallenge = await pool!.query<{ valid_ttl: boolean; record: unknown; events: unknown }>(
+        `SELECT (SELECT bool_and(expires_at>issued_at AND expires_at<=issued_at+interval '60 seconds')
+           FROM agent_bridge.endpoint_migration_challenges) AS valid_ttl,
+          (SELECT jsonb_agg(challenge) FROM agent_bridge.endpoint_migration_challenges challenge) AS record,
+          (SELECT jsonb_agg(event) FROM agent_bridge.endpoint_migration_challenge_events event) AS events`,
+      );
+      expect(storedChallenge.rows[0]!.valid_ttl).toBe(true);
+      expect(JSON.stringify(storedChallenge.rows[0]!)).not.toContain(challenge);
+      const consumed = await requestAuthority.run(
+        verifier.rows[0]!.credential_id, hashCredential(verifierToken), randomUUID(), new AbortController().signal,
+        async (context) => {
+          await context.security.consume(context.credential.id, "consume_endpoint_migration_challenge", randomUUID());
+          await context.beginDomainWork();
+          return context.endpointMigrationChallenges!.consume({
+            challenge, expectedGatewayAuthorityId: authorityId, issuerCredentialId: issuer.rows[0]!.id,
+          });
+        },
+      );
+      expect(consumed).toMatchObject({ consumed: true, issuerCredentialId: issuer.rows[0]!.id, verifierCredentialId: verifier.rows[0]!.credential_id });
+      const replayedConsume = await requestAuthority.run(
+        verifier.rows[0]!.credential_id, hashCredential(verifierToken), randomUUID(), new AbortController().signal,
+        async (context) => {
+          await context.security.consume(context.credential.id, "consume_endpoint_migration_challenge", randomUUID());
+          await context.beginDomainWork();
+          return context.endpointMigrationChallenges!.consume({
+            challenge, expectedGatewayAuthorityId: authorityId, issuerCredentialId: issuer.rows[0]!.id,
+          });
+        },
+      );
+      expect(replayedConsume.consumed).toBe(false);
+      await expect(runtime.query(
+        "SELECT * FROM agent_bridge.issue_endpoint_migration_challenge($1::uuid,$2::uuid,$3::text)",
+        [authorityId, verifier.rows[0]!.credential_id, challenge],
+      )).rejects.toThrow(/authorization/);
+      await expect(runtime.query(
+        "SELECT * FROM agent_bridge.endpoint_migration_challenges",
+      )).rejects.toThrow(/permission denied/);
+      await expect(requestAuthority.run(
+        verifier.rows[0]!.credential_id, hashCredential(verifierToken), randomUUID(), new AbortController().signal,
+        async (context) => {
+          await context.security.consume(context.credential.id, "issue_endpoint_migration_challenge", randomUUID());
+          await context.beginDomainWork();
+          return context.endpointMigrationChallenges!.issue({
+            challenge: "b".repeat(64), expectedGatewayAuthorityId: authorityId, verifierCredentialId: issuer.rows[0]!.id,
+          });
+        },
+      )).rejects.toMatchObject({
+        status: 409,
+        code: "endpoint_migration_binding_rejected",
+      });
+    } finally {
+      await runtime?.end();
+      await pool!.query(`DROP ROLE IF EXISTS ${login}`);
+    }
   });
 
   it("excludes membership grantors from portable attestations but keeps them in diagnostics", async () => {
@@ -2337,7 +2456,7 @@ integration("PostgreSQL BridgeStore integration", () => {
           "SELECT 1 FROM agent_bridge.schema_migrations WHERE version=17",
         )).rowCount).toBe(0);
         await fence.query("SELECT pg_advisory_unlock($1::bigint)", [NATIVE_DR_ADVISORY_LOCK_KEY]);
-        await expect(migration).resolves.toHaveLength(17);
+        await expect(migration).resolves.toHaveLength(18);
       } finally {
         await fence.query("SELECT pg_advisory_unlock($1::bigint)", [NATIVE_DR_ADVISORY_LOCK_KEY]).catch(() => {});
         fence.release();
@@ -2415,10 +2534,15 @@ integration("PostgreSQL BridgeStore integration", () => {
       for (const statement of [
         "UPDATE agent_bridge.gateway_authority SET authority_id=gen_random_uuid()",
         "DELETE FROM agent_bridge.gateway_authority",
-        "TRUNCATE agent_bridge.gateway_authority",
       ]) {
         await expect(client.query(statement)).rejects.toThrow(/gateway authority is immutable/);
       }
+      await expect(client.query(
+        "TRUNCATE agent_bridge.gateway_authority",
+      )).rejects.toThrow(/cannot truncate a table referenced in a foreign key constraint/);
+      expect((await client.query(
+        "SELECT count(*)::integer AS count FROM agent_bridge.gateway_authority",
+      )).rows[0]!.count).toBe(1);
 
       await client.query("ALTER TABLE agent_bridge.gateway_authority DROP CONSTRAINT gateway_authority_singleton");
       expect(await ready()).toBe(false);
@@ -2430,9 +2554,11 @@ integration("PostgreSQL BridgeStore integration", () => {
       await client.query("ALTER TABLE agent_bridge.gateway_authority ADD CONSTRAINT gateway_authority_singleton_true CHECK (singleton)");
       expect(await ready()).toBe(true);
 
-      await client.query("ALTER TABLE agent_bridge.gateway_authority DROP CONSTRAINT gateway_authority_id_unique");
+      await client.query(`ALTER TABLE agent_bridge.gateway_authority
+        RENAME CONSTRAINT gateway_authority_id_unique TO gateway_authority_id_unique_drifted`);
       expect(await ready()).toBe(false);
-      await client.query("ALTER TABLE agent_bridge.gateway_authority ADD CONSTRAINT gateway_authority_id_unique UNIQUE (authority_id)");
+      await client.query(`ALTER TABLE agent_bridge.gateway_authority
+        RENAME CONSTRAINT gateway_authority_id_unique_drifted TO gateway_authority_id_unique`);
       expect(await ready()).toBe(true);
 
       await client.query("ALTER TABLE agent_bridge.gateway_authority ALTER COLUMN authority_id DROP NOT NULL");
@@ -2489,8 +2615,12 @@ integration("PostgreSQL BridgeStore integration", () => {
       await client.query("ALTER TABLE agent_bridge.gateway_authority ADD CONSTRAINT gateway_authority_singleton PRIMARY KEY (singleton)");
       await client.query("ALTER TABLE agent_bridge.gateway_authority DROP CONSTRAINT IF EXISTS gateway_authority_singleton_true");
       await client.query("ALTER TABLE agent_bridge.gateway_authority ADD CONSTRAINT gateway_authority_singleton_true CHECK (singleton)");
-      await client.query("ALTER TABLE agent_bridge.gateway_authority DROP CONSTRAINT IF EXISTS gateway_authority_id_unique");
-      await client.query("ALTER TABLE agent_bridge.gateway_authority ADD CONSTRAINT gateway_authority_id_unique UNIQUE (authority_id)");
+      if ((await client.query(`SELECT 1 FROM pg_catalog.pg_constraint
+        WHERE conrelid='agent_bridge.gateway_authority'::regclass
+          AND conname='gateway_authority_id_unique_drifted'`)).rowCount === 1) {
+        await client.query(`ALTER TABLE agent_bridge.gateway_authority
+          RENAME CONSTRAINT gateway_authority_id_unique_drifted TO gateway_authority_id_unique`);
+      }
       await client.query("ALTER TABLE agent_bridge.gateway_authority ALTER COLUMN authority_id SET NOT NULL");
       client.release();
     }
@@ -2813,11 +2943,13 @@ integration("PostgreSQL BridgeStore integration", () => {
       const portableArchiveMigration = plan[14]!;
       const nativeDrFenceMigration = plan[15]!;
       const gatewayAuthorityMigration = plan[16]!;
+      const endpointMigrationChallengeMigration = plan[17]!;
       expect(rowIsolationMigration).toMatchObject({ version: 13, name: "row_isolation" });
       expect(ownerControlPlaneMigration).toMatchObject({ version: 14, name: "owner_control_plane" });
       expect(portableArchiveMigration).toMatchObject({ version: 15, name: "portable_archives" });
       expect(nativeDrFenceMigration).toMatchObject({ version: 16, name: "native_dr_fence" });
       expect(gatewayAuthorityMigration).toMatchObject({ version: 17, name: "gateway_authority_binding" });
+      expect(endpointMigrationChallengeMigration).toMatchObject({ version: 18, name: "endpoint_migration_challenges" });
 
       const workspaceId = "upgrade-row-isolation";
       const messageId = "018f4a70-0000-7000-8000-000000000201";
@@ -2928,6 +3060,11 @@ integration("PostgreSQL BridgeStore integration", () => {
         gatewayAuthorityMigration.source
           .split("__AGENT_BRIDGE_MIGRATION_CHECKSUM__")
           .join(gatewayAuthorityMigration.checksum),
+      );
+      await upgrade.query(
+        endpointMigrationChallengeMigration.source
+          .split("__AGENT_BRIDGE_MIGRATION_CHECKSUM__")
+          .join(endpointMigrationChallengeMigration.checksum),
       );
       expect(await migrationsReady(upgrade, plan)).toBe(true);
       expect(await runtimeSchemaReady(upgrade, { allowPrivilegedCaller: true })).toBe(true);
@@ -4282,6 +4419,15 @@ integration("PostgreSQL BridgeStore integration", () => {
        DROP CONSTRAINT credentials_replacement_not_self;
        ALTER TABLE agent_bridge.credentials
        ADD CONSTRAINT credentials_replacement_not_self CHECK (true)`,
+      "UPDATE agent_bridge.rate_limit_policies SET capacity=31 WHERE policy_id='operation:issue_endpoint_migration_challenge'",
+      `ALTER TABLE agent_bridge.request_authorities
+       DROP CONSTRAINT request_authorities_endpoint_migration_operation;
+       ALTER TABLE agent_bridge.request_authorities
+       ADD CONSTRAINT request_authorities_endpoint_migration_operation CHECK (true)`,
+      "ALTER TABLE agent_bridge.request_authorities DROP COLUMN authorized_endpoint_migration_operation",
+      "ALTER TABLE agent_bridge.endpoint_migration_challenges ENABLE ROW LEVEL SECURITY",
+      `GRANT SELECT ON agent_bridge.endpoint_migration_challenges TO ${names.runtime}`,
+      `GRANT EXECUTE ON FUNCTION agent_bridge.endpoint_migration_challenge_ready() TO ${names.runtime}`,
     ];
     for (const change of changes) {
       const client = await pool!.connect();
@@ -4297,7 +4443,7 @@ integration("PostgreSQL BridgeStore integration", () => {
         client.release();
       }
     }
-  });
+  }, 30_000);
 
   it("allows unrelated additive schema objects without changing owner readiness", async () => {
     const client = await pool!.connect();

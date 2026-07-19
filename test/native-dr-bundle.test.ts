@@ -16,14 +16,15 @@ const excluded = [
   "agent_bridge.agent_instances", "agent_bridge.rate_limit_buckets", "agent_bridge.request_authorities",
   "agent_bridge.archive_transaction_authorizations",
 ];
-function pgInput(database: string, roles: string): NativeDrBundleInput {
+const currentExcluded = [...excluded, "agent_bridge.endpoint_migration_challenges"];
+function pgInput(database: string, roles: string, schemaVersion = 17): NativeDrBundleInput {
   return {
     backupId, createdAt: "2026-07-15T00:00:00.000Z", kind: "postgres",
     entries: [{ name: "postgres/database.dump", path: database }, { name: "postgres/roles.json", path: roles }],
     schema: {
-      databaseName: "agent_bridge", serverVersionNum: 170005, serverMajor: 17, schemaVersion: 16,
-      migrations: [{ version: 1, name: "gateway_v2", checksum: "a".repeat(64) }],
-      tableCounts: { "agent_bridge.messages": "12" }, excludedDataTables: excluded,
+      databaseName: "agent_bridge", serverVersionNum: 170005, serverMajor: 17, schemaVersion,
+      migrations: [{ version: schemaVersion, name: "gateway_v2", checksum: "a".repeat(64) }],
+      tableCounts: { "agent_bridge.messages": "12" }, excludedDataTables: schemaVersion <= 17 ? excluded : currentExcluded,
       pgDumpVersion: "pg_dump (PostgreSQL) 17.5", roleInventorySha256: "b".repeat(64), claimedDeliveryCount: "2",
       readinessAttestations: {
         securitySchemaSha256: "c".repeat(64), rowIsolationSha256: "d".repeat(64),
@@ -41,6 +42,29 @@ function writeBundle(path: string, input: NativeDrBundleInput, hooks: Parameters
 }
 
 describe("native DR bundle framing", () => {
+  it("accepts a v17 manifest with the released four-table exclusion contract", () => {
+    const directory = root(); const database = join(directory, "database.dump"); const roles = join(directory, "roles.json");
+    writeFileSync(database, "dump", { mode: 0o600 }); writeFileSync(roles, "roles", { mode: 0o600 });
+    expect(() => writeBundle(join(directory, "v17.abdr"), pgInput(database, roles, 17))).not.toThrow();
+  });
+
+  it("requires the endpoint challenge exclusion for v18 PostgreSQL bundles", () => {
+    const directory = root(); const database = join(directory, "database.dump"); const roles = join(directory, "roles.json");
+    writeFileSync(database, "dump", { mode: 0o600 }); writeFileSync(roles, "roles", { mode: 0o600 });
+    expect(() => writeBundle(join(directory, "v18.abdr"), pgInput(database, roles, 18))).not.toThrow();
+    const malformed = pgInput(database, roles, 18); malformed.schema.excludedDataTables = excluded;
+    expect(() => writeBundle(join(directory, "malformed-v18.abdr"), malformed)).toThrow(/excluded-data inventory/);
+  });
+
+  it("rejects a PostgreSQL manifest whose schema version is not its final migration", () => {
+    const directory = root(); const database = join(directory, "database.dump"); const roles = join(directory, "roles.json");
+    writeFileSync(database, "dump", { mode: 0o600 }); writeFileSync(roles, "roles", { mode: 0o600 });
+    const malformed = pgInput(database, roles, 17);
+    malformed.schema.schemaVersion = 18;
+    malformed.schema.excludedDataTables = currentExcluded;
+    expect(() => writeBundle(join(directory, "mismatched-version.abdr"), malformed)).toThrow(/schema version does not match migrations/);
+  });
+
   it("streams and verifies the exact ordered PostgreSQL entry set", () => {
     const directory = root(); const database = join(directory, "database.dump"); const roles = join(directory, "roles.json"); const bundle = join(directory, "backup.abdr");
     writeFileSync(database, Buffer.from("custom dump bytes"), { mode: 0o600 }); writeFileSync(roles, Buffer.from('{"roles":[]}\n'), { mode: 0o600 });

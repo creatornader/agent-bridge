@@ -57,6 +57,105 @@ async function gateway(
 function auth(token = "good") { return { authorization: `Bearer ${token}`, "content-type": "application/json", "x-agent-bridge-protocol-version": "2.1" }; }
 
 describe("authenticated v2 gateway", () => {
+  it("binds endpoint migration challenge routes to 2.1 request authority work", async () => {
+    const calls: string[] = [];
+    const authority = {
+      run: async (_credentialId: string, _hash: string, _requestId: string, _signal: AbortSignal, work: any) => work({
+        gatewayAuthorityId: "00000000-0000-4000-8000-000000000003",
+        credential: { id: "00000000-0000-4000-8000-000000000004", principal: { workspace: "workspace-a", agent: "agent-a" }, scopes: AUTHORIZATION_SCOPES },
+        store: new SQLiteBridgeStore(),
+        security: {
+          recordScopeDenial: async () => {},
+          consume: async (_credential: string, operation: string) => { calls.push(`authorize:${operation}`); return { allowed: true, policyId: null, limit: 1, remaining: 0, retryAfterSeconds: 0 }; },
+        },
+        beginDomainWork: async () => { calls.push("begin"); },
+        endpointMigrationChallenges: {
+          issue: async (input: any) => { calls.push(`issue:${input.challenge}`); return { gatewayAuthorityId: input.expectedGatewayAuthorityId, issuerCredentialId: "00000000-0000-4000-8000-000000000004", verifierCredentialId: input.verifierCredentialId, expiresAt: "2026-07-19T00:00:30.000Z" }; },
+          consume: async (input: any) => { calls.push(`consume:${input.challenge}`); return { gatewayAuthorityId: input.expectedGatewayAuthorityId, issuerCredentialId: input.issuerCredentialId, verifierCredentialId: "00000000-0000-4000-8000-000000000004", expiresAt: "2026-07-19T00:00:30.000Z", consumed: true }; },
+        },
+      }),
+    };
+    const base = await gateway(undefined, { requestAuthority: authority });
+    const issue = await fetch(`${base}/v2/endpoint-migration-challenges`, {
+      method: "POST", headers: auth(), body: JSON.stringify({
+        challenge: "a".repeat(64), expectedGatewayAuthorityId: "00000000-0000-4000-8000-000000000003", verifierCredentialId: "00000000-0000-4000-8000-000000000005",
+      }),
+    });
+    expect(issue.status).toBe(200);
+    expect(await issue.json()).toMatchObject({ issuerCredentialId: "00000000-0000-4000-8000-000000000004" });
+    expect(calls).toEqual(["authorize:issue_endpoint_migration_challenge", "begin", `issue:${"a".repeat(64)}`]);
+  });
+
+  it("rejects headerless and 2.0 endpoint migration challenge routes before authorization", async () => {
+    const calls: string[] = [];
+    const base = await gateway(undefined, { security: { recordScopeDenial: async () => {}, consume: async () => { calls.push("authorize"); return { allowed: true, policyId: null, limit: 1, remaining: 0, retryAfterSeconds: 0 }; } } });
+    for (const headers of [{ authorization: "Bearer good", "content-type": "application/json" }, { ...auth(), "x-agent-bridge-protocol-version": "2.0" }]) {
+      const response = await fetch(`${base}/v2/endpoint-migration-challenges`, { method: "POST", headers, body: "{}" });
+      expect(response.status).toBe(404);
+    }
+    expect(calls).toEqual([]);
+  });
+
+  it("rejects malformed endpoint migration UUIDs before domain work", async () => {
+    const calls: string[] = [];
+    const authority = {
+      run: async (_credentialId: string, _hash: string, _requestId: string, _signal: AbortSignal, work: any) => work({
+        credential: { id: "00000000-0000-4000-8000-000000000004", principal: { workspace: "workspace-a", agent: "agent-a" }, scopes: AUTHORIZATION_SCOPES },
+        store: new SQLiteBridgeStore(),
+        security: {
+          recordScopeDenial: async () => {},
+          consume: async () => { calls.push("authorize"); return { allowed: true, policyId: null, limit: 1, remaining: 0, retryAfterSeconds: 0 }; },
+        },
+        beginDomainWork: async () => { calls.push("begin"); },
+        endpointMigrationChallenges: {
+          issue: async () => { calls.push("issue"); throw new Error("unexpected issue"); },
+          consume: async () => { calls.push("consume"); throw new Error("unexpected consume"); },
+        },
+      }),
+    };
+    const base = await gateway(undefined, { requestAuthority: authority });
+    for (const [path, body] of [
+      ["/v2/endpoint-migration-challenges", { challenge: "a".repeat(64), expectedGatewayAuthorityId: "not-a-uuid", verifierCredentialId: "00000000-0000-4000-8000-000000000005" }],
+      ["/v2/endpoint-migration-challenges/consume", { challenge: "a".repeat(64), expectedGatewayAuthorityId: "00000000-0000-4000-8000-000000000003", issuerCredentialId: "not-a-uuid" }],
+    ] as const) {
+      const response = await fetch(`${base}${path}`, { method: "POST", headers: auth(), body: JSON.stringify(body) });
+      expect(response.status).toBe(400);
+      expect(await response.json()).toMatchObject({ error: { code: "invalid_input" } });
+    }
+    expect(calls).toEqual(["authorize", "authorize"]);
+  });
+
+  it("returns stable endpoint migration conflict errors", async () => {
+    const authority = {
+      run: async (_credentialId: string, _hash: string, _requestId: string, _signal: AbortSignal, work: any) => work({
+        credential: { id: "00000000-0000-4000-8000-000000000004", principal: { workspace: "workspace-a", agent: "agent-a" }, scopes: AUTHORIZATION_SCOPES },
+        store: new SQLiteBridgeStore(),
+        security: {
+          recordScopeDenial: async () => {},
+          consume: async () => ({ allowed: true, policyId: null, limit: 1, remaining: 0, retryAfterSeconds: 0 }),
+        },
+        beginDomainWork: async () => {},
+        endpointMigrationChallenges: {
+          issue: async () => { throw Object.assign(new Error("private database detail"), { status: 409, code: "endpoint_migration_binding_rejected" }); },
+        },
+      }),
+    };
+    const base = await gateway(undefined, { requestAuthority: authority });
+    const response = await fetch(`${base}/v2/endpoint-migration-challenges`, {
+      method: "POST",
+      headers: auth(),
+      body: JSON.stringify({
+        challenge: "a".repeat(64),
+        expectedGatewayAuthorityId: "00000000-0000-4000-8000-000000000003",
+        verifierCredentialId: "00000000-0000-4000-8000-000000000005",
+      }),
+    });
+    expect(response.status).toBe(409);
+    const body = await response.json();
+    expect(body).toMatchObject({ error: { code: "endpoint_migration_binding_rejected" } });
+    expect(JSON.stringify(body)).not.toContain("private database detail");
+  });
+
   it("preserves HTTP error metadata and classifies protocol failures", async () => {
     const principal = { workspace: "workspace-a", agent: "agent-a" };
     const protocolHeaders = {

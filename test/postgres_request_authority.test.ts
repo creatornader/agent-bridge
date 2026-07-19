@@ -50,6 +50,35 @@ describe("PostgresRequestAuthority", () => {
     expect(value.calls.at(-1)).toBe("COMMIT");
   });
 
+  it.each([
+    ["28000", "endpoint_migration_binding_rejected"],
+    ["23505", "endpoint_migration_challenge_conflict"],
+  ])("maps endpoint migration SQLSTATE %s to a safe conflict", async (sqlstate, code) => {
+    const value = fixture({
+      onQuery: (sql) => {
+        if (sql.includes("issue_endpoint_migration_challenge")) {
+          throw Object.assign(new Error("database detail must not cross the HTTP boundary"), { code: sqlstate });
+        }
+      },
+    });
+    await expect(value.authority.run(
+      "00000000-0000-4000-8000-000000000001",
+      "a".repeat(64),
+      "00000000-0000-4000-8000-000000000002",
+      new AbortController().signal,
+      async (context) => {
+        await context.beginDomainWork();
+        return context.endpointMigrationChallenges!.issue({
+          challenge: "b".repeat(64),
+          expectedGatewayAuthorityId: "00000000-0000-4000-8000-000000000003",
+          verifierCredentialId: "00000000-0000-4000-8000-000000000005",
+        });
+      },
+    )).rejects.toMatchObject({ status: 409, code });
+    expect(value.calls).toContain("ROLLBACK TO SAVEPOINT agent_bridge_domain_work");
+    expect(value.calls.at(-1)).toBe("COMMIT");
+  });
+
   it("returns mutation_outcome_unknown and discards the client after commit ambiguity", async () => {
     const value = fixture({ failCommit: true });
     await expect(value.authority.run("00000000-0000-4000-8000-000000000001", "a".repeat(64), "00000000-0000-4000-8000-000000000002", new AbortController().signal, async () => undefined))

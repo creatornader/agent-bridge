@@ -16,6 +16,7 @@ import {
   createPostgresDrLibpqFiles,
   parsePostgresToolMajor,
   POSTGRES_NATIVE_DR_EXCLUDED_DATA_TABLES,
+  POSTGRES_NATIVE_DR_LEGACY_EXCLUDED_DATA_TABLES,
   PostgresNativeDrError,
   restorePostgresNativeDr,
   type PostgresDrClient,
@@ -142,6 +143,7 @@ describe("PostgreSQL native DR process boundary", () => {
       "--exclude-table-data=agent_bridge.rate_limit_buckets",
       "--exclude-table-data=agent_bridge.request_authorities",
       "--exclude-table-data=agent_bridge.archive_transaction_authorizations",
+      "--exclude-table-data=agent_bridge.endpoint_migration_challenges",
       "--dbname=service=agent_bridge_dr",
     ]);
   });
@@ -301,6 +303,7 @@ describe("PostgreSQL native DR role inventory", () => {
 
 describe("PostgreSQL native DR orchestration", () => {
   const migration = { version: 16, name: "native_dr_fence", checksum: "a".repeat(64) };
+  const gatewayMigration = { version: 17, name: "gateway_authority_binding", checksum: "b".repeat(64) };
   const tableNames = [
     "deliveries", "delivery_events", "agent_instances", "rate_limit_buckets",
     "request_authorities", "archive_transaction_authorizations",
@@ -313,11 +316,11 @@ describe("PostgreSQL native DR orchestration", () => {
     memberships: [],
     defaultAcls: [],
   });
-  const schemaFor = (rolesText: string) => ({
+  const schemaFor = (rolesText: string, schemaVersion = 16) => ({
     databaseName: "agent_bridge",
     serverVersionNum: 170005,
     serverMajor: 17,
-    schemaVersion: 16,
+    schemaVersion,
     migrations: [migration],
     tableCounts: {
       "agent_bridge.deliveries": "2",
@@ -327,7 +330,7 @@ describe("PostgreSQL native DR orchestration", () => {
       "agent_bridge.request_authorities": "7",
       "agent_bridge.archive_transaction_authorizations": "6",
     },
-    excludedDataTables: [...POSTGRES_NATIVE_DR_EXCLUDED_DATA_TABLES],
+    excludedDataTables: [...(schemaVersion <= 17 ? POSTGRES_NATIVE_DR_LEGACY_EXCLUDED_DATA_TABLES : POSTGRES_NATIVE_DR_EXCLUDED_DATA_TABLES)],
     claimedDeliveryCount: "1",
     pgDumpVersion: "pg_dump (PostgreSQL) 17.5",
     roleInventorySha256: createHash("sha256").update(rolesText).digest("hex"),
@@ -592,14 +595,45 @@ describe("PostgreSQL native DR orchestration", () => {
       dependencies,
     });
     expect(result.schema.claimedDeliveryCount).toBe("1");
+    expect(result.schema.excludedDataTables).toEqual(POSTGRES_NATIVE_DR_LEGACY_EXCLUDED_DATA_TABLES);
     expect(result.entries.map((entry) => entry.name)).toEqual(["postgres/database.dump", "postgres/roles.json"]);
     const dumpCall = childCalls.find((call) => call.command.endsWith("pg_dump") && call.args[0] !== "--version")!;
     expect(dumpCall.args).toContain("--snapshot=00000001-00000001-1");
+    expect(dumpCall.args).not.toContain("--exclude-table-data=agent_bridge.endpoint_migration_challenges");
     expect(JSON.stringify(childCalls)).not.toContain("s3cret");
     const lockIndex = source.statements.findIndex(({ sql }) => sql.includes("pg_advisory_lock"));
     const unlockIndex = source.statements.findIndex(({ sql }) => sql.includes("pg_advisory_unlock"));
     expect(lockIndex).toBeGreaterThanOrEqual(0);
     expect(unlockIndex).toBeGreaterThan(lockIndex);
+    expect(source.statements.some(({ sql }) => sql.includes("gateway_authority_ready"))).toBe(false);
+  });
+
+  it("refuses a migration-017 source when gateway authority readiness fails", async () => {
+    const directory = pgDirectory();
+    const source = new FakePostgresDrClient((sql) => {
+      if (sql.includes("pg_export_snapshot")) return [{ snapshot: "00000001-00000001-1" }];
+      if (sql.includes("current_setting('server_version_num')")) return [{ databaseName: "agent_bridge", serverVersionNum: "170005" }];
+      if (sql.includes("schema_migrations ORDER BY")) return [gatewayMigration];
+      if (sql.includes("information_schema.tables")) return tableNames.map((tableName) => ({ tableName }));
+      if (sql.includes("WHERE state='claimed'")) return [{ count: "1" }];
+      if (sql.includes("credential_security_prerequisite_definition")) return [{
+        security: true, ownerControl: true, portableArchive: true,
+        securityDefinition: "security", rowIsolationDefinition: "row",
+        ownerControlDefinition: "owner", portableArchiveDefinition: "archive",
+      }];
+      if (sql.includes("gateway_authority_ready()")) return [{ ready: false }];
+      if (sql.includes("count(*)::text")) return [{ count: "2" }];
+      return [];
+    });
+    await expect(backupPostgresNativeDr({
+      stagingDirectory: directory,
+      environment: { AGENT_BRIDGE_DR_SOURCE_DATABASE_URL: "postgresql://source:s3cret@localhost/agent_bridge" },
+      dependencies: {
+        createClient: () => source,
+        checkRowIsolationReady: async () => true,
+      },
+    })).rejects.toMatchObject({ code: "SOURCE_NOT_READY" });
+    expect(source.statements.some(({ sql }) => sql.includes("gateway_authority_immutable"))).toBe(true);
   });
 
   it("reports credential residue when backup cleanup fails", async () => {
@@ -675,6 +709,68 @@ describe("PostgreSQL native DR orchestration", () => {
         ]),
       },
     });
+  });
+
+  it("refuses a migration-017 target when gateway authority readiness fails", async () => {
+    const directory = pgDirectory();
+    const dumpPath = join(directory, "database.dump");
+    const rolesPath = join(directory, "roles.json");
+    const rolesText = canonicalPostgresRoleInventory(roleInventory);
+    writeFileSync(dumpPath, "custom dump", { mode: 0o600 });
+    writeFileSync(rolesPath, rolesText, { mode: 0o600 });
+    secureTestFile(dumpPath); secureTestFile(rolesPath);
+    const targetCounts: Record<string, string> = {
+      "agent_bridge.deliveries": "2",
+      "agent_bridge.delivery_events": "4",
+      "agent_bridge.agent_instances": "0",
+      "agent_bridge.rate_limit_buckets": "0",
+      "agent_bridge.request_authorities": "0",
+      "agent_bridge.archive_transaction_authorizations": "0",
+    };
+    const target = new FakePostgresDrClient((sql) => {
+      if (sql.includes("pg_try_advisory_lock")) return [{ acquired: true }];
+      if (sql.includes("to_regnamespace")) return [{ databaseName: "agent_bridge", serverVersionNum: "170005", schemaExists: false, databaseFresh: true }];
+      if (sql.includes("rolsuper AS")) return [{ isSuperuser: true }];
+      if (sql.includes("rolname=ANY") && sql.includes("ORDER BY rolname")) return [];
+      if (sql.includes("WITH changed AS")) return [{ count: "1" }];
+      if (sql.includes("schema_migrations ORDER BY")) return [gatewayMigration];
+      if (sql.includes("information_schema.tables")) return tableNames.map((tableName) => ({ tableName }));
+      if (sql.includes("count(*)::text")) {
+        const name = tableNames.find((tableName) => sql.includes(`\"${tableName}\"`))!;
+        return [{ count: targetCounts[`agent_bridge.${name}`] }];
+      }
+      if (sql.includes("security_schema_ready")) return [{
+        security: true, ownerControl: true, portableArchive: true,
+        securityDefinition: "security", rowIsolationDefinition: "row",
+        ownerControlDefinition: "owner", portableArchiveDefinition: "archive",
+      }];
+      if (sql.includes("gateway_authority_ready()")) return [{ ready: false }];
+      return [];
+    });
+    const admin = new FakePostgresDrClient(() => []);
+    const schema = {
+      ...schemaFor(rolesText),
+      schemaVersion: 17,
+      migrations: [gatewayMigration],
+    };
+    await expect(restorePostgresNativeDr({
+      dumpPath, rolesPath, schema, artifactAnchors: anchorsFor(dumpPath, rolesPath), acceptSourceSqlRisk: true,
+      environment: { AGENT_BRIDGE_DR_TARGET_DATABASE_URL: "postgresql://target:s3cret@localhost/agent_bridge" },
+      dependencies: {
+        createClient: (() => { const clients = [target, admin]; return () => clients.shift()!; })(),
+        resolveTool: (tool) => `/tools/${tool}`,
+        runTool: async (command, args) => {
+          if (args[0] === "--version") return { stdout: `${command.includes("dump") ? "pg_dump" : "pg_restore"} (PostgreSQL) 17.5\n`, stderr: "", exitCode: 0 };
+          return { stdout: args[0] === "--list" ? "1; 2615 1 SCHEMA - agent_bridge owner\n2; 0 0 ACL - SCHEMA agent_bridge owner\n" : "", stderr: "", exitCode: 0 };
+        },
+        checkRowIsolationReady: async () => true,
+      },
+    })).rejects.toMatchObject({
+      code: "RESTORE_NOT_READY",
+      details: { targetMutated: true, targetOffline: true, restoreCompleted: false },
+      message: expect.stringContaining("gateway-authority"),
+    });
+    expect(target.statements.some(({ sql }) => sql.includes("gateway_authority_immutable"))).toBe(true);
   });
 
   it("reports a completed restore when credential cleanup fails", async () => {

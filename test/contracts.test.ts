@@ -27,7 +27,7 @@ const root = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 describe("canonical v2 contract registry", () => {
   it("defines typed operations and reserved scope metadata", () => {
     expect(operations.map((operation) => operation.id)).toEqual([
-      "capabilities", "status", "client_status", "gateway_metrics", "publish_message", "history",
+      "capabilities", "status", "issue_endpoint_migration_challenge", "consume_endpoint_migration_challenge", "client_status", "gateway_metrics", "publish_message", "history",
       "record_receipt", "claim_delivery", "list_deliveries", "list_delivery_events",
       "cancel_delivery", "requeue_delivery", "extend_delivery", "acknowledge_delivery",
       "negative_acknowledge_delivery", "heartbeat", "presence", "sync",

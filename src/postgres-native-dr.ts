@@ -15,12 +15,23 @@ export const POSTGRES_NATIVE_DR_ROLE_SCHEMA = "agent-bridge.postgres-native-dr-r
 export const POSTGRES_NATIVE_DR_ROLE_VERSION = 1;
 export const POSTGRES_NATIVE_DR_SERVICE = "agent_bridge_dr";
 
-export const POSTGRES_NATIVE_DR_EXCLUDED_DATA_TABLES = [
+export const POSTGRES_NATIVE_DR_LEGACY_EXCLUDED_DATA_TABLES = [
   "agent_bridge.agent_instances",
   "agent_bridge.rate_limit_buckets",
   "agent_bridge.request_authorities",
   "agent_bridge.archive_transaction_authorizations",
 ] as const;
+
+export const POSTGRES_NATIVE_DR_EXCLUDED_DATA_TABLES = [
+  ...POSTGRES_NATIVE_DR_LEGACY_EXCLUDED_DATA_TABLES,
+  "agent_bridge.endpoint_migration_challenges",
+] as const;
+
+function excludedDataTablesForSchemaVersion(schemaVersion: number): readonly string[] {
+  return schemaVersion <= 17
+    ? POSTGRES_NATIVE_DR_LEGACY_EXCLUDED_DATA_TABLES
+    : POSTGRES_NATIVE_DR_EXCLUDED_DATA_TABLES;
+}
 
 const SSL_PARAMETERS = new Set([
   "channel_binding",
@@ -345,6 +356,15 @@ export function createPostgresDrLibpqFiles(connectionUrl: string, directory: str
 }
 
 export function buildPgDumpArgs(outputPath: string, snapshot: string, serviceName = POSTGRES_NATIVE_DR_SERVICE): string[] {
+  return buildPgDumpArgsForTables(outputPath, snapshot, serviceName, POSTGRES_NATIVE_DR_EXCLUDED_DATA_TABLES);
+}
+
+function buildPgDumpArgsForTables(
+  outputPath: string,
+  snapshot: string,
+  serviceName: string,
+  excludedDataTables: readonly string[],
+): string[] {
   assertSafeText(outputPath, "PostgreSQL dump path");
   assertSafeText(snapshot, "PostgreSQL snapshot");
   assertSafeText(serviceName, "PostgreSQL service name");
@@ -354,7 +374,7 @@ export function buildPgDumpArgs(outputPath: string, snapshot: string, serviceNam
     "--schema=agent_bridge",
     "--no-tablespaces",
     `--snapshot=${snapshot}`,
-    ...POSTGRES_NATIVE_DR_EXCLUDED_DATA_TABLES.map((table) => `--exclude-table-data=${table}`),
+    ...excludedDataTables.map((table) => `--exclude-table-data=${table}`),
     `--dbname=service=${serviceName}`,
   ];
 }
@@ -1216,6 +1236,7 @@ async function collectSnapshotMetadata(
     }
   }
   if (migrations.length === 0) throw new PostgresNativeDrError("SOURCE_SCHEMA_EMPTY", "source has no Agent Bridge migrations");
+  const schemaVersion = Math.max(...migrations.map((migration) => migration.version));
   const tableRows = await client.query<{ tableName: string }>(`
     SELECT table_name AS "tableName" FROM information_schema.tables
     WHERE table_schema='agent_bridge' AND table_type='BASE TABLE' ORDER BY table_name`);
@@ -1254,7 +1275,9 @@ async function collectSnapshotMetadata(
       agent_bridge.portable_archive_attestation_definition() AS "portableArchiveDefinition"`);
   const ready = readiness.rows[0];
   const rowReady = await checkRowReady(client);
+  const authorityReady = await gatewayAuthorityReady(client, schemaVersion);
   if (!ready?.security || !rowReady || !ready.ownerControl || !ready.portableArchive
+    || !authorityReady
     || typeof ready.securityDefinition !== "string"
     || typeof ready.rowIsolationDefinition !== "string"
     || typeof ready.ownerControlDefinition !== "string"
@@ -1274,6 +1297,109 @@ async function collectSnapshotMetadata(
       portableArchiveSha256: sha256(ready.portableArchiveDefinition),
     },
   };
+}
+
+async function gatewayAuthorityReady(
+  client: PostgresDrClient,
+  schemaVersion: number,
+): Promise<boolean> {
+  if (schemaVersion <= 16) return true;
+  const result = await client.query<{ ready: boolean }>(`
+    WITH names AS (
+      SELECT ('agent_bridge_runtime_' || substr(md5(current_database()),1,16))::name AS runtime_role,
+        (SELECT nspowner FROM pg_catalog.pg_namespace WHERE nspname='agent_bridge') AS schema_owner
+    ) SELECT
+      agent_bridge.gateway_authority_ready()
+      AND EXISTS (
+        SELECT 1
+        FROM pg_catalog.pg_class relation
+        JOIN pg_catalog.pg_namespace namespace ON namespace.oid=relation.relnamespace
+        WHERE namespace.nspname='agent_bridge' AND relation.relname='gateway_authority'
+          AND relation.relkind='r' AND relation.relowner=(SELECT schema_owner FROM names)
+          AND NOT relation.relrowsecurity AND NOT relation.relforcerowsecurity
+      )
+      AND EXISTS (
+        SELECT 1 FROM pg_catalog.pg_constraint table_constraint
+        WHERE table_constraint.conrelid='agent_bridge.gateway_authority'::regclass
+          AND table_constraint.conname='gateway_authority_singleton'
+          AND table_constraint.contype='p'
+          AND table_constraint.conkey::smallint[]=ARRAY[(SELECT attribute.attnum FROM pg_catalog.pg_attribute attribute
+            WHERE attribute.attrelid='agent_bridge.gateway_authority'::regclass
+              AND attribute.attname='singleton' AND attribute.attnum>0 AND NOT attribute.attisdropped)]
+      )
+      AND EXISTS (
+        SELECT 1 FROM pg_catalog.pg_constraint table_constraint
+        WHERE table_constraint.conrelid='agent_bridge.gateway_authority'::regclass
+          AND table_constraint.conname='gateway_authority_singleton_true'
+          AND table_constraint.contype='c'
+          AND regexp_replace(
+            pg_get_expr(table_constraint.conbin,table_constraint.conrelid),'[[:space:]()]','','g'
+          )='singleton'
+      )
+      AND EXISTS (
+        SELECT 1 FROM pg_catalog.pg_constraint table_constraint
+        WHERE table_constraint.conrelid='agent_bridge.gateway_authority'::regclass
+          AND table_constraint.conname='gateway_authority_id_unique'
+          AND table_constraint.contype='u'
+          AND table_constraint.conkey::smallint[]=ARRAY[(SELECT attribute.attnum FROM pg_catalog.pg_attribute attribute
+            WHERE attribute.attrelid='agent_bridge.gateway_authority'::regclass
+              AND attribute.attname='authority_id' AND attribute.attnum>0 AND NOT attribute.attisdropped)]
+      )
+      AND EXISTS (
+        SELECT 1
+        FROM pg_catalog.pg_trigger trigger
+        JOIN pg_catalog.pg_proc trigger_function ON trigger_function.oid=trigger.tgfoid
+        JOIN pg_catalog.pg_namespace trigger_namespace ON trigger_namespace.oid=trigger_function.pronamespace
+        WHERE trigger.tgrelid='agent_bridge.gateway_authority'::regclass
+          AND trigger.tgname='gateway_authority_immutable'
+          AND NOT trigger.tgisinternal AND trigger.tgenabled='O'
+          AND (trigger.tgtype::integer & 1)=0
+          AND (trigger.tgtype::integer & 2)=2
+          AND (trigger.tgtype::integer & 56)=56
+          AND trigger_function.proname='reject_gateway_authority_mutation'
+          AND trigger_namespace.nspname='agent_bridge'
+          AND trigger_function.proowner=(SELECT schema_owner FROM names)
+          AND NOT trigger_function.prosecdef
+          AND coalesce(trigger_function.proconfig @> ARRAY['search_path=""'],false)
+      )
+      AND EXISTS (
+        SELECT 1 FROM pg_catalog.pg_proc procedure
+        WHERE procedure.oid='agent_bridge.gateway_authority_ready()'::regprocedure
+          AND procedure.prosecdef AND procedure.provolatile='s'
+          AND procedure.proowner=(SELECT schema_owner FROM names)
+          AND coalesce(procedure.proconfig @> ARRAY['search_path=""'],false)
+      )
+      AND EXISTS (
+        SELECT 1 FROM pg_catalog.pg_proc procedure
+        WHERE procedure.oid='agent_bridge.open_request_authority_bound(uuid,text,uuid)'::regprocedure
+          AND procedure.prosecdef AND procedure.provolatile='v'
+          AND procedure.proowner=(SELECT schema_owner FROM names)
+          AND coalesce(procedure.proconfig @> ARRAY['search_path=""'],false)
+      )
+      AND NOT EXISTS (
+        SELECT 1
+        FROM unnest(ARRAY[
+          'SELECT','INSERT','UPDATE','DELETE','TRUNCATE','REFERENCES','TRIGGER'
+        ]) privilege(value)
+        WHERE has_table_privilege((SELECT runtime_role FROM names),
+          'agent_bridge.gateway_authority',privilege.value)
+          OR has_table_privilege('public','agent_bridge.gateway_authority',privilege.value)
+      )
+      AND NOT EXISTS (
+        SELECT 1
+        FROM unnest(ARRAY['SELECT','INSERT','UPDATE','REFERENCES']) privilege(value)
+        WHERE has_any_column_privilege((SELECT runtime_role FROM names),
+          'agent_bridge.gateway_authority',privilege.value)
+          OR has_any_column_privilege('public','agent_bridge.gateway_authority',privilege.value)
+      )
+      AND has_function_privilege((SELECT runtime_role FROM names),
+        'agent_bridge.gateway_authority_ready()','EXECUTE')
+      AND has_function_privilege((SELECT runtime_role FROM names),
+        'agent_bridge.open_request_authority_bound(uuid,text,uuid)','EXECUTE')
+      AND NOT has_function_privilege('public','agent_bridge.gateway_authority_ready()','EXECUTE')
+      AND NOT has_function_privilege('public',
+        'agent_bridge.open_request_authority_bound(uuid,text,uuid)','EXECUTE') AS ready`);
+  return result.rows[0]?.ready === true;
 }
 
 function createPrivateEmptyFile(path: string): void {
@@ -1314,10 +1440,16 @@ export async function backupPostgresNativeDr(options: BackupPostgresNativeDrOpti
     if (!snapshot) throw new PostgresNativeDrError("SNAPSHOT_EXPORT_FAILED", "PostgreSQL did not export a disaster recovery snapshot");
     const metadata = await collectSnapshotMetadata(source, deps.checkRowIsolationReady);
     const major = serverMajor(metadata.serverVersionNum);
+    const schemaVersion = Math.max(...metadata.migrations.map((migration) => migration.version));
+    const excludedDataTables = excludedDataTablesForSchemaVersion(schemaVersion);
     const beforeInventory = await collectPostgresRoleInventory(source, metadata.databaseName);
     const canonicalRoles = canonicalPostgresRoleInventory(beforeInventory);
     const tools = await checkedTools(major, libpq.environment, options.toolDirectory, deps);
-    const dump = await deps.runTool(tools.pgDump, buildPgDumpArgs(dumpPath, snapshot, libpq.serviceName), libpq.environment);
+    const dump = await deps.runTool(
+      tools.pgDump,
+      buildPgDumpArgsForTables(dumpPath, snapshot, libpq.serviceName, excludedDataTables),
+      libpq.environment,
+    );
     assertToolSucceeded(dump, "PG_DUMP_FAILED", "pg_dump");
     verifyPrivatePathAccess(dumpPath, "file");
     if (statSync(dumpPath).size === 0) throw new PostgresNativeDrError("PG_DUMP_EMPTY", "pg_dump produced an empty file");
@@ -1339,7 +1471,6 @@ export async function backupPostgresNativeDr(options: BackupPostgresNativeDrOpti
     transactionOpen = false;
     await source.query("SELECT pg_catalog.pg_advisory_unlock($1)", [NATIVE_DR_ADVISORY_LOCK_KEY]);
     lockHeld = false;
-    const schemaVersion = Math.max(...metadata.migrations.map((migration) => migration.version));
     const result: PostgresNativeDrBundleInput = {
       backupId: validateBackupId(options.backupId ?? deps.randomId()),
       createdAt: deps.now().toISOString(),
@@ -1351,7 +1482,7 @@ export async function backupPostgresNativeDr(options: BackupPostgresNativeDrOpti
         schemaVersion,
         migrations: metadata.migrations,
         tableCounts: metadata.tableCounts,
-        excludedDataTables: [...POSTGRES_NATIVE_DR_EXCLUDED_DATA_TABLES],
+        excludedDataTables: [...excludedDataTables],
         claimedDeliveryCount: metadata.claimedDeliveryCount,
         pgDumpVersion: tools.pgDumpVersion,
         roleInventorySha256: sha256(canonicalRoles),
@@ -1428,10 +1559,11 @@ function validatePostgresNativeDrSchema(value: PostgresNativeDrSchema): Postgres
       throw new PostgresNativeDrError("INVALID_MANIFEST", "PostgreSQL table count inventory is invalid");
     }
   }
-  for (const table of ["agent_bridge.deliveries", "agent_bridge.delivery_events", ...POSTGRES_NATIVE_DR_EXCLUDED_DATA_TABLES]) {
+  const excludedDataTables = excludedDataTablesForSchemaVersion(value.schemaVersion);
+  for (const table of ["agent_bridge.deliveries", "agent_bridge.delivery_events", ...excludedDataTables]) {
     if (!(table in value.tableCounts)) throw new PostgresNativeDrError("INVALID_MANIFEST", `PostgreSQL table count is missing for ${table}`);
   }
-  if (JSON.stringify(value.excludedDataTables) !== JSON.stringify(POSTGRES_NATIVE_DR_EXCLUDED_DATA_TABLES)) {
+  if (JSON.stringify(value.excludedDataTables) !== JSON.stringify(excludedDataTables)) {
     throw new PostgresNativeDrError("INVALID_MANIFEST", "PostgreSQL excluded table inventory is invalid");
   }
   if (!/^(?:0|[1-9][0-9]*)$/u.test(value.claimedDeliveryCount)) throw new PostgresNativeDrError("INVALID_MANIFEST", "PostgreSQL claimed delivery count is invalid");
@@ -1552,7 +1684,7 @@ async function targetTableCounts(client: PostgresDrClient): Promise<Record<strin
 
 function expectedRestoredTableCounts(schema: PostgresNativeDrSchema): Record<string, string> {
   const expected = { ...schema.tableCounts };
-  for (const table of POSTGRES_NATIVE_DR_EXCLUDED_DATA_TABLES) expected[table] = "0";
+  for (const table of excludedDataTablesForSchemaVersion(schema.schemaVersion)) expected[table] = "0";
   const deliveryEvents = expected["agent_bridge.delivery_events"];
   if (deliveryEvents === undefined) throw new PostgresNativeDrError("INVALID_MANIFEST", "PostgreSQL delivery event count is missing");
   expected["agent_bridge.delivery_events"] = (BigInt(deliveryEvents) + BigInt(schema.claimedDeliveryCount)).toString();
@@ -1747,11 +1879,13 @@ async function restorePostgresNativeDrInternal(options: RestorePostgresNativeDrO
         agent_bridge.portable_archive_attestation_definition() AS "portableArchiveDefinition"`);
     const ready = readiness.rows[0];
     const restoredRowReady = await deps.checkRowIsolationReady(target);
+    const restoredGatewayAuthorityReady = await gatewayAuthorityReady(target, schema.schemaVersion);
     const failedReadiness = [
       !ready?.security ? "security" : undefined,
       !restoredRowReady ? "row-isolation" : undefined,
       !ready?.ownerControl ? "owner-control" : undefined,
       !ready?.portableArchive ? "portable-archive" : undefined,
+      !restoredGatewayAuthorityReady ? "gateway-authority" : undefined,
     ].filter(Boolean);
     if (failedReadiness.length > 0) {
       throw new PostgresNativeDrError("RESTORE_NOT_READY", `restored PostgreSQL schema failed readiness attestation: ${failedReadiness.join(", ")}`);

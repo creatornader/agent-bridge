@@ -80,10 +80,15 @@ plan and protected catalog state. Once a migration changes the database, startin
 older image is not a safe rollback. Apply a forward fix or restore the backup into a
 fresh target and switch authority only after verification.
 
-Drain old gateway instances before migration 017. An old image reports `/readyz` as
+Drain old gateway instances before migrations 017 and 018. An old image reports `/readyz` as
 not ready after the new migration is visible, but a process that was already running
 can still serve ordinary requests until traffic is removed or it exits. Start the new
 gateway only after the migration and runtime bootstrap finish.
+
+Migration 018 accepts raw endpoint-migration challenges only as SQL function input. It
+stores a domain-separated SHA-256 commitment, never the raw challenge, and excludes
+live challenge rows from native DR data dumps. The challenge proves an active direct
+credential replacement on one authority. It does not authorize endpoint cutover.
 
 ### Legacy Supabase mode
 

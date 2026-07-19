@@ -11,6 +11,10 @@ export interface RequestAuthorityContext {
   security: PostgresGatewaySecurity;
   /** Establishes the savepoint separating durable security accounting from domain work. */
   beginDomainWork(): Promise<void>;
+  endpointMigrationChallenges?: {
+    issue(input: { challenge: string; expectedGatewayAuthorityId: string; verifierCredentialId: string }): Promise<{ gatewayAuthorityId: string; issuerCredentialId: string; verifierCredentialId: string; expiresAt: string }>;
+    consume(input: { challenge: string; expectedGatewayAuthorityId: string; issuerCredentialId: string }): Promise<{ gatewayAuthorityId: string; issuerCredentialId: string; verifierCredentialId: string; expiresAt: string | null; consumed: boolean }>;
+  };
 }
 
 export interface RequestAuthority {
@@ -24,6 +28,30 @@ type AuthorityRow = {
   principal: string;
   scopes: AuthorizationScope[];
 };
+
+function timestamp(value: unknown): string {
+  if (value instanceof Date) return value.toISOString();
+  return String(value);
+}
+
+function endpointMigrationFailure(error: unknown): never {
+  const sqlstate = typeof error === "object" && error !== null && "code" in error
+    ? String((error as { code?: unknown }).code ?? "")
+    : "";
+  if (sqlstate === "28000") {
+    throw Object.assign(new Error("endpoint migration binding was rejected"), {
+      status: 409,
+      code: "endpoint_migration_binding_rejected",
+    });
+  }
+  if (sqlstate === "23505") {
+    throw Object.assign(new Error("endpoint migration challenge conflicts with existing state"), {
+      status: 409,
+      code: "endpoint_migration_challenge_conflict",
+    });
+  }
+  throw error;
+}
 
 export class MutationOutcomeUnknownError extends Error {
   readonly status = 503;
@@ -70,6 +98,60 @@ export class PostgresRequestAuthority implements RequestAuthority {
           await client.query("SAVEPOINT agent_bridge_domain_work");
           if (signal.aborted) throw signal.reason;
           domainSavepoint = true;
+        },
+        endpointMigrationChallenges: {
+          issue: async (input) => {
+            let result;
+            try {
+              result = await client.query<{
+                gateway_authority_id: string;
+                issuer_credential_id: string;
+                verifier_credential_id: string;
+                expires_at: string | Date;
+              }>(
+                `SELECT gateway_authority_id,issuer_credential_id,verifier_credential_id,expires_at
+                 FROM agent_bridge.issue_endpoint_migration_challenge($1::uuid,$2::uuid,$3::text)`,
+                [input.expectedGatewayAuthorityId, input.verifierCredentialId, input.challenge],
+              );
+            } catch (error) {
+              endpointMigrationFailure(error);
+            }
+            const row = result.rows[0];
+            if (!row) throw new Error("endpoint migration challenge could not be issued");
+            return {
+              gatewayAuthorityId: row.gateway_authority_id,
+              issuerCredentialId: row.issuer_credential_id,
+              verifierCredentialId: row.verifier_credential_id,
+              expiresAt: timestamp(row.expires_at),
+            };
+          },
+          consume: async (input) => {
+            let result;
+            try {
+              result = await client.query<{
+                gateway_authority_id: string;
+                issuer_credential_id: string;
+                verifier_credential_id: string;
+                expires_at: string | Date | null;
+                consumed: boolean;
+              }>(
+                `SELECT gateway_authority_id,issuer_credential_id,verifier_credential_id,expires_at,consumed
+                 FROM agent_bridge.consume_endpoint_migration_challenge($1::uuid,$2::uuid,$3::text)`,
+                [input.expectedGatewayAuthorityId, input.issuerCredentialId, input.challenge],
+              );
+            } catch (error) {
+              endpointMigrationFailure(error);
+            }
+            const row = result.rows[0];
+            if (!row) throw new Error("endpoint migration challenge could not be consumed");
+            return {
+              gatewayAuthorityId: row.gateway_authority_id,
+              issuerCredentialId: row.issuer_credential_id,
+              verifierCredentialId: row.verifier_credential_id,
+              expiresAt: row.expires_at === null ? null : timestamp(row.expires_at),
+              consumed: row.consumed,
+            };
+          },
         },
       };
       try {

@@ -147,10 +147,10 @@ PostgreSQL backup takes a repeatable-read exported snapshot while holding the na
 advisory fence. `pg_dump` captures only the `agent_bridge` schema. A separate canonical
 role inventory records the bounded role shells, membership options, and global or
 schema-scoped default ACLs that a schema-only dump omits. The dump excludes data for
-agent instances, rate-limit buckets, request authorities, and archive transaction
-authorizations. The manifest binds migration inventory, table counts, claimed-delivery
-count, tool major, role inventory, and the security, row-isolation, owner-control, and
-portable-archive readiness definitions.
+agent instances, rate-limit buckets, request authorities, endpoint-migration challenge
+rows, and archive transaction authorizations. The manifest binds migration
+inventory, table counts, claimed-delivery count, tool major, role inventory, and the
+security, row-isolation, owner-control, and portable-archive readiness definitions.
 
 The immutable gateway authority UUID is ordinary PostgreSQL data, so native backup and
 restore preserve it. The UUID proves that a restored target represents the same logical
@@ -499,6 +499,16 @@ request transaction. Runtime readiness checks the singleton row, mutation trigge
 function catalog, and direct table and column privileges. The UUID is returned only by
 authenticated gateway status. It is not a capability field, log field, or readiness
 field.
+
+Migration 018 adds issue and consume operations for a gateway-only HTTP 2.1
+endpoint-migration challenge. The issuer provides a lowercase 64-character hexadecimal
+challenge, expected authority UUID, and direct active successor credential. The
+successor consumes the same commitment with its active transaction-bound authority.
+PostgreSQL hashes the challenge with a domain separator before persistence and retains
+no raw challenge in records, events, or replies. Challenges expire within 60 seconds,
+can be consumed once, and do not establish database authority or permit endpoint
+cutover. The migration extends the credential-security catalog and records endpoint
+and owner-control v5 attestations before readiness succeeds.
 
 The domain savepoint separates expected rejected domain work from security effects: expected scope and rate accounting can commit while failed domain mutations are rolled back. An abort before commit rolls the whole request back. Once commit dispatch begins, the gateway never retries and reports `mutation_outcome_unknown` if the outcome is ambiguous. A failed rollback discards the pooled connection.
 
