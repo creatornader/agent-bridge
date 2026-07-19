@@ -90,6 +90,8 @@ export interface SyncingBridgeStoreOptions {
   autoSync?: boolean;
   idleDelayMs?: number;
   edgeDrainLease?: EdgeDrainLease;
+  /** A maintenance caller may retain the edge while closing the sync wrapper. */
+  closeEdge?: boolean;
 }
 
 type FlushResult =
@@ -135,7 +137,8 @@ export class SyncingBridgeStore implements BridgeStore {
   private readonly leaseMs: number;
   private readonly autoSync: boolean;
   private readonly idleDelayMs: number;
-  private readonly edgeDrainLease?: EdgeDrainLease;
+  private edgeDrainLease?: EdgeDrainLease;
+  private readonly closeEdge: boolean;
   private remoteReady: Promise<void> | undefined;
   private stopped = false;
   private wakeTimer: ReturnType<typeof setTimeout> | undefined;
@@ -161,6 +164,7 @@ export class SyncingBridgeStore implements BridgeStore {
     this.autoSync = options.autoSync ?? true;
     this.idleDelayMs = Math.max(this.baseDelayMs + 1, options.idleDelayMs ?? 30_000);
     this.edgeDrainLease = options.edgeDrainLease;
+    this.closeEdge = options.closeEdge ?? true;
     this.loopState = this.autoSync ? "idle" : "disabled";
   }
 
@@ -168,6 +172,11 @@ export class SyncingBridgeStore implements BridgeStore {
     // Remote readiness is intentionally deferred so clients can start offline.
     await this.edge.initialize();
     if (this.autoSync) this.startTransportLoop();
+  }
+
+  /** Replace a renewed maintenance lease without creating another edge wrapper. */
+  setDrainLease(lease: EdgeDrainLease | undefined): void {
+    this.edgeDrainLease = lease;
   }
 
   private startTransportLoop(): void {
@@ -678,7 +687,9 @@ export class SyncingBridgeStore implements BridgeStore {
       .filter((result): result is PromiseRejectedResult => result.status === "rejected")
       .map((result) => result.reason);
     if (this.backgroundError) failures.push(this.backgroundError);
-    try { await this.edge.close(); } catch (error) { failures.push(error); }
+    if (this.closeEdge) {
+      try { await this.edge.close(); } catch (error) { failures.push(error); }
+    }
     if (failures.length === 1) throw failures[0];
     if (failures.length > 1) throw Object.assign(new Error("failed to close synchronized bridge store"), { errors: failures });
   }

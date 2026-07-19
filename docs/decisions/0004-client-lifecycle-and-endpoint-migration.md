@@ -135,6 +135,13 @@ cutoff. It contains no raw gateway URL or token. A version 2 journal keeps its r
 request shape and remains inspectable. A non-terminal version 2 journal cannot resume
 because it lacks an identity-bound request.
 
+Endpoint cutover uses v6. Its journal retains the normalized source gateway URL without
+a token so post-journal recovery can reconstruct the source edge route from the target
+successor backend. Initial preflight uses the predecessor and direct successor. Every
+later proof and source-edge replay uses the successor credential at both URLs. There is
+no endpoint reverse operation. Returning to a prior endpoint requires a fresh owner
+rotation and a new forward cutover.
+
 Creation pins the operation root before it publishes state. Cleanup pins that root,
 the operation directory, and the snapshots directory before it records intent or
 unlinks anything. Cleanup records durable intent per artifact, verifies and unlinks the pinned file, and
@@ -191,6 +198,7 @@ erasure is outside the contract.
 Managed repair, update, and uninstall have a narrow authority boundary and can fail
 closed on drift, metadata corruption, ambiguous crash state, and unsafe backend policy
 changes. Existing exact registrations still require intentional, reviewable adoption.
-Migration staging preserves active state while it prepares later work. Endpoint cutover
-remains deferred until it can preserve gateway edge outbox state and dynamically attest
-the same logical database authority.
+Migration staging preserves active state while it prepares later work. Endpoint
+cutover uses a separate v6 journal to drain the gateway edge outbox, attest shared live
+route state, change the host registration, and retain enough credential-free authority
+for crash recovery and post-grace source retirement.

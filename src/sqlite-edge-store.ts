@@ -1,6 +1,7 @@
 import { createHash, randomUUID } from "node:crypto";
 import { existsSync, lstatSync } from "node:fs";
 import { createRequire } from "node:module";
+import { pathToFileURL } from "node:url";
 import type { DatabaseSync as Database, SQLInputValue } from "node:sqlite";
 import {
   cursorScope,
@@ -19,6 +20,13 @@ const require = createRequire(import.meta.url);
 function openDatabase(path: string): Database {
   const { DatabaseSync } = require("node:sqlite") as typeof import("node:sqlite");
   return new DatabaseSync(path);
+}
+function openReadOnlyDatabase(path: string): Database {
+  const { DatabaseSync } = require("node:sqlite") as typeof import("node:sqlite");
+  // immutable=1 prevents SQLite from creating a WAL shared-memory sidecar while
+  // evaluating a dry-run. A present WAL is rejected below because immutable reads
+  // cannot safely incorporate its uncheckpointed state.
+  return new DatabaseSync(`${pathToFileURL(path).toString()}?immutable=1`, { readOnly: true });
 }
 const MAX_SEQUENCE = 9_223_372_036_854_775_807n;
 
@@ -115,6 +123,66 @@ export type PendingMessage = Omit<BridgeMessage, "sequence" | "createdAt">;
 export interface EdgeScope {
   endpoint: string;
   principal: BridgePrincipal;
+}
+
+/** A side-effect-free inspection used by migration dry-runs and preflight gates. */
+export interface EdgeReadOnlyInspection {
+  exists: boolean;
+  gate: EdgeMigrationGate;
+  pending: number;
+  due: number;
+  scheduled: number;
+  leased: number;
+  blocked: number;
+  cached: number;
+}
+
+/**
+ * Inspect an edge without creating a database, a schema object, or a WAL sidecar.
+ * An absent path has the same empty active state that initialization would create.
+ */
+export function inspectEdgeScopeReadOnly(path: string, scope: EdgeScope, now = new Date()): EdgeReadOnlyInspection {
+  if (!existsSync(path)) {
+    return { exists: false, gate: { scopeKey: edgeScopeKey(scope), state: "active", operationId: undefined, leaseExpiresAt: undefined, updatedAt: new Date(0).toISOString() }, pending: 0, due: 0, scheduled: 0, leased: 0, blocked: 0, cached: 0 };
+  }
+  verifyPrivatePathAccess(path, "file");
+  const details = lstatSync(path);
+  if (!details.isFile() || details.isSymbolicLink()) throw new EdgeConflictError("edge database is not a private regular file");
+  if (existsSync(`${path}-wal`) || existsSync(`${path}-shm`)) {
+    throw new EdgeConflictError("read-only migration inspection refuses an edge with live WAL state");
+  }
+  const db = openReadOnlyDatabase(path);
+  try {
+    const tables = db.prepare("SELECT name FROM sqlite_master WHERE type='table' AND name IN ('edge_scopes','edge_migration_gates','edge_outbox','edge_inbox') ORDER BY name")
+      .all() as Row[];
+    if (tables.length === 0) {
+      const userTables = db.prepare("SELECT count(*) AS count FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%'").get() as Row;
+      if (Number(userTables.count) !== 0) throw new EdgeConflictError("edge database is not an Agent Bridge edge store");
+      return { exists: true, gate: { scopeKey: edgeScopeKey(scope), state: "active", operationId: undefined, leaseExpiresAt: undefined, updatedAt: new Date(0).toISOString() }, pending: 0, due: 0, scheduled: 0, leased: 0, blocked: 0, cached: 0 };
+    }
+    if (tables.length !== 4) throw new EdgeConflictError("edge database schema is incomplete");
+    const key = edgeScopeKey(scope);
+    const scopeRow = db.prepare("SELECT 1 AS present FROM edge_scopes WHERE scope_key=?").get(key) as Row | undefined;
+    if (!scopeRow) {
+      return { exists: true, gate: { scopeKey: key, state: "active", operationId: undefined, leaseExpiresAt: undefined, updatedAt: new Date(0).toISOString() }, pending: 0, due: 0, scheduled: 0, leased: 0, blocked: 0, cached: 0 };
+    }
+    const gateRow = db.prepare("SELECT state,operation_id,lease_expires_at,updated_at FROM edge_migration_gates WHERE scope_key=?").get(key) as Row | undefined;
+    if (!gateRow || !["active", "draining", "retired"].includes(String(gateRow.state))) throw new EdgeConflictError("edge migration gate is missing or invalid");
+    const nowText = now.toISOString();
+    const counts = db.prepare(`SELECT
+      sum(CASE WHEN state='pending' THEN 1 ELSE 0 END) AS pending,
+      sum(CASE WHEN state='pending' AND available_at<=? AND (lease_expires_at IS NULL OR lease_expires_at<=?) THEN 1 ELSE 0 END) AS due,
+      sum(CASE WHEN state='pending' AND available_at>? AND (lease_expires_at IS NULL OR lease_expires_at<=?) THEN 1 ELSE 0 END) AS scheduled,
+      sum(CASE WHEN state='pending' AND lease_expires_at>? THEN 1 ELSE 0 END) AS leased,
+      sum(CASE WHEN state='blocked' THEN 1 ELSE 0 END) AS blocked
+      FROM edge_outbox WHERE scope_key=?`).get(nowText, nowText, nowText, nowText, nowText, key) as Row;
+    const cached = db.prepare("SELECT count(*) AS count FROM edge_inbox WHERE scope_key=?").get(key) as Row;
+    return {
+      exists: true,
+      gate: { scopeKey: key, state: gateRow.state as EdgeMigrationGateState, operationId: gateRow.operation_id ? String(gateRow.operation_id) : undefined, leaseExpiresAt: gateRow.lease_expires_at ? String(gateRow.lease_expires_at) : undefined, updatedAt: gateRow.updated_at ? String(gateRow.updated_at) : new Date(0).toISOString() },
+      pending: Number(counts.pending ?? 0), due: Number(counts.due ?? 0), scheduled: Number(counts.scheduled ?? 0), leased: Number(counts.leased ?? 0), blocked: Number(counts.blocked ?? 0), cached: Number(cached.count ?? 0),
+    };
+  } finally { db.close(); }
 }
 
 export interface EdgeOutboxRecord {
@@ -463,12 +531,9 @@ export class SQLiteEdgeStore {
     }
   }
 
-  /**
-   * Claim the exclusive drain right for one persisted migration operation. The durable
-   * draining state survives a crashed worker. A replacement worker must use the same
-   * operation ID and wait for the prior worker lease to expire.
-   */
-  async acquireDrainLease(operationId: string, now = new Date(), leaseMs = 30_000): Promise<EdgeDrainLease> {
+  private async claimDrainLease(
+    operationId: string, now: Date, leaseMs: number, mode: "begin" | "resume",
+  ): Promise<EdgeDrainLease> {
     await this.ready();
     const normalizedOperationId = safeOperationId(operationId);
     const duration = Math.max(1, Math.trunc(leaseMs));
@@ -476,9 +541,10 @@ export class SQLiteEdgeStore {
     try {
       const gate = this.gateInTransaction();
       if (gate.state === "retired") throw new EdgeMigrationRetiredError(gate);
-      if (gate.state === "draining") {
-        if (gate.operationId !== normalizedOperationId) throw new EdgeMigrationDrainingError(gate);
-        if (gate.leaseExpiresAt && Date.parse(gate.leaseExpiresAt) > now.getTime()) {
+      if (mode === "begin" && gate.state !== "active") throw new EdgeMigrationDrainingError(gate);
+      if (mode === "resume") {
+        if (gate.state !== "draining" || gate.operationId !== normalizedOperationId
+          || !gate.leaseExpiresAt || Date.parse(gate.leaseExpiresAt) > now.getTime()) {
           throw new EdgeMigrationDrainingError(gate);
         }
       }
@@ -492,6 +558,51 @@ export class SQLiteEdgeStore {
       if (updated.changes !== 1) throw new EdgeConflictError("edge migration gate could not be acquired");
       this.db.exec("COMMIT");
       return { scopeKey: this.key, operationId: normalizedOperationId, leaseToken, leaseExpiresAt };
+    } catch (error) {
+      this.db.exec("ROLLBACK");
+      throw error;
+    }
+  }
+
+  /** Start a new durable drain only from an active edge scope. */
+  async beginDrain(operationId: string, now = new Date(), leaseMs = 30_000): Promise<EdgeDrainLease> {
+    return this.claimDrainLease(operationId, now, leaseMs, "begin");
+  }
+
+  /** Resume the same persisted drain only after the prior worker lease expires. */
+  async resumeDrain(operationId: string, now = new Date(), leaseMs = 30_000): Promise<EdgeDrainLease> {
+    return this.claimDrainLease(operationId, now, leaseMs, "resume");
+  }
+
+  /** Backward-compatible dispatcher for callers that have already inspected the gate. */
+  async acquireDrainLease(operationId: string, now = new Date(), leaseMs = 30_000): Promise<EdgeDrainLease> {
+    const gate = await this.migrationGate();
+    if (gate.state === "active") return this.beginDrain(operationId, now, leaseMs);
+    return this.resumeDrain(operationId, now, leaseMs);
+  }
+
+  /** Verify the held lease and require an exact zero-work outbox before a cutover continues. */
+  async assertDrainComplete(lease: EdgeDrainLease, now = new Date()): Promise<void> {
+    await this.ready();
+    if (lease.scopeKey !== this.key) throw new EdgeMigrationLeaseError();
+    this.db.exec("BEGIN IMMEDIATE");
+    try {
+      this.assertDrainLeaseInTransaction(lease, now);
+      const counts = this.db.prepare(`SELECT
+        sum(CASE WHEN state='pending' THEN 1 ELSE 0 END) AS pending,
+        sum(CASE WHEN state='pending' AND available_at<=? AND (lease_expires_at IS NULL OR lease_expires_at<=?) THEN 1 ELSE 0 END) AS due,
+        sum(CASE WHEN state='pending' AND available_at>? AND (lease_expires_at IS NULL OR lease_expires_at<=?) THEN 1 ELSE 0 END) AS scheduled,
+        sum(CASE WHEN state='pending' AND lease_expires_at>? THEN 1 ELSE 0 END) AS leased,
+        sum(CASE WHEN state='blocked' THEN 1 ELSE 0 END) AS blocked
+        FROM edge_outbox WHERE scope_key=?`).get(
+        now.toISOString(), now.toISOString(), now.toISOString(), now.toISOString(), now.toISOString(), this.key,
+      ) as Row;
+      if (Number(counts.pending ?? 0) !== 0 || Number(counts.due ?? 0) !== 0
+        || Number(counts.scheduled ?? 0) !== 0 || Number(counts.leased ?? 0) !== 0
+        || Number(counts.blocked ?? 0) !== 0) {
+        throw new EdgeConflictError("edge scope cannot complete a drain with retained outbox work");
+      }
+      this.db.exec("COMMIT");
     } catch (error) {
       this.db.exec("ROLLBACK");
       throw error;

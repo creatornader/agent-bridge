@@ -77,6 +77,12 @@
               "legacy-supabase"
             ]
           },
+          "grantedScopes": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
           "operations": {
             "type": "array",
             "items": {

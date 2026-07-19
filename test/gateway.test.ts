@@ -317,7 +317,10 @@ describe("authenticated v2 gateway", () => {
     expect(capabilities.status).toBe(200);
     expect(capabilities.headers.get("x-agent-bridge-protocol-version")).toBe("2.1");
     expect(capabilities.headers.get("x-agent-bridge-supported-protocol-versions")).toBe("2.0,2.1");
-    expect(await capabilities.json()).toMatchObject({ protocolVersion: "2.1", supportedProtocolVersions: ["2.0", "2.1"], scopeEnforcement: true, authorizationModel: "scoped-credential" });
+    expect(await capabilities.json()).toMatchObject({
+      protocolVersion: "2.1", supportedProtocolVersions: ["2.0", "2.1"],
+      scopeEnforcement: true, authorizationModel: "scoped-credential", grantedScopes: AUTHORIZATION_SCOPES,
+    });
 
     const legacy = await fetch(`${base}/v2/capabilities`, { headers: { authorization: "Bearer good" } });
     expect(legacy.status).toBe(404);

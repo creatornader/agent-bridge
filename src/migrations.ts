@@ -230,6 +230,7 @@ export const REQUIRED_MIGRATIONS = [
   { version: 16, name: "native_dr_fence" },
   { version: 17, name: "gateway_authority_binding" },
   { version: 18, name: "endpoint_migration_challenges" },
+  { version: 19, name: "endpoint_migration_same_successor" },
 ] as const;
 
 function withNativeDrSharedLock(source: string): string {

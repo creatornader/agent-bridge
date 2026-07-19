@@ -35,7 +35,9 @@ published and the supported clients pass a fresh end-to-end check.
 - Portable workspace archives across canonical SQLite and PostgreSQL stores.
 - Native SQLite and PostgreSQL backup, verification, and restore.
 
-### Implemented after 0.3.1, awaiting release
+### 0.4.0 package contents
+
+The published npm version is the authority for whether this package line has shipped.
 
 - Read-only lifecycle inspection and explicit, plan-first adoption for the Codex,
   Claude Code, and Claude Desktop adapters, backed by owner-only credential-free
@@ -55,21 +57,27 @@ published and the supported clients pass a fresh end-to-end check.
   New updates use v4 journals and retain a bounded credential-free inverse contract.
   `clients rollback <update-operation-id> --identity <name>` is plan-first and, with
   `--apply`, creates a separate reverse journal after it proves the recorded forward
-  state. Generic `clients resume` derives authority only from recorded v3 or supported
-  v4 requests. Repair remains monotonic, uninstall recovery is re-enrollment, and
-  endpoint cutover remains out of scope.
+  state. Generic `clients resume` derives authority from recorded v3, supported v4,
+  v5 migration-stage, and v6 endpoint-migration requests. Repair remains monotonic
+  and uninstall recovery is re-enrollment.
 
-- Inert gateway-client migration staging for managed clients. It probes active and
-  successor bearer credentials, records enrollment credential IDs and the source edge
-  scope, creates a private staged backend, and closes normal outbox publication when a
-  future drain lease begins. It does not modify the active registration or backend,
-  and it does not authorize cutover or prove database authority.
+- Gateway-client migration staging, cutover, and finalization for managed
+  clients. A v5 stage creates a private successor backend without changing the active
+  host registration. A v6 cutover verifies one live gateway authority and a route
+  challenge, drains the source SQLite edge under a lease, changes the host registration
+  and metadata, and preserves credential-free contracts for restart classification.
+  After journal creation, cutover proves both routes with the successor credential and
+  drains the source edge through the target gateway. Finalize retires the retained
+  source after the predecessor grace cutoff. Return to an earlier endpoint requires a
+  new owner rotation and a new forward cutover. Each phase requires a fresh
+  `--exclusive-edge` assertion because unmanaged publishers cannot be enumerated.
 
 - Gateway-only HTTP 2.1 endpoint-migration challenge operations. An active issuer and
   direct active successor use a 64-character challenge bound to the immutable gateway
   authority UUID. PostgreSQL stores only a domain-separated commitment for at most 60
-  seconds. The challenge does not authorize endpoint cutover or prove two URLs reach
-  the same database authority.
+  seconds. A consumed cross-route challenge proves that both live routes share its
+  short-lived database state. It does not authorize endpoint cutover or prove a
+  historical database move.
 
 - A pinned, non-root gateway image and a Compose development stack with ordered
   migration, restricted runtime-role bootstrap, health checks, private secret files,
@@ -97,9 +105,6 @@ published and the supported clients pass a fresh end-to-end check.
 
 ### Installation and operations
 
-- Add an owner-mediated endpoint cutover that drains the recorded SQLite outbox. It
-  must prove that alternate URLs reach one database authority. Independent database
-  moves need a separate fence.
 - Publish a maintained client compatibility matrix.
 
 ### Storage lifecycle and observability

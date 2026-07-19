@@ -20,6 +20,9 @@ import {
 } from "./client-maintenance.js";
 import { CLIENT_OPERATION_VERSION, inspectClientOperation, listClientOperations, readClientOperation } from "./client-operation.js";
 import { resumeClientMigrationStage, stageClientMigrationTarget } from "./client-migration-stage.js";
+import {
+  cutoverClientMigration, finalizeClientMigration, resumeClientMigrationCutover,
+} from "./client-migration-cutover.js";
 import { capabilityDocument, operationForCli, parseCliResponse, validateRequest } from "./contracts/registry.js";
 import { runOwnerCommand, type OwnerOptions } from "./owner-control.js";
 import { ArchiveCommandError, runArchiveCommand } from "./archive-cli.js";
@@ -47,9 +50,9 @@ const SUPPORTED_OPTIONS = new Set([
   "display-name", "enrollment-file",
   "credential-id", "gateway-url", "grace-until", "invalidate-immediately", "label",
   "reason", "request-id", "resume", "runtime-type", "recover-lock",
-  "scope-set", "workspace-name",
+  "scope-set", "workspace-name", "exclusive-edge",
 ]);
-const BOOLEAN_OPTIONS = new Set(["apply", "dead", "force", "invalidate-immediately", "json", "latest", "recover-lock"]);
+const BOOLEAN_OPTIONS = new Set(["apply", "dead", "force", "invalidate-immediately", "json", "latest", "recover-lock", "exclusive-edge"]);
 function parse(argv: string[]): { command: string; options: Options; positionals: string[] } {
   const command = argv[0] ?? "help"; const options: Options = {}; const positionals: string[] = [];
   for (let i = 1; i < argv.length; i++) {
@@ -160,7 +163,9 @@ function packageVersion(): string {
   if (typeof manifest.version !== "string" || !manifest.version) throw new Error("package version is unavailable");
   return manifest.version;
 }
-function help(): void { process.stdout.write(`agent-bridge: provider-neutral agent messaging\n\nCommands:\n  init, doctor, status, capabilities, pending, migrate, reconcile-legacy-projects, sync, demo, join, presence\n  send (post), inbox (get), sent, history, acknowledge, claim, extend, ack, nack, watch\n  deliveries, dead-letters, delivery-events, cancel, requeue\n  owner <provision|inventory|rotate|revoke>\n  archive <export|verify|import>\n  dr <backup|verify|restore>\n  clients install <codex|claude-code|claude-desktop> --identity <name>\n  clients inspect <codex|claude-code|claude-desktop> --identity <name> --instance <key> --backend-config <path>\n  clients adopt <codex|claude-code|claude-desktop> --identity <name> --instance <key> --backend-config <path> [--apply]\n  clients repair <codex|claude-code|claude-desktop> --identity <name> --instance <key> [--apply] [--resume <uuid>] [--recover-lock]\n  clients update <codex|claude-code|claude-desktop> --identity <name> --instance <key> [--command <command>] [--apply] [--resume <uuid>] [--recover-lock]\n  clients uninstall <codex|claude-code|claude-desktop> --identity <name> --instance <key> [--apply] [--resume <uuid>] [--recover-lock]\n  clients rollback <source-operation-id> --identity <name> [--apply] [--recover-lock]\n  clients migrate stage <codex|claude-code|claude-desktop> --identity <name> --instance <key> --enrollment-file <path> [--apply] [--recover-lock]\n  clients resume <operation-id> [--recover-lock]\n  clients operations [<operation-id>]\n\nOptions:\n  -V, --version  Print the installed package version\n  -h, --help     Show this help\n`); }
+function help(): void {
+  process.stdout.write(`agent-bridge: provider-neutral agent messaging\n\nCommands:\n  init, doctor, status, capabilities, pending, migrate, reconcile-legacy-projects, sync, demo, join, presence\n  send (post), inbox (get), sent, history, acknowledge, claim, extend, ack, nack, watch\n  deliveries, dead-letters, delivery-events, cancel, requeue\n  owner <provision|inventory|rotate|revoke>\n  archive <export|verify|import>\n  dr <backup|verify|restore>\n  clients install <codex|claude-code|claude-desktop> --identity <name>\n  clients inspect <codex|claude-code|claude-desktop> --identity <name> --instance <key> --backend-config <path>\n  clients adopt <codex|claude-code|claude-desktop> --identity <name> --instance <key> --backend-config <path> [--apply]\n  clients repair <codex|claude-code|claude-desktop> --identity <name> --instance <key> [--apply] [--resume <uuid>] [--recover-lock]\n  clients update <codex|claude-code|claude-desktop> --identity <name> --instance <key> [--command <command>] [--apply] [--resume <uuid>] [--recover-lock]\n  clients uninstall <codex|claude-code|claude-desktop> --identity <name> --instance <key> [--apply] [--resume <uuid>] [--recover-lock]\n  clients rollback <source-operation-id> --identity <name> [--apply] [--recover-lock]\n  clients migrate stage <codex|claude-code|claude-desktop> --identity <name> --instance <key> --enrollment-file <path> [--apply] [--recover-lock]\n  clients migrate cutover <stage-operation-id> --exclusive-edge [--apply] [--recover-lock]\n  clients migrate finalize <cutover-operation-id> --exclusive-edge [--apply] [--recover-lock]\n  clients resume <operation-id> [--recover-lock]\n  clients operations [<operation-id>]\n\nOptions:\n  -V, --version  Print the installed package version\n  -h, --help     Show this help\n`);
+}
 function rejectUnknownOptions(options: Options): void {
   const unknown = Object.keys(options).filter((key) => !SUPPORTED_OPTIONS.has(key));
   if (unknown.length) throw new Error(`unknown option: --${unknown[0]}`);
@@ -380,6 +385,11 @@ export async function runCli(argv = process.argv.slice(2)): Promise<void> {
         output(await resumeClientMigrationStage({
           operationId: positionals[1], recoverLock: boolean(options, "recover-lock"), env: process.env,
         }));
+      } else if (operation.version === 6 && operation.request
+        && ["migrate-cutover", "migrate-finalize"].includes(operation.request.kind)) {
+        output(await resumeClientMigrationCutover({
+          operationId: positionals[1], recoverLock: boolean(options, "recover-lock"), env: process.env,
+        }));
       } else {
         output(resumeManagedClientOperation({
           operationId: positionals[1], recoverLock: boolean(options, "recover-lock"), env: process.env,
@@ -402,28 +412,28 @@ export async function runCli(argv = process.argv.slice(2)): Promise<void> {
       return;
     }
     if (action === "migrate") {
-      rejectOptionsOutside(options, new Set([
-        "identity", "instance", "enrollment-file", "apply", "recover-lock",
-      ]), "clients migrate stage");
-      if (positionals.length !== 3 || positionals[1] !== "stage" || !positionals[2]) {
-        throw new Error("usage: agent-bridge clients migrate stage <runtime> --identity <name> --instance <key> --enrollment-file <path> [--apply] [--recover-lock]");
+      const migrationAction = positionals[1];
+      if (migrationAction === "cutover") {
+        rejectOptionsOutside(options, new Set(["apply", "recover-lock", "exclusive-edge"]), "clients migrate cutover");
+        if (positionals.length !== 3 || !positionals[2]) throw new Error("usage: agent-bridge clients migrate cutover <stage-operation-id> --exclusive-edge [--apply] [--recover-lock]");
+        if (!boolean(options, "apply") && options["recover-lock"] !== undefined) throw new Error("--recover-lock requires --apply");
+        output(await cutoverClientMigration({ stageOperationId: positionals[2], apply: boolean(options, "apply"), exclusiveEdge: boolean(options, "exclusive-edge"), recoverLock: boolean(options, "recover-lock"), env: process.env }));
+      } else if (migrationAction === "finalize") {
+        rejectOptionsOutside(options, new Set(["apply", "recover-lock", "exclusive-edge"]), `clients migrate ${migrationAction}`);
+        if (positionals.length !== 3 || !positionals[2]) throw new Error(`usage: agent-bridge clients migrate ${migrationAction} <cutover-operation-id> --exclusive-edge [--apply] [--recover-lock]`);
+        if (!boolean(options, "apply") && options["recover-lock"] !== undefined) throw new Error("--recover-lock requires --apply");
+        const request = { cutoverOperationId: positionals[2], apply: boolean(options, "apply"), exclusiveEdge: boolean(options, "exclusive-edge"), recoverLock: boolean(options, "recover-lock"), env: process.env };
+        output(await finalizeClientMigration(request));
+      } else {
+        rejectOptionsOutside(options, new Set(["identity", "instance", "enrollment-file", "apply", "recover-lock"]), "clients migrate stage");
+        if (positionals.length !== 3 || migrationAction !== "stage" || !positionals[2]) {
+          throw new Error("usage: agent-bridge clients migrate stage <runtime> --identity <name> --instance <key> --enrollment-file <path> [--apply] [--recover-lock]");
+        }
+        const runtime = positionals[2] as InstallableRuntime;
+        if (!["codex", "claude-code", "claude-desktop"].includes(runtime)) throw new Error(`unsupported client runtime: ${runtime}`);
+        if (!boolean(options, "apply") && options["recover-lock"] !== undefined) throw new Error("--recover-lock requires --apply");
+        output(await stageClientMigrationTarget({ runtime, identity: one(options, "identity") ?? "", instance: one(options, "instance") ?? "", enrollmentFile: one(options, "enrollment-file") ?? "", apply: boolean(options, "apply"), recoverLock: boolean(options, "recover-lock"), env: process.env }));
       }
-      const runtime = positionals[2] as InstallableRuntime;
-      if (!["codex", "claude-code", "claude-desktop"].includes(runtime)) {
-        throw new Error(`unsupported client runtime: ${runtime}`);
-      }
-      if (!boolean(options, "apply") && options["recover-lock"] !== undefined) {
-        throw new Error("--recover-lock requires --apply");
-      }
-      output(await stageClientMigrationTarget({
-        runtime,
-        identity: one(options, "identity") ?? "",
-        instance: one(options, "instance") ?? "",
-        enrollmentFile: one(options, "enrollment-file") ?? "",
-        apply: boolean(options, "apply"),
-        recoverLock: boolean(options, "recover-lock"),
-        env: process.env,
-      }));
       return;
     }
     if (positionals.length !== 2 || !["install", "inspect", "adopt", "repair", "update", "uninstall"].includes(action ?? "") || !positionals[1]) {

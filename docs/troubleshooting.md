@@ -83,17 +83,24 @@ delivery settlement, presence, and read-receipt writes still require the gateway
 
 ## Migration gate reported by status or doctor
 
-`clients migrate stage` does not begin a drain. A later owner-mediated cutover may put
-the source edge scope into `draining` state. In that state, normal publication is
-blocked while a recorded drain worker completes existing outbox work. `doctor` reports
-`draining` as degraded. A `retired` scope rejects new publication and `doctor` reports
-it as failed.
+`clients migrate stage` does not begin a drain. `clients migrate cutover
+<stage-operation-id> --exclusive-edge --apply` changes the source edge to `draining`
+after it verifies both live gateways and their route challenge. In that state, normal
+publication is blocked while the recorded lease worker completes existing outbox work.
+`doctor` reports `draining` as degraded. A `retired` scope rejects new publication and
+`doctor` reports it as failed.
 
 Do not delete the edge database, alter the gate tables, or reopen a retired scope by
-hand. Inspect the operation ID reported by status. The current v5 staging command never
-starts a drain, so resuming a stage cannot recover a `draining` gate. Recovery belongs
-to the owner-managed operation that acquired the lease. If no such operation exists,
+hand. Inspect the operation ID reported by status. Resume the matching v6 operation
+with `clients resume <operation-id> [--recover-lock]`. A new worker cannot take an
+unexpired drain lease. It must wait for the lease to expire. Reverse before the
+predecessor grace cutoff drains and retires the temporary target, then reactivates the
+source. Finalization after grace retires the source. If no matching operation exists,
 preserve the database and stop rather than changing the gate manually.
+
+A dry migration plan refuses an edge with live `-wal` or `-shm` sidecars. Stop the
+writer and let SQLite checkpoint its state, then retry the plan. The plan never opens
+the edge in write mode to inspect it.
 
 ## Report a defect
 

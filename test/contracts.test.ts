@@ -84,6 +84,12 @@ describe("canonical v2 contract registry", () => {
       gatewayAuthorityId: "00000000-0000-4000-8000-000000000003",
       credentialId: "00000000-0000-4000-8000-000000000004",
     });
+    expect(parseResponse("capabilities", {
+      protocolVersion: "2.1", currentProtocolVersion: "2.1", selectedProtocolVersion: "2.1",
+      supportedProtocolVersions: ["2.0", "2.1"], scopeEnforcement: true, requestAuthority: true,
+      rowIsolation: true, authorizationModel: "scoped-credential", surface: "http", provider: "gateway",
+      grantedScopes: ["status:read", "messages:write"], operations: [],
+    })).toMatchObject({ grantedScopes: ["status:read", "messages:write"] });
   });
 
   it("negotiates only versions the gateway serves", () => {

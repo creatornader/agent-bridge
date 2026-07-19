@@ -1067,6 +1067,78 @@ function applyStep(
   if (!isDeepStrictEqual(after, target)) throw new Error("managed metadata update was not verified");
 }
 
+/** Remove a native registration as one crash-classifiable journal step. */
+export function removeManagedClientRegistration(
+  before: ManagedClientMetadata,
+  execute: ClientLifecycleExecutor = (command, args, context) => spawnSync(command, args, {
+    encoding: "utf8", cwd: context?.cwd, env: context?.env,
+  }),
+  env: NodeJS.ProcessEnv = process.env,
+): void {
+  if (before.runtime === "claude-desktop") throw new Error("Desktop registration removal is not a cutover transition");
+  const observed = observeManagedRegistration(before, execute, env);
+  if (observed.state !== "exact") throw new Error("managed registration changed before endpoint cutover");
+  nativeExecute(before, "remove", execute, env);
+  if (observeManagedRegistration(before, execute, env).state !== "absent") {
+    throw new Error("managed registration removal was not verified");
+  }
+}
+
+/** Add a native registration as one crash-classifiable journal step. */
+export function addManagedClientRegistration(
+  after: ManagedClientMetadata,
+  execute: ClientLifecycleExecutor = (command, args, context) => spawnSync(command, args, {
+    encoding: "utf8", cwd: context?.cwd, env: context?.env,
+  }),
+  env: NodeJS.ProcessEnv = process.env,
+): void {
+  if (after.runtime === "claude-desktop") throw new Error("Desktop registration add is not a cutover transition");
+  if (observeManagedRegistration(after, execute, env).state !== "absent") {
+    throw new Error("managed registration is not absent before endpoint cutover");
+  }
+  nativeExecute(after, "add", execute, env);
+  const verified = observeManagedRegistration(after, execute, env);
+  if (verified.state !== "exact") throw new Error("managed registration add was not verified");
+}
+
+/** Desktop applies a bounded JSON replacement through its atomic publish path. */
+export function replaceManagedDesktopRegistration(
+  before: ManagedClientMetadata,
+  after: ManagedClientMetadata,
+  operationId: string,
+  stepIndex: number,
+  execute: ClientLifecycleExecutor = (command, args, context) => spawnSync(command, args, {
+    encoding: "utf8", cwd: context?.cwd, env: context?.env,
+  }),
+  env: NodeJS.ProcessEnv = process.env,
+): void {
+  if (before.runtime !== "claude-desktop" || after.runtime !== "claude-desktop"
+    || before.instance !== after.instance || before.identity !== after.identity) {
+    throw new Error("Desktop registration switch does not preserve client identity");
+  }
+  if (observeManagedRegistration(before, execute, env).state !== "exact") {
+    throw new Error("managed registration changed before endpoint cutover");
+  }
+  mutateDesktopRegistration(after, operationId, stepIndex, "replace");
+  if (observeManagedRegistration(after, execute, env).state !== "exact") {
+    throw new Error("Desktop registration switch was not verified");
+  }
+}
+
+/** Write and immediately re-read the bounded management metadata after a verified switch. */
+export function switchManagedClientMetadata(
+  before: ManagedClientMetadata,
+  after: ManagedClientMetadata,
+  env: NodeJS.ProcessEnv = process.env,
+): void {
+  const current = loadManagedClientMetadata(before.runtime, before.instance, env);
+  if (!isDeepStrictEqual(current, before)) throw new Error("managed metadata changed before endpoint cutover");
+  writeManagedClientMetadata(managedClientMetadataPath(after.runtime, after.instance, env), after);
+  if (!isDeepStrictEqual(loadManagedClientMetadata(after.runtime, after.instance, env), after)) {
+    throw new Error("managed metadata switch was not verified");
+  }
+}
+
 function resumeAction(
   metadata: ManagedClientMetadata,
   manifest: ClientOperationManifest,
