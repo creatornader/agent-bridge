@@ -339,11 +339,17 @@ export function securePrivateSqliteFiles(path: string): void {
   }
 }
 
-export function preparePrivateSqliteLocation(path: string, createParent = false): string {
+export function preparePrivateSqliteLocation(
+  path: string,
+  createParent = false,
+  sidecarPolicy: "secure" | "defer" = "secure",
+): string {
   if (path === ":memory:") return path;
   const target = preparePrivateFileLocation(path, createParent);
-  for (const candidate of [`${target}-wal`, `${target}-shm`]) {
-    securePrivateSqliteSidecar(candidate);
+  if (sidecarPolicy === "secure") {
+    for (const candidate of [`${target}-wal`, `${target}-shm`]) {
+      securePrivateSqliteSidecar(candidate);
+    }
   }
   return target;
 }

@@ -65,6 +65,12 @@ configured timeout. The minimum supported SQLite build must include the WAL-rese
 corruption fix. Node 22.23.1 on the current development machine embeds SQLite 3.51.3,
 which includes that fix.
 
+On Windows, an opening store verifies the private parent and main database before it
+connects. It applies and verifies explicit ACLs on live WAL and shared-memory sidecars
+after the connection establishes WAL and completes the serialized schema transaction.
+This avoids first-open sidecar churn between concurrent processes. A sidecar that is
+replaced during one ACL validation still fails closed.
+
 ### Portable archives cross storage engines without copying runtime state
 
 A portable archive is a canonical NDJSON snapshot of one workspace's immutable

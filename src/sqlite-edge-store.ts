@@ -347,14 +347,14 @@ export class SQLiteEdgeStore {
   private initialization?: Promise<void>;
 
   constructor(private readonly path: string, private readonly scope: EdgeScope, private readonly busyTimeoutMs = 2_000) {
-    const selected = preparePrivateSqliteLocation(path, true);
+    const selected = preparePrivateSqliteLocation(path, true, "defer");
     this.databasePath = selected;
     this.preexistingFiles = new Set(selected === ":memory:" ? [] : [selected, `${selected}-wal`, `${selected}-shm`].filter(existsSync));
     const before = selected === ":memory:" || !existsSync(selected) ? undefined : lstatSync(selected);
     this.db = openDatabase(selected);
     try {
       this.db.exec(`PRAGMA busy_timeout = ${Math.max(1, Math.trunc(this.busyTimeoutMs))}`);
-      this.restrictFiles();
+      this.restrictFiles(false);
       if (before) {
         const after = lstatSync(selected);
         if (after.dev !== before.dev || after.ino !== before.ino) throw new Error("SQLite edge database path identity changed while opening");
@@ -363,9 +363,12 @@ export class SQLiteEdgeStore {
     this.key = edgeScopeKey(scope);
   }
 
-  private restrictFiles(): void {
+  private restrictFiles(includeSidecars = true): void {
     if (this.databasePath === ":memory:") return;
-    for (const path of [this.databasePath, `${this.databasePath}-wal`, `${this.databasePath}-shm`]) {
+    const paths = includeSidecars
+      ? [this.databasePath, `${this.databasePath}-wal`, `${this.databasePath}-shm`]
+      : [this.databasePath];
+    for (const path of paths) {
       if (!existsSync(path)) continue;
       if (path === this.databasePath && this.preexistingFiles.has(path)) verifyPrivatePathAccess(path, "file");
       else if (path === this.databasePath) securePrivatePath(path, "file");

@@ -136,6 +136,10 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and 
 
 ### Fixed
 
+- Defer Windows SQLite sidecar ACL application until the opened connection establishes
+  WAL and completes its serialized schema transaction. Concurrent first-open processes
+  no longer race a transient sidecar before their own connection holds it. Replacement
+  during one ACL validation still fails.
 - Treat a Windows SQLite sidecar that disappears during ACL validation as an expected
   race only when the path remains absent. A replacement or reparse object still fails
   validation.
