@@ -5,7 +5,7 @@ import {
 import { randomUUID } from "node:crypto";
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect } from "vitest";
 import { installClient } from "../src/client-installer.js";
 import {
   createPendingEnrollment,
@@ -14,6 +14,9 @@ import {
   transitionEnrollment,
   type EnrollmentFile,
 } from "../src/enrollment-file.js";
+import { privatePathIt } from "./private-path-policy.js";
+
+const it = privatePathIt;
 
 const directories: string[] = [];
 afterEach(() => {

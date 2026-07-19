@@ -2,7 +2,7 @@ import { randomUUID } from "node:crypto";
 import { closeSync, constants, existsSync, lstatSync, openSync, readFileSync, rmSync, unlinkSync, writeFileSync } from "node:fs";
 import { createRequire } from "node:module";
 import { join } from "node:path";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it as vitestIt } from "vitest";
 import { BridgeService } from "../src/bridge-service.js";
 import { writeNativeDrBundle } from "../src/native-dr-bundle.js";
 import { SQLiteBridgeStore } from "../src/sqlite-bridge-store.js";
@@ -10,6 +10,9 @@ import { SQLiteEdgeStore } from "../src/sqlite-edge-store.js";
 import { EDGE_SQLITE_APPLICATION_ID, LOCAL_SQLITE_APPLICATION_ID, SQLITE_DATABASE_SCHEMA_VERSION, sqliteSchemaContractHash } from "../src/sqlite-database-contract.js";
 import { backupLocalSqlite, NativeDrCommandError, restoreLocalSqlite, verifyNativeDrBundle } from "../src/sqlite-native-dr.js";
 import { privateTestDirectory, secureTestFile } from "./private-test-path.js";
+import { privatePathIt } from "./private-path-policy.js";
+
+const it = privatePathIt;
 
 const require = createRequire(import.meta.url);
 const roots: string[] = [];
@@ -216,7 +219,7 @@ describe("local SQLite native DR", () => {
     });
   }, nativeTestTimeout);
 
-  it.skipIf(process.platform === "win32")("terminates a real timed-out backup worker before cleaning its destination", async () => {
+  vitestIt.skipIf(process.platform === "win32")("terminates a real timed-out backup worker before cleaning its destination", async () => {
     const directory = root(); const source = join(directory, "large.sqlite3"); const output = join(directory, "timeout.abdr");
     const store = await local(source); await store.close();
     const { DatabaseSync } = require("node:sqlite") as typeof import("node:sqlite"); const raw = new DatabaseSync(source);

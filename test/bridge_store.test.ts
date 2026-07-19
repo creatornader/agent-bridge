@@ -6,12 +6,15 @@ import { join } from "node:path";
 import { pathToFileURL } from "node:url";
 import { promisify } from "node:util";
 import type { DatabaseSync as Database } from "node:sqlite";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it as nativeIt } from "vitest";
 import { BridgeService } from "../src/bridge-service.js";
 import { encodeCursor } from "../src/bridge-domain.js";
 import { SQLiteBridgeStore } from "../src/sqlite-bridge-store.js";
 import { LOCAL_SQLITE_SCHEMA_CONTRACTS, sqliteSchemaContractHash } from "../src/sqlite-database-contract.js";
 import { privateTestDirectory, secureTestFile } from "./private-test-path.js";
+import { privatePathIt } from "./private-path-policy.js";
+
+const it = privatePathIt;
 
 const temporaryDirectories: string[] = [];
 const stores: SQLiteBridgeStore[] = [];
@@ -784,7 +787,7 @@ describe("SQLite project schema upgrade", () => {
     upgraded.close();
   });
 
-  it("allows concurrent processes to upgrade legacy messages, deliveries, and events", async () => {
+  nativeIt("allows concurrent processes to upgrade legacy messages, deliveries, and events", async () => {
     const directory = privateTestDirectory("agent-bridge-v2-concurrent-upgrade-");
     temporaryDirectories.push(directory);
     const path = join(directory, "bridge.sqlite");

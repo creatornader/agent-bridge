@@ -1,4 +1,5 @@
 import { chmodSync, existsSync, lstatSync, mkdirSync } from "node:fs";
+import { AsyncLocalStorage } from "node:async_hooks";
 import { dirname, resolve } from "node:path";
 import { spawnSync, type SpawnSyncReturns } from "node:child_process";
 
@@ -20,6 +21,12 @@ export interface PrivatePathDependencies {
     isFile(): boolean;
     isDirectory(): boolean;
   };
+}
+
+/** Test policy for semantic suites that do not exercise native ACLs. */
+export interface PrivatePathPolicy {
+  secure(path: string, kind: PrivatePathKind): void;
+  verify(path: string, kind: PrivatePathKind): void;
 }
 
 interface PrivateDirectoryIdentity {
@@ -49,6 +56,44 @@ const defaults: PrivatePathDependencies = {
   inspect: (path) => lstatSync(path),
 };
 
+const scopedPolicy = new AsyncLocalStorage<PrivatePathPolicy>();
+
+function assertInProcessPath(path: string, kind: PrivatePathKind, apply: boolean): void {
+  const details = lstatSync(path);
+  if (details.isSymbolicLink()
+    || (kind === "file" ? !details.isFile() : !details.isDirectory())) {
+    throw new PrivatePathError("private path has the wrong file type");
+  }
+  if (process.platform === "win32") return;
+  if (typeof process.getuid === "function" && details.uid !== process.getuid()) {
+    throw new PrivatePathError("private path must be owned by the current user");
+  }
+  const mode = kind === "file" ? 0o600 : 0o700;
+  if (apply) chmodSync(path, mode);
+  if ((lstatSync(path).mode & 0o777) !== mode) {
+    throw new PrivatePathError("private path permissions are not owner-only");
+  }
+}
+
+/**
+ * Create an in-process policy for semantic tests.
+ *
+ * It preserves file-kind and link rejection. It does not inspect or modify
+ * native permissions or ACLs. Direct policy tests use the default unscoped
+ * implementation.
+ */
+export function createInProcessPrivatePathPolicy(): PrivatePathPolicy {
+  return Object.freeze({
+    secure: (path: string, kind: PrivatePathKind) => assertInProcessPath(path, kind, true),
+    verify: (path: string, kind: PrivatePathKind) => assertInProcessPath(path, kind, false),
+  });
+}
+
+/** Invoke a callback with an injected private-path policy. */
+export function withPrivatePathPolicy<T>(policy: PrivatePathPolicy, callback: () => T): T {
+  return scopedPolicy.run(policy, callback);
+}
+
 function privateDirectoryIdentity(
   path: string,
   dependencies: PrivatePathDependencies,
@@ -66,35 +111,37 @@ export function createPrivateDirectoryAccessCache(): PrivateDirectoryAccessCache
   const same = (left: PrivateDirectoryIdentity, right: PrivateDirectoryIdentity): boolean => left.device === right.device
     && left.inode === right.inode;
   return {
-    verify(path, dependencies = defaults): void {
-      if (dependencies.platform !== "win32") {
+    verify(path, dependencies): void {
+      const identityDependencies = dependencies ?? defaults;
+      if (identityDependencies.platform !== "win32") {
         verifyPrivatePathAccess(path, "directory", dependencies);
         return;
       }
       const cached = entries.get(path);
       if (cached) {
-        const current = privateDirectoryIdentity(path, dependencies);
+        const current = privateDirectoryIdentity(path, identityDependencies);
         if (!same(current, cached)) {
           throw new PrivatePathError("private path identity changed after cached policy validation", "PATH_REPLACED");
         }
         return;
       }
-      const before = privateDirectoryIdentity(path, dependencies);
+      const before = privateDirectoryIdentity(path, identityDependencies);
       verifyPrivatePathAccess(path, "directory", dependencies);
-      const after = privateDirectoryIdentity(path, dependencies);
+      const after = privateDirectoryIdentity(path, identityDependencies);
       if (!same(before, after)) {
         throw new PrivatePathError("private directory identity changed during policy validation", "PATH_REPLACED");
       }
       entries.set(path, after);
     },
-    secure(path, dependencies = defaults): void {
-      if (dependencies.platform !== "win32") {
+    secure(path, dependencies): void {
+      const identityDependencies = dependencies ?? defaults;
+      if (identityDependencies.platform !== "win32") {
         securePrivatePath(path, "directory", dependencies);
         return;
       }
-      const before = privateDirectoryIdentity(path, dependencies);
+      const before = privateDirectoryIdentity(path, identityDependencies);
       securePrivatePath(path, "directory", dependencies);
-      const after = privateDirectoryIdentity(path, dependencies);
+      const after = privateDirectoryIdentity(path, identityDependencies);
       if (!same(before, after)) {
         throw new PrivatePathError("private directory identity changed during policy validation", "PATH_REPLACED");
       }
@@ -198,7 +245,7 @@ function windowsPrivatePath(
 /** Secure an ephemeral SQLite sidecar, accepting deletion but never replacement. */
 export function securePrivateSqliteSidecar(
   path: string,
-  dependencies: PrivatePathDependencies = defaults,
+  dependencies?: PrivatePathDependencies,
 ): void {
   const pathDisappeared = (error: unknown): boolean => error instanceof PrivatePathError
     ? error.code === "PATH_DISAPPEARED"
@@ -238,18 +285,32 @@ function posixPrivatePath(path: string, kind: PrivatePathKind, apply: boolean): 
 export function securePrivatePath(
   path: string,
   kind: PrivatePathKind,
-  dependencies: PrivatePathDependencies = defaults,
+  dependencies?: PrivatePathDependencies,
 ): void {
-  if (dependencies.platform === "win32") windowsPrivatePath(path, kind, true, dependencies);
+  if (dependencies) {
+    if (dependencies.platform === "win32") windowsPrivatePath(path, kind, true, dependencies);
+    else posixPrivatePath(path, kind, true);
+    return;
+  }
+  const policy = scopedPolicy.getStore();
+  if (policy) policy.secure(path, kind);
+  else if (defaults.platform === "win32") windowsPrivatePath(path, kind, true, defaults);
   else posixPrivatePath(path, kind, true);
 }
 
 export function verifyPrivatePathAccess(
   path: string,
   kind: PrivatePathKind,
-  dependencies: PrivatePathDependencies = defaults,
+  dependencies?: PrivatePathDependencies,
 ): void {
-  if (dependencies.platform === "win32") windowsPrivatePath(path, kind, false, dependencies);
+  if (dependencies) {
+    if (dependencies.platform === "win32") windowsPrivatePath(path, kind, false, dependencies);
+    else posixPrivatePath(path, kind, false);
+    return;
+  }
+  const policy = scopedPolicy.getStore();
+  if (policy) policy.verify(path, kind);
+  else if (defaults.platform === "win32") windowsPrivatePath(path, kind, false, defaults);
   else posixPrivatePath(path, kind, false);
 }
 

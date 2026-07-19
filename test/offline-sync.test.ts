@@ -5,7 +5,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { pathToFileURL } from "node:url";
 import { promisify } from "node:util";
-import { afterEach, describe, expect, it, vi } from "vitest";
+import { afterEach, describe, expect, it as nativeIt, vi } from "vitest";
 import { BridgeService } from "../src/bridge-service.js";
 import type {
   BridgeDelivery,
@@ -28,6 +28,9 @@ import { edgeMessageFingerprint, edgeScopeKey, SQLiteEdgeStore, stableIdempotenc
 import { SQLiteBridgeStore } from "../src/sqlite-bridge-store.js";
 import { EDGE_SQLITE_SCHEMA_CONTRACTS, sqliteSchemaContractHash } from "../src/sqlite-database-contract.js";
 import { SyncingBridgeStore } from "../src/syncing-bridge-store.js";
+import { privatePathIt } from "./private-path-policy.js";
+
+const it = privatePathIt;
 
 const directories: string[] = [];
 const remoteStores: SQLiteBridgeStore[] = [];
@@ -935,7 +938,7 @@ describe("offline SQLite synchronization", () => {
     await syncing.close();
   });
 
-  it("allows concurrent processes to perform the first edge project-column upgrade", async () => {
+  nativeIt("allows concurrent processes to perform the first edge project-column upgrade", async () => {
     const root = directory();
     const path = join(root, "edge.sqlite3");
     const principal = { workspace: "acme", agent: "sender" };
