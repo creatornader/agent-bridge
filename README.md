@@ -169,6 +169,8 @@ for its relationship to MCP, A2A, agmsg, brokers, and agent runtimes.
 
 - Node.js 22.23.1 or newer.
 - SQLite 3.51.3 or newer for local and edge storage. The supported Node version includes it.
+- Concurrent local and edge initialization may wait up to 15 seconds for schema work;
+  normal database operations retain their configured busy timeout.
 - PostgreSQL 15, 16, 17, or 18 for gateway mode. New PostgreSQL majors fail the
   migration prerequisite and live readiness checks until their catalog digest is
   certified.
@@ -437,22 +439,39 @@ adoption re-inspects before reporting success.
 Managed-client operations now have a crash-safe local substrate under the owner-only
 `~/.agent-bridge/operations/` directory. `agent-bridge clients operations` lists safe
 operation summaries, and appending an operation UUID inspects one manifest. Output
-never includes snapshot contents or backend values. Each immutable ordered plan names
+never includes artifact contents or backend values. Typed requests reject URL query
+strings, fragments, user information, and unsafe release selectors before they reach
+the journal. Each immutable ordered plan names
 registration, backend, and management-metadata targets with non-sensitive locators,
-snapshot artifacts, and expected before/after digests. Intent is durable before an
+no-replace before and after artifacts, and expected digests. Begin holds the
+runtime-plus-instance lock and refuses another unfinished operation. Any corrupt or
+blocked journal fences new mutations until an operator resolves it. Resume is
+same-host only. Intent is durable before an
 external write; observed-applied is durable only after the after-state is verified.
 On restart, the exact pending step is retryable only at its before-state, advances only
 at its after-state, and otherwise blocks as ambiguous. Sensitive file access checks and
 pins its immediate directory. Stale-lock recovery separately pins the operation root
-and locks directory for the full recovery sequence.
+and locks directory for the full recovery sequence. Creation and destructive cleanup
+also keep the operation root and target directories pinned through their writes.
 
-The substrate currently retains snapshots because no public mutation command creates
-them. Repair, update, uninstall, and endpoint migration cannot ship until terminal
-cleanup is implemented. Active or ambiguous operations must retain their snapshots.
-After a committed manifest is durable, cleanup must unlink each verified artifact,
-sync the snapshots directory where supported, and report uncertain durability instead
-of claiming success. Rollback status remains unavailable until reverse steps record
-durable intent and verify restored bytes. Agent Bridge cannot promise physical erasure
+On Windows, a held mutation lock can reuse a native ACL result only for the same
+directory path identity. File checks, every new or resumed lock, and each passive
+inspection check the ACL again. POSIX mode checks remain per-access. This cache does
+not change local mode's trust in the current OS user.
+
+The journal states are `prepared`, `snapshotted`, `in-progress`, `applied`, `cleaning`,
+and `committed`; inspection separately reports `resumable`,
+`classification-required`, `blocked`, or `complete`. `committed` means every write was
+verified and every artifact was removed. Cleanup records durable intent per artifact,
+pins and verifies it, unlinks it, and syncs the directory on POSIX; Windows explicitly
+records unavailable directory durability. A missing artifact is safe to resume only
+when cleanup intent predated the attempt. Inspection accepts only two exact crash
+residues: that authorized absence, or the verified after artifact for the current
+intent-recorded step. A terminal manifest removes request, step, digest, locator, and
+artifact metadata but retains the operation kind, step count, completion time, and
+cleanup durability as a credential-free audit record. Completed records remain readable
+across hosts. No public repair, update, uninstall, or endpoint
+migration command is added here. Agent Bridge cannot promise physical erasure
 on SSDs or journaled filesystems, so future commands must minimize credential-bearing
 snapshots and rotate credentials when retained copies contained them. Inspection
 changes no registration, backend, metadata, or snapshot file.

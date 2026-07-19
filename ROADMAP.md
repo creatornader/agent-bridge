@@ -70,9 +70,9 @@ published and the supported clients pass a fresh end-to-end check.
 ### Installation and operations
 
 - Build repair, update, and uninstall on the implemented crash-safe operation substrate
-  (immutable ordered steps with exact restart classification) and released inspect/adopt
-  ownership boundary. Implement verified terminal snapshot cleanup and credential-copy
-  handling before any public mutating command ships.
+  (typed requests, immutable ordered steps, exact restart classification, and
+  crash-restartable terminal artifact cleanup) and released inspect/adopt ownership
+  boundary. Public mutators remain a separate future unit.
 - Add endpoint migration tooling that does not strand an existing SQLite outbox.
 - Publish a maintained client compatibility matrix.
 

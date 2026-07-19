@@ -67,16 +67,14 @@ Treat registration state separately from connectivity health; applied adoption
 re-inspects the registration before it reports success. Enrollment-based first-time
 provisioning continues to refuse registration and backend-file collisions.
 Use `agent-bridge clients operations` or append an operation UUID to inspect local
-crash-safe operation state. Snapshot contents remain confined to owner-private files;
-the command returns safe summaries and the exact pending step only. Ordered operation
-steps durably record intent before an external write and observed-applied only after
-the expected after-state is verified. A pending before-state is retryable, a pending
-after-state advances, and any other state is ambiguous and blocked. Treat corrupt or
-ambiguous state as a stop condition. No public command creates snapshots yet. Repair,
-update, uninstall, and migration commands remain unavailable until terminal snapshot
-cleanup is implemented. Active or ambiguous snapshots must be retained. Terminal
-cleanup must verify each artifact before unlinking it, sync the directory where
-supported, and report uncertain durability instead of claiming success.
+crash-safe operation state. Artifact contents remain confined to owner-private files;
+inspection reports resumable, classification-required, blocked, or complete and names
+the exact pending step only. Begin is lock-covered, resume is same-host only, and
+ordered steps use no-replace before and verified after artifacts. Treat corrupt,
+cross-host, or ambiguous state as a stop condition. Cleanup is restartable per artifact
+and `committed` means verified writes plus removed artifacts. The terminal manifest
+keeps a credential-free completion record but no request, step, digest, locator, or
+artifact metadata. No public repair, update, uninstall, or migration command is available.
 
 Portable archive work is an offline operator task, not normal MCP traffic. Use
 `agent-bridge archive export --provider local|postgres --workspace <workspace>

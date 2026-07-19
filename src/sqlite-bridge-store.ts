@@ -5,7 +5,7 @@ import type { DatabaseSync as Database, SQLInputValue } from "node:sqlite";
 import { DeliveryStateConflictError, cursorScope, decodeCursor, decodeScopedCursor, encodeCursor, encodeScopedCursor, scopedCursorScope, validateDeliveryCursorPosition, validateEventCursorPosition, type AgentPresence, type BridgeDelivery, type BridgeDeliveryEvent, type BridgeMessage, type BridgePrincipal } from "./bridge-domain.js";
 import type { BridgeDiagnostics, BridgeStore, ClaimOptions, DeliveryQuery, InsertMessageResult, MessagePage, MessageQuery } from "./bridge-store.js";
 import { assertIdempotentReplay } from "./idempotency.js";
-import { retrySqliteBusy } from "./sqlite-retry.js";
+import { retrySqliteBusy, SQLITE_INITIALIZATION_BUSY_TIMEOUT_MS } from "./sqlite-retry.js";
 import { preparePrivateSqliteLocation, securePrivatePath, securePrivateSqliteSidecar, verifyPrivatePathAccess } from "./private-path.js";
 import { assertLocalUpgradeCandidate, installLocalAuthorityMarkers } from "./sqlite-database-contract.js";
 
@@ -141,8 +141,9 @@ export class SQLiteBridgeStore implements BridgeStore {
     const encoded = (parts[0] ?? 0) * 1_000_000 + (parts[1] ?? 0) * 1_000 + (parts[2] ?? 0);
     if (encoded < 3_051_003) throw new Error("SQLite 3.51.3 or newer is required");
     assertLocalUpgradeCandidate(this.db);
-    await retrySqliteBusy(() => this.db.exec(schema), this.busyTimeoutMs);
-    await retrySqliteBusy(() => this.db.exec("BEGIN IMMEDIATE"), this.busyTimeoutMs);
+    const initializationTimeoutMs = Math.max(this.busyTimeoutMs, SQLITE_INITIALIZATION_BUSY_TIMEOUT_MS);
+    await retrySqliteBusy(() => this.db.exec(schema), initializationTimeoutMs);
+    await retrySqliteBusy(() => this.db.exec("BEGIN IMMEDIATE"), initializationTimeoutMs);
     try {
       const columns = this.db.prepare("PRAGMA table_info(bridge_messages)").all() as Row[];
       if (!columns.some((column) => column.name === "project")) {

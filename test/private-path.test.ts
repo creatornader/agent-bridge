@@ -1,8 +1,11 @@
-import { mkdirSync, mkdtempSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { chmodSync, mkdirSync, mkdtempSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
-import { preparePrivateSqliteLocation, securePrivatePath, securePrivateSqliteSidecar, verifyPrivatePathAccess } from "../src/private-path.js";
+import {
+  createPrivateDirectoryAccessCache, preparePrivateSqliteLocation, securePrivatePath,
+  securePrivateSqliteSidecar, verifyPrivatePathAccess,
+} from "../src/private-path.js";
 
 function result(status: number) {
   return {
@@ -125,6 +128,97 @@ describe("private path policy", () => {
       execute: () => result(23),
       inspect: () => directoryIdentity(),
     })).toThrow(/final ACL verification failed/);
+  });
+
+  it("reuses native ACL verification only for one unchanged Windows directory", () => {
+    let calls = 0;
+    const cache = createPrivateDirectoryAccessCache();
+    const dependencies = {
+      platform: "win32" as const,
+      execute: () => { calls += 1; return result(0); },
+      inspect: () => directoryIdentity(),
+    };
+    cache.verify("C:\\private", dependencies);
+    cache.verify("C:\\private", dependencies);
+    expect(calls).toBe(1);
+  });
+
+  it("revalidates directories for a new cache and uncached inspection", () => {
+    let calls = 0;
+    const dependencies = {
+      platform: "win32" as const,
+      execute: () => { calls += 1; return result(0); },
+      inspect: () => directoryIdentity(),
+    };
+    createPrivateDirectoryAccessCache().verify("C:\\private", dependencies);
+    createPrivateDirectoryAccessCache().verify("C:\\private", dependencies);
+    verifyPrivatePathAccess("C:\\private", "directory", dependencies);
+    verifyPrivatePathAccess("C:\\private", "directory", dependencies);
+    expect(calls).toBe(4);
+  });
+
+  it("refuses a replacement instead of reusing its cached directory entry", () => {
+    let calls = 0;
+    let inode = 20;
+    const cache = createPrivateDirectoryAccessCache();
+    const dependencies = {
+      platform: "win32" as const,
+      execute: () => { calls += 1; return result(0); },
+      inspect: () => directoryIdentity(false, inode),
+    };
+    cache.verify("C:\\private", dependencies);
+    inode = 21;
+    expect(() => cache.verify("C:\\private", dependencies))
+      .toThrow(/identity changed after cached policy validation/);
+    expect(calls).toBe(1);
+  });
+
+  it("refuses Windows directory identity swaps after native verification", () => {
+    let verifyReads = 0;
+    expect(() => createPrivateDirectoryAccessCache().verify("C:\\private", {
+      platform: "win32",
+      execute: () => result(0),
+      inspect: () => directoryIdentity(false, verifyReads++ < 3 ? 20 : 21),
+    })).toThrow(/identity changed during policy validation/);
+
+    let secureReads = 0;
+    expect(() => createPrivateDirectoryAccessCache().secure("C:\\private", {
+      platform: "win32",
+      execute: () => result(0),
+      inspect: () => directoryIdentity(false, secureReads++ < 3 ? 20 : 21),
+    })).toThrow(/identity changed during policy validation/);
+  });
+
+  it("never caches file verification", () => {
+    let calls = 0;
+    const dependencies = {
+      platform: "win32" as const,
+      execute: () => { calls += 1; return result(0); },
+      inspect: () => fileIdentity(),
+    };
+    expect(() => createPrivateDirectoryAccessCache().verify("C:\\private\\credential.config", dependencies))
+      .toThrow(/wrong file type/);
+    verifyPrivatePathAccess("C:\\private\\credential.config", "file", dependencies);
+    verifyPrivatePathAccess("C:\\private\\credential.config", "file", dependencies);
+    expect(calls).toBe(2);
+  });
+
+  it.skipIf(process.platform === "win32")("keeps POSIX directory checks on every cache call", () => {
+    const directory = mkdtempSync(join(tmpdir(), "agent-bridge-private-cache-"));
+    try {
+      chmodSync(directory, 0o700);
+      const cache = createPrivateDirectoryAccessCache();
+      const dependencies = {
+        platform: "linux" as const,
+        execute: () => result(0),
+        inspect: () => directoryIdentity(),
+      };
+      cache.verify(directory, dependencies);
+      chmodSync(directory, 0o755);
+      expect(() => cache.verify(directory, dependencies)).toThrow(/permissions are not owner-only/);
+    } finally {
+      rmSync(directory, { recursive: true, force: true });
+    }
   });
 
   it("rejects a persistent backend reparse path before DACL changes", () => {

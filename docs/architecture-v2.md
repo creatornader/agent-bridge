@@ -59,7 +59,11 @@ The gateway outbox queues immutable message publication. Receipt and lease mutat
 
 Long-lived gateway MCP clients own a cancellable transport loop that replays publications and refreshes the inbox cache with bounded exponential backoff. It is transport maintenance, not agent monitoring. Manual MCP and CLI sync use the same replay path. A publication timeout after the gateway may have committed remains queued under its stable idempotency key. A retry resolves to the original immutable message instead of publishing a duplicate.
 
-Local initialization must be idempotent. Every connection uses a bounded busy timeout. The minimum supported SQLite build must include the WAL-reset corruption fix. Node 22.23.1 on the current development machine embeds SQLite 3.51.3, which includes that fix.
+Local initialization must be idempotent. Concurrent initialization and schema upgrade
+use a 15-second minimum busy-retry window. Normal database operations retain the
+configured timeout. The minimum supported SQLite build must include the WAL-reset
+corruption fix. Node 22.23.1 on the current development machine embeds SQLite 3.51.3,
+which includes that fix.
 
 ### Portable archives cross storage engines without copying runtime state
 
@@ -296,27 +300,34 @@ by runtime plus stable instance. Manifest publication fsyncs files, atomically r
 verifies private paths, and fsyncs directories where supported. Snapshot publication
 uses atomic no-replace links, so residue from an interrupted manifest update cannot be
 overwritten. Sensitive file access pins its immediate directory. Operation-root and
-locks identities remain pinned throughout stale recovery, and the snapshots identity
-remains pinned across enumeration and every artifact read. An immutable ordered plan
-records each target kind, non-sensitive locator, unique snapshot artifact, and expected
-before/after digest. All bounded before-state snapshots must match their expected
-digests before mutation can start. A step's intent is durable before its external
-write; observed-applied becomes durable only after verifying its after-state. Restart
-classification names the exact pending step: its before-state is retryable, its
-after-state advances only after durable intent, and every other state is ambiguous and
-blocked. Stale recovery requires an old same-host record and OS proof that its PID
-stopped. Corrupt, linked, replaced, mismatched, oversized, contradictory, or ambiguous
-state fails closed without changing external files. `clients operations
-[<operation-id>]` exposes safe summaries only.
+target identities remain pinned throughout creation and destructive cleanup. The root
+and locks identities remain pinned throughout stale recovery, and the artifact-directory
+identity remains pinned across enumeration and every read. A typed credential-agnostic
+request and immutable plan record non-sensitive locators, unique no-replace before and
+after artifacts, and expected digests. Request validation rejects URL credential
+surfaces and unsafe release selectors. Begin is lock-covered and refuses another
+unfinished operation; any blocked journal fences new mutation. Resume is same-host only. The journal advances through prepared,
+snapshotted, in-progress, applied, cleaning, and committed. Inspection separately
+reports resumable, classification-required, blocked, or complete.
 
-No public mutation command creates operation snapshots yet. Such commands cannot ship
-until terminal cleanup exists. Active and ambiguous operations retain their snapshots.
-After a committed manifest is durable, cleanup verifies each artifact, unlinks it,
-syncs the snapshots directory where supported, and reports uncertain durability
-instead of success. Rollback status remains unavailable until reverse steps record
-durable intent and verify restored bytes. Physical erasure cannot be guaranteed on
-SSDs or journaled filesystems. Commands must minimize credential-bearing snapshots
-and rotate credentials when retained copies contained them.
+Native Windows ACL checks start uncached for each acquired or resumed mutation lock.
+While that lock remains held, later directory checks may reuse the result only for the
+same directory path, device, and inode. File checks always use the native policy.
+Passive inspection starts without a cache, and POSIX mode checks run on every access.
+A same-user process can still change an ACL on an unchanged directory or replace it
+with a directory that reuses the same filesystem identity. Local mode already treats
+that OS user as trusted. Agent Bridge does not delete a cached directory during a
+successful managed-client mutation.
+
+Cleanup durably records per-artifact intent, verifies and unlinks the pinned artifact,
+then records POSIX directory sync or explicit Windows unavailability. An absent file
+is resumable only when intent predates the cleanup attempt. Inspection also recognizes
+one verified after artifact left by an interrupted manifest publication. Other missing
+or extra files block. Committed means verified writes and removed artifacts. Its
+manifest drops requests, steps, locators, digests, and artifact metadata while retaining
+the operation kind, step count, completion time, and cleanup durability for audit. No
+public mutator or rolled-back state is added. Physical erasure remains outside the
+filesystem contract.
 
 ### v1 compatibility is additive
 

@@ -11,7 +11,7 @@ import {
   type JsonValue,
 } from "./bridge-domain.js";
 import type { MessagePage, MessageQuery } from "./bridge-store.js";
-import { retrySqliteBusy } from "./sqlite-retry.js";
+import { retrySqliteBusy, SQLITE_INITIALIZATION_BUSY_TIMEOUT_MS } from "./sqlite-retry.js";
 import { preparePrivateSqliteLocation, securePrivatePath, securePrivateSqliteSidecar, verifyPrivatePathAccess } from "./private-path.js";
 import { assertEdgeUpgradeCandidate, installEdgeMarkers } from "./sqlite-database-contract.js";
 
@@ -252,8 +252,9 @@ export class SQLiteEdgeStore {
 
   private async initializeOnce(): Promise<void> {
     assertEdgeUpgradeCandidate(this.db);
-    await retrySqliteBusy(() => this.db.exec(schema), this.busyTimeoutMs);
-    await retrySqliteBusy(() => this.db.exec("BEGIN IMMEDIATE"), this.busyTimeoutMs);
+    const initializationTimeoutMs = Math.max(this.busyTimeoutMs, SQLITE_INITIALIZATION_BUSY_TIMEOUT_MS);
+    await retrySqliteBusy(() => this.db.exec(schema), initializationTimeoutMs);
+    await retrySqliteBusy(() => this.db.exec("BEGIN IMMEDIATE"), initializationTimeoutMs);
     try {
       const scopeColumns = this.db.prepare("PRAGMA table_info(edge_scopes)").all() as Row[];
       if (!scopeColumns.some((column) => column.name === "cache_contract")) {

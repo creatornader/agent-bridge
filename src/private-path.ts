@@ -5,12 +5,12 @@ import { spawnSync, type SpawnSyncReturns } from "node:child_process";
 export type PrivatePathKind = "file" | "directory";
 
 export class PrivatePathError extends Error {
-  constructor(message: string, readonly code?: "PATH_DISAPPEARED") {
+  constructor(message: string, readonly code?: "PATH_DISAPPEARED" | "PATH_REPLACED") {
     super(message);
   }
 }
 
-interface PrivatePathDependencies {
+export interface PrivatePathDependencies {
   platform: NodeJS.Platform;
   execute(command: string, args: string[], env: NodeJS.ProcessEnv): SpawnSyncReturns<string>;
   inspect(path: string): {
@@ -22,6 +22,23 @@ interface PrivatePathDependencies {
   };
 }
 
+interface PrivateDirectoryIdentity {
+  device: number;
+  inode: number;
+}
+
+/**
+ * Keep verified Windows directories within one caller-owned critical section.
+ *
+ * A cache hit still checks the directory type and identity. The cache does not
+ * detect ACL changes made to the same directory by the current OS user.
+ */
+export interface PrivateDirectoryAccessCache {
+  verify(path: string, dependencies?: PrivatePathDependencies): void;
+  secure(path: string, dependencies?: PrivatePathDependencies): void;
+  clear(): void;
+}
+
 const defaults: PrivatePathDependencies = {
   platform: process.platform,
   execute: (command, args, env) => spawnSync(command, args, {
@@ -31,6 +48,61 @@ const defaults: PrivatePathDependencies = {
   }),
   inspect: (path) => lstatSync(path),
 };
+
+function privateDirectoryIdentity(
+  path: string,
+  dependencies: PrivatePathDependencies,
+): PrivateDirectoryIdentity {
+  const details = dependencies.inspect(path);
+  if (details.isSymbolicLink() || !details.isDirectory()) {
+    throw new PrivatePathError("private path has the wrong file type");
+  }
+  return { device: details.dev, inode: details.ino };
+}
+
+/** Create an empty, caller-owned cache for verified private directories. */
+export function createPrivateDirectoryAccessCache(): PrivateDirectoryAccessCache {
+  const entries = new Map<string, PrivateDirectoryIdentity>();
+  const same = (left: PrivateDirectoryIdentity, right: PrivateDirectoryIdentity): boolean => left.device === right.device
+    && left.inode === right.inode;
+  return {
+    verify(path, dependencies = defaults): void {
+      if (dependencies.platform !== "win32") {
+        verifyPrivatePathAccess(path, "directory", dependencies);
+        return;
+      }
+      const cached = entries.get(path);
+      if (cached) {
+        const current = privateDirectoryIdentity(path, dependencies);
+        if (!same(current, cached)) {
+          throw new PrivatePathError("private path identity changed after cached policy validation", "PATH_REPLACED");
+        }
+        return;
+      }
+      const before = privateDirectoryIdentity(path, dependencies);
+      verifyPrivatePathAccess(path, "directory", dependencies);
+      const after = privateDirectoryIdentity(path, dependencies);
+      if (!same(before, after)) {
+        throw new PrivatePathError("private directory identity changed during policy validation", "PATH_REPLACED");
+      }
+      entries.set(path, after);
+    },
+    secure(path, dependencies = defaults): void {
+      if (dependencies.platform !== "win32") {
+        securePrivatePath(path, "directory", dependencies);
+        return;
+      }
+      const before = privateDirectoryIdentity(path, dependencies);
+      securePrivatePath(path, "directory", dependencies);
+      const after = privateDirectoryIdentity(path, dependencies);
+      if (!same(before, after)) {
+        throw new PrivatePathError("private directory identity changed during policy validation", "PATH_REPLACED");
+      }
+      entries.set(path, after);
+    },
+    clear(): void { entries.clear(); },
+  };
+}
 
 function windowsScript(kind: PrivatePathKind, apply: boolean): string {
   const flags = kind === "directory"

@@ -361,7 +361,7 @@ export async function runCli(argv = process.argv.slice(2)): Promise<void> {
         throw new Error("usage: agent-bridge clients operations [<operation-id>]");
       }
       output(operationId ? inspectClientOperation(operationId, process.env) : {
-        schemaVersion: 1,
+        schemaVersion: 2,
         operations: listClientOperations(process.env),
       });
       return;

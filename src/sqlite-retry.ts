@@ -4,6 +4,8 @@ function isBusy(error: unknown): boolean {
   return sqlite.errcode === 5 || /database is (?:locked|busy)/i.test(error.message);
 }
 
+export const SQLITE_INITIALIZATION_BUSY_TIMEOUT_MS = 15_000;
+
 export async function retrySqliteBusy<T>(
   operation: () => T,
   timeoutMs: number,
