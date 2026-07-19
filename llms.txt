@@ -52,7 +52,8 @@ services can call the CLI or HTTPS API or embed the Node library without a host 
 - agent-bridge clients update <runtime> --identity <principal> --instance <stable-key> [--command <command>] [--apply] [--resume <uuid>] [--recover-lock]
 - agent-bridge clients uninstall <runtime> --identity <principal> --instance <stable-key> [--apply] [--resume <uuid>] [--recover-lock]
 - agent-bridge clients rollback <update-operation-id> --identity <principal> [--apply] [--recover-lock]
-- agent-bridge clients resume <operation-id> [--recover-lock]  # resumes recorded v3 or supported v4 authority
+- agent-bridge clients migrate stage <runtime> --identity <principal> --instance <stable-key> --enrollment-file <private-path> [--apply] [--recover-lock]
+- agent-bridge clients resume <operation-id> [--recover-lock]  # resumes recorded v3, supported v4, or v5 migration-stage authority
 - agent-bridge clients operations [<operation-id>]  # read-only resumable/classification-required/blocked/complete summaries
 - agent-bridge owner provision|inventory|rotate|revoke
 - agent-bridge clients install <runtime> --enrollment-file <private path>
@@ -161,6 +162,15 @@ liveness. Rotation requires predecessor credential, principal, instance, gateway
 workspace, and live MCP registration matches. Consumed-file deletion and lock release
 report retained, missing, durable, and durability-unknown outcomes without claiming that
 an unlinked path was retained.
+
+`clients migrate stage` is a plan-first gateway migration preparation command. An
+applied stage creates an owner-private successor backend and credential-free operation
+record. It leaves the active registration, active backend, and source edge scope
+active after initializing its gate. It probes active and staged bearer credentials and
+records enrollment credential IDs, but it does not drain, cut over, or prove that
+source and target URLs reach one database authority. A later cutover must dynamically
+attest one logical authority before it changes an active backend. Staging requires an
+absolute, normalized source edge database path and rejects `:memory:`.
 
 Project is an optional immutable message label, not a tenant or identity selector. Omitted project reads include labeled and unlabeled messages. Exact project filters are supported by CLI, MCP, HTTP, and stores. Gateway workspace assertions must match the bound credential before network access.
 Local CLI calls may override workspace for one invocation. The legacy Supabase schema is global and always reports workspace `*`; use project labels for legacy filtering.

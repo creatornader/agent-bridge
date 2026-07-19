@@ -43,7 +43,7 @@ type Executor = (
   args: string[],
 ) => SpawnSyncReturns<string>;
 
-interface BackendBinding {
+export interface ClientBackendBinding {
   credentialId: string;
   principal: string;
   instance: string;
@@ -171,17 +171,32 @@ function replacePrivateFile(path: string, content: string | Buffer): void {
   }
 }
 
-function writeBackendConfig(
+function writeClientBackendConfig(
   runtime: InstallableRuntime,
   identity: string,
   instance: string,
-  options: { token?: string; env: NodeJS.ProcessEnv; binding?: BackendBinding },
+  options: {
+    token?: string;
+    env: NodeJS.ProcessEnv;
+    binding?: ClientBackendBinding;
+    destinationPath?: string;
+    gatewayUrl?: string;
+    workspace?: string;
+    edgeDatabasePath?: string;
+  },
 ): string {
   const env = options.env;
   const home = env.HOME ?? homedir();
   const sharedPath = env.AGENT_BRIDGE_CONFIG ?? join(home, ".agent-bridge", "config");
   const shared = readClientConfigFile(sharedPath);
-  const configuredProvider = env.AGENT_BRIDGE_PROVIDER?.trim() || shared.AGENT_BRIDGE_PROVIDER?.trim();
+  const stagedGateway = options.gatewayUrl !== undefined || options.workspace !== undefined
+    || options.edgeDatabasePath !== undefined;
+  if (stagedGateway && (!options.gatewayUrl || !options.workspace || !options.edgeDatabasePath)) {
+    throw new Error("staged gateway backend requires URL, workspace, and edge database path");
+  }
+  const configuredProvider = stagedGateway
+    ? "gateway"
+    : env.AGENT_BRIDGE_PROVIDER?.trim() || shared.AGENT_BRIDGE_PROVIDER?.trim();
   const inferredGateway = !configuredProvider && Boolean(
     env.AGENT_BRIDGE_TOKEN?.trim() || shared.AGENT_BRIDGE_TOKEN?.trim(),
   );
@@ -194,12 +209,24 @@ function writeBackendConfig(
       "gateway client installation requires --token or AGENT_BRIDGE_CLIENT_TOKEN",
     );
   }
-  const resolved = resolveClientConfig({
-    ...env,
-    AGENT_BRIDGE_AGENT: undefined,
-    AGENT_BRIDGE_INSTANCE: undefined,
-    AGENT_BRIDGE_TOKEN: clientToken ?? env.AGENT_BRIDGE_TOKEN,
-  }, identity);
+  const resolved = resolveClientConfig(stagedGateway
+    ? {
+      ...env,
+      AGENT_BRIDGE_CONFIG: undefined,
+      AGENT_BRIDGE_PROVIDER: "gateway",
+      AGENT_BRIDGE_URL: options.gatewayUrl,
+      AGENT_BRIDGE_WORKSPACE: options.workspace,
+      AGENT_BRIDGE_EDGE_DB: options.edgeDatabasePath,
+      AGENT_BRIDGE_AGENT: undefined,
+      AGENT_BRIDGE_INSTANCE: undefined,
+      AGENT_BRIDGE_TOKEN: clientToken,
+    }
+    : {
+      ...env,
+      AGENT_BRIDGE_AGENT: undefined,
+      AGENT_BRIDGE_INSTANCE: undefined,
+      AGENT_BRIDGE_TOKEN: clientToken ?? env.AGENT_BRIDGE_TOKEN,
+    }, identity);
   const values: Record<string, string | undefined> = {
     AGENT_BRIDGE_PROVIDER: resolved.provider,
     AGENT_BRIDGE_WORKSPACE: resolved.principal.workspace,
@@ -217,7 +244,7 @@ function writeBackendConfig(
       throw new Error("client backend config values cannot contain newlines");
     }
   }
-  const path = clientBackendConfigPath(runtime, instance, env);
+  const path = options.destinationPath ?? clientBackendConfigPath(runtime, instance, env);
   replacePrivateFile(
     path,
     `${Object.entries(values)
@@ -226,6 +253,74 @@ function writeBackendConfig(
       .join("\n")}\n`,
   );
   return path;
+}
+
+export interface StagedGatewayBackendPaths {
+  directory: string;
+  backendConfigPath: string;
+  edgeDatabasePath: string;
+}
+
+function migrationOperationId(value: string): string {
+  if (!/^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(value)) {
+    throw new Error("client migration operation ID is invalid");
+  }
+  return value.toLowerCase();
+}
+
+export function stagedGatewayBackendPaths(
+  operationId: string,
+  env: NodeJS.ProcessEnv = process.env,
+): StagedGatewayBackendPaths {
+  const home = env.HOME ?? homedir();
+  const directory = join(home, ".agent-bridge", "client-migrations", migrationOperationId(operationId));
+  return {
+    directory,
+    backendConfigPath: join(directory, "target.config"),
+    edgeDatabasePath: join(directory, "target.edge.sqlite3"),
+  };
+}
+
+/** Write only the fixed private target backend for a persisted migration operation. */
+export function writeStagedGatewayBackendConfig(
+  runtime: InstallableRuntime,
+  identity: string,
+  instance: string,
+  operationId: string,
+  options: {
+    token: string;
+    gatewayUrl: string;
+    workspace: string;
+    credentialId: string;
+    principal: string;
+    env?: NodeJS.ProcessEnv;
+  },
+): StagedGatewayBackendPaths {
+  const env = options.env ?? process.env;
+  const paths = stagedGatewayBackendPaths(operationId, env);
+  writeClientBackendConfig(runtime, identity, instance, {
+    token: options.token,
+    env,
+    binding: {
+      credentialId: options.credentialId,
+      principal: options.principal,
+      instance,
+    },
+    destinationPath: paths.backendConfigPath,
+    gatewayUrl: options.gatewayUrl,
+    workspace: options.workspace,
+    edgeDatabasePath: paths.edgeDatabasePath,
+  });
+  return paths;
+}
+
+function writeBackendConfig(
+  runtime: InstallableRuntime,
+  identity: string,
+  instance: string,
+  options: { token?: string; env: NodeJS.ProcessEnv; binding?: ClientBackendBinding },
+): string {
+  return writeClientBackendConfig(runtime, identity, instance, options);
 }
 
 function writeJsonConfig(
@@ -742,7 +837,7 @@ export function installClient(
     token?: string;
     enrollmentFile?: string;
     recoverLock?: boolean;
-    backendBinding?: BackendBinding;
+    backendBinding?: ClientBackendBinding;
     env?: NodeJS.ProcessEnv;
   } = {},
   execute: Executor = (command, args) => spawnSync(command, args, { encoding: "utf8" }),

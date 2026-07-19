@@ -204,7 +204,7 @@ describe("Windows native private path smoke", () => {
     expect(operations.status, operations.stderr).toBe(0);
     expect(operations.stderr).toBe("");
     expect(JSON.parse(operations.stdout)).toMatchObject({
-      schemaVersion: 4,
+      schemaVersion: 5,
       operations: [{
         operationId,
         operation: "repair",

@@ -39,6 +39,21 @@ CREATE TABLE IF NOT EXISTS edge_scopes (
   last_attempt_at TEXT,
   cache_contract INTEGER NOT NULL DEFAULT 1
 );
+CREATE TABLE IF NOT EXISTS edge_migration_gates (
+  scope_key TEXT PRIMARY KEY REFERENCES edge_scopes(scope_key),
+  state TEXT NOT NULL CHECK(state IN ('active', 'draining', 'retired')),
+  operation_id TEXT,
+  lease_token TEXT,
+  lease_expires_at TEXT,
+  updated_at TEXT NOT NULL,
+  CHECK(
+    (state='active' AND operation_id IS NULL AND lease_token IS NULL AND lease_expires_at IS NULL)
+    OR (state='draining' AND operation_id IS NOT NULL AND lease_token IS NOT NULL AND lease_expires_at IS NOT NULL)
+    OR (state='retired' AND operation_id IS NOT NULL AND lease_token IS NULL AND lease_expires_at IS NULL)
+  )
+);
+CREATE INDEX IF NOT EXISTS edge_migration_gates_state
+  ON edge_migration_gates(state, lease_expires_at);
 CREATE TABLE IF NOT EXISTS edge_outbox (
   position INTEGER PRIMARY KEY AUTOINCREMENT,
   scope_key TEXT NOT NULL REFERENCES edge_scopes(scope_key),
@@ -59,6 +74,15 @@ CREATE TABLE IF NOT EXISTS edge_outbox (
 );
 CREATE INDEX IF NOT EXISTS edge_outbox_due
   ON edge_outbox(scope_key, state, available_at, position);
+CREATE TRIGGER IF NOT EXISTS edge_outbox_migration_gate_insert
+BEFORE INSERT ON edge_outbox
+WHEN NOT EXISTS (
+  SELECT 1 FROM edge_migration_gates
+  WHERE scope_key=NEW.scope_key AND state='active'
+)
+BEGIN
+  SELECT RAISE(ABORT, 'edge migration gate rejects outbox publication');
+END;
 CREATE TABLE IF NOT EXISTS edge_inbox (
   scope_key TEXT NOT NULL REFERENCES edge_scopes(scope_key),
   message_id TEXT NOT NULL,
@@ -127,10 +151,51 @@ export interface EdgeStats {
   lastOutboundSyncAt?: string;
   lastInboundSyncAt?: string;
   lastAttemptAt?: string;
+  migrationState: EdgeMigrationGateState;
+  migrationOperationId?: string;
+  migrationLeaseExpiresAt?: string;
+}
+
+export type EdgeMigrationGateState = "active" | "draining" | "retired";
+
+export interface EdgeMigrationGate {
+  scopeKey: string;
+  state: EdgeMigrationGateState;
+  operationId?: string;
+  leaseExpiresAt?: string;
+  updatedAt: string;
+}
+
+export interface EdgeDrainLease {
+  scopeKey: string;
+  operationId: string;
+  leaseToken: string;
+  leaseExpiresAt: string;
 }
 
 export class EdgeConflictError extends Error {
   readonly code = "edge_idempotency_conflict";
+}
+
+export class EdgeMigrationDrainingError extends Error {
+  readonly code = "client_migration_draining";
+  constructor(readonly gate: EdgeMigrationGate) {
+    super("edge scope is draining for a client migration");
+  }
+}
+
+export class EdgeMigrationRetiredError extends Error {
+  readonly code = "client_migration_retired";
+  constructor(readonly gate: EdgeMigrationGate) {
+    super("edge scope was retired by a client migration");
+  }
+}
+
+export class EdgeMigrationLeaseError extends Error {
+  readonly code = "client_migration_lease_lost";
+  constructor() {
+    super("client migration worker no longer holds the edge drain lease");
+  }
 }
 
 function canonical(value: JsonValue | undefined): string {
@@ -198,6 +263,13 @@ function parseMessage(value: unknown): BridgeMessage {
   return JSON.parse(String(value)) as BridgeMessage;
 }
 
+function safeOperationId(value: string): string {
+  if (!/^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(value)) {
+    throw new Error("client migration operation ID is invalid");
+  }
+  return value.toLowerCase();
+}
+
 export class SQLiteEdgeStore {
   private readonly db: Database;
   private readonly databasePath: string;
@@ -235,6 +307,61 @@ export class SQLiteEdgeStore {
 
   get scopeKey(): string {
     return this.key;
+  }
+
+  private gateFromRow(row: Row): EdgeMigrationGate {
+    const state = String(row.state);
+    if (state !== "active" && state !== "draining" && state !== "retired") {
+      throw new EdgeConflictError("edge migration gate state is invalid");
+    }
+    const operationId = row.operation_id === null || row.operation_id === undefined
+      ? undefined
+      : safeOperationId(String(row.operation_id));
+    const leaseExpiresAt = row.lease_expires_at === null || row.lease_expires_at === undefined
+      ? undefined
+      : String(row.lease_expires_at);
+    const updatedAt = String(row.updated_at ?? "");
+    if (!updatedAt || !Number.isFinite(Date.parse(updatedAt))) {
+      throw new EdgeConflictError("edge migration gate timestamp is invalid");
+    }
+    const leaseToken = row.lease_token === null || row.lease_token === undefined
+      ? undefined
+      : String(row.lease_token);
+    if ((state === "active" && (operationId || leaseExpiresAt || leaseToken))
+      || (state === "draining" && (!operationId || !leaseExpiresAt || !leaseToken))
+      || (state === "retired" && (!operationId || leaseExpiresAt || leaseToken))) {
+      throw new EdgeConflictError("edge migration gate state is invalid");
+    }
+    return { scopeKey: this.key, state, operationId, leaseExpiresAt, updatedAt };
+  }
+
+  private gateInTransaction(): EdgeMigrationGate {
+    const row = this.db.prepare(`SELECT state,operation_id,lease_token,lease_expires_at,updated_at
+      FROM edge_migration_gates WHERE scope_key=?`).get(this.key) as Row | undefined;
+    if (!row) throw new EdgeConflictError("edge migration gate is missing");
+    return this.gateFromRow(row);
+  }
+
+  private assertScopeActiveInTransaction(): void {
+    const gate = this.gateInTransaction();
+    if (gate.state === "draining") throw new EdgeMigrationDrainingError(gate);
+    if (gate.state === "retired") throw new EdgeMigrationRetiredError(gate);
+  }
+
+  private assertDrainLeaseInTransaction(lease: EdgeDrainLease, now: Date): void {
+    const gate = this.gateInTransaction();
+    if (gate.state !== "draining" || gate.operationId !== lease.operationId
+      || gate.leaseExpiresAt !== lease.leaseExpiresAt || Date.parse(gate.leaseExpiresAt) <= now.getTime()) {
+      throw new EdgeMigrationLeaseError();
+    }
+    const row = this.db.prepare("SELECT lease_token FROM edge_migration_gates WHERE scope_key=?")
+      .get(this.key) as Row;
+    if (row.lease_token !== lease.leaseToken) throw new EdgeMigrationLeaseError();
+  }
+
+  private assertClaimAuthorityInTransaction(now: Date, lease?: EdgeDrainLease): void {
+    if (lease) this.assertDrainLeaseInTransaction(lease, now);
+    else this.assertScopeActiveInTransaction();
   }
 
   async initialize(): Promise<void> {
@@ -285,6 +412,11 @@ export class SQLiteEdgeStore {
     this.db.prepare(`INSERT INTO edge_scopes (scope_key, endpoint_hash, workspace, agent)
       VALUES (?, ?, ?, ?) ON CONFLICT(scope_key) DO NOTHING`)
       .run(this.key, endpointHash, this.scope.principal.workspace, this.scope.principal.agent);
+    this.db.prepare(`INSERT INTO edge_migration_gates
+      (scope_key,state,operation_id,lease_token,lease_expires_at,updated_at)
+      SELECT scope_key,'active',NULL,NULL,NULL,? FROM edge_scopes
+      WHERE scope_key=? ON CONFLICT(scope_key) DO NOTHING`)
+      .run(new Date().toISOString(), this.key);
     const contract = this.db.prepare("SELECT cache_contract FROM edge_scopes WHERE scope_key=?").get(this.key) as Row;
     if (Number(contract.cache_contract) < 1) {
       this.db.exec("BEGIN IMMEDIATE");
@@ -299,6 +431,117 @@ export class SQLiteEdgeStore {
     await this.initialize();
   }
 
+  async migrationGate(): Promise<EdgeMigrationGate> {
+    await this.ready();
+    return this.gateInTransaction();
+  }
+
+  /** Refuse new normal-client writes before any remote attempt begins. */
+  async assertScopeActive(): Promise<void> {
+    await this.ready();
+    this.db.exec("BEGIN IMMEDIATE");
+    try {
+      this.assertScopeActiveInTransaction();
+      this.db.exec("COMMIT");
+    } catch (error) {
+      this.db.exec("ROLLBACK");
+      throw error;
+    }
+  }
+
+  /** Refuse remote publication unless this worker still owns the durable drain lease. */
+  async assertDrainLease(lease: EdgeDrainLease, now = new Date()): Promise<void> {
+    await this.ready();
+    if (lease.scopeKey !== this.key) throw new EdgeMigrationLeaseError();
+    this.db.exec("BEGIN IMMEDIATE");
+    try {
+      this.assertDrainLeaseInTransaction(lease, now);
+      this.db.exec("COMMIT");
+    } catch (error) {
+      this.db.exec("ROLLBACK");
+      throw error;
+    }
+  }
+
+  /**
+   * Claim the exclusive drain right for one persisted migration operation. The durable
+   * draining state survives a crashed worker. A replacement worker must use the same
+   * operation ID and wait for the prior worker lease to expire.
+   */
+  async acquireDrainLease(operationId: string, now = new Date(), leaseMs = 30_000): Promise<EdgeDrainLease> {
+    await this.ready();
+    const normalizedOperationId = safeOperationId(operationId);
+    const duration = Math.max(1, Math.trunc(leaseMs));
+    this.db.exec("BEGIN IMMEDIATE");
+    try {
+      const gate = this.gateInTransaction();
+      if (gate.state === "retired") throw new EdgeMigrationRetiredError(gate);
+      if (gate.state === "draining") {
+        if (gate.operationId !== normalizedOperationId) throw new EdgeMigrationDrainingError(gate);
+        if (gate.leaseExpiresAt && Date.parse(gate.leaseExpiresAt) > now.getTime()) {
+          throw new EdgeMigrationDrainingError(gate);
+        }
+      }
+      const leaseToken = randomUUID();
+      const leaseExpiresAt = new Date(now.getTime() + duration).toISOString();
+      const updated = this.db.prepare(`UPDATE edge_migration_gates
+        SET state='draining',operation_id=?,lease_token=?,lease_expires_at=?,updated_at=?
+        WHERE scope_key=?`).run(
+        normalizedOperationId, leaseToken, leaseExpiresAt, now.toISOString(), this.key,
+      );
+      if (updated.changes !== 1) throw new EdgeConflictError("edge migration gate could not be acquired");
+      this.db.exec("COMMIT");
+      return { scopeKey: this.key, operationId: normalizedOperationId, leaseToken, leaseExpiresAt };
+    } catch (error) {
+      this.db.exec("ROLLBACK");
+      throw error;
+    }
+  }
+
+  async renewDrainLease(lease: EdgeDrainLease, now = new Date(), leaseMs = 30_000): Promise<EdgeDrainLease> {
+    await this.ready();
+    if (lease.scopeKey !== this.key) throw new EdgeMigrationLeaseError();
+    const duration = Math.max(1, Math.trunc(leaseMs));
+    this.db.exec("BEGIN IMMEDIATE");
+    try {
+      this.assertDrainLeaseInTransaction(lease, now);
+      const leaseExpiresAt = new Date(now.getTime() + duration).toISOString();
+      const updated = this.db.prepare(`UPDATE edge_migration_gates
+        SET lease_expires_at=?,updated_at=? WHERE scope_key=? AND state='draining'
+          AND operation_id=? AND lease_token=? AND lease_expires_at=?`).run(
+        leaseExpiresAt, now.toISOString(), this.key, lease.operationId, lease.leaseToken, lease.leaseExpiresAt,
+      );
+      if (updated.changes !== 1) throw new EdgeMigrationLeaseError();
+      this.db.exec("COMMIT");
+      return { ...lease, leaseExpiresAt };
+    } catch (error) {
+      this.db.exec("ROLLBACK");
+      throw error;
+    }
+  }
+
+  async retireScope(lease: EdgeDrainLease, now = new Date()): Promise<void> {
+    await this.ready();
+    if (lease.scopeKey !== this.key) throw new EdgeMigrationLeaseError();
+    this.db.exec("BEGIN IMMEDIATE");
+    try {
+      this.assertDrainLeaseInTransaction(lease, now);
+      const stats = this.db.prepare(`SELECT count(*) AS count FROM edge_outbox
+        WHERE scope_key=?`).get(this.key) as Row;
+      if (Number(stats.count) !== 0) throw new EdgeConflictError("edge scope cannot retire with retained outbox work");
+      const updated = this.db.prepare(`UPDATE edge_migration_gates
+        SET state='retired',lease_token=NULL,lease_expires_at=NULL,updated_at=?
+        WHERE scope_key=? AND state='draining' AND operation_id=? AND lease_token=?`).run(
+        now.toISOString(), this.key, lease.operationId, lease.leaseToken,
+      );
+      if (updated.changes !== 1) throw new EdgeMigrationLeaseError();
+      this.db.exec("COMMIT");
+    } catch (error) {
+      this.db.exec("ROLLBACK");
+      throw error;
+    }
+  }
+
   async enqueue(input: PendingMessage, now = new Date()): Promise<EdgeEnqueueResult> {
     await this.ready();
     const draft = stableIdempotency(input);
@@ -307,6 +550,7 @@ export class SQLiteEdgeStore {
     const nowText = now.toISOString();
     this.db.exec("BEGIN IMMEDIATE");
     try {
+      this.assertScopeActiveInTransaction();
       const existing = this.db.prepare(`SELECT * FROM edge_outbox
         WHERE scope_key=? AND (message_id=? OR idempotency_key=?) ORDER BY position LIMIT 1`)
         .get(this.key, draft.id, draft.idempotencyKey!) as Row | undefined;
@@ -329,11 +573,12 @@ export class SQLiteEdgeStore {
     }
   }
 
-  async claimNext(now = new Date(), leaseMs = 30_000): Promise<EdgeOutboxRecord | undefined> {
+  async claimNext(now = new Date(), leaseMs = 30_000, migrationLease?: EdgeDrainLease): Promise<EdgeOutboxRecord | undefined> {
     await this.ready();
     const nowText = now.toISOString();
     this.db.exec("BEGIN IMMEDIATE");
     try {
+      this.assertClaimAuthorityInTransaction(now, migrationLease);
       const head = this.db.prepare(`SELECT * FROM edge_outbox
         WHERE scope_key=? AND state='pending' AND available_at<=?
           AND (lease_expires_at IS NULL OR lease_expires_at<=?)
@@ -599,6 +844,7 @@ export class SQLiteEdgeStore {
     const state = this.db.prepare(`SELECT pull_cursor, last_sync_at, last_error,
       last_outbound_sync_at,last_inbound_sync_at,last_attempt_at
       FROM edge_scopes WHERE scope_key=?`).get(this.key) as Row;
+    const migrationGate = this.gateInTransaction();
     const oldestDueAt = counts.oldest_due ? String(counts.oldest_due) : undefined;
     const oldestBlockedAt = Number(counts.blocked_age_unknown ?? 0) > 0
       ? undefined
@@ -623,6 +869,9 @@ export class SQLiteEdgeStore {
       lastOutboundSyncAt: state.last_outbound_sync_at ? String(state.last_outbound_sync_at) : undefined,
       lastInboundSyncAt: state.last_inbound_sync_at ? String(state.last_inbound_sync_at) : undefined,
       lastAttemptAt: state.last_attempt_at ? String(state.last_attempt_at) : undefined,
+      migrationState: migrationGate.state,
+      migrationOperationId: migrationGate.operationId,
+      migrationLeaseExpiresAt: migrationGate.leaseExpiresAt,
     };
   }
 

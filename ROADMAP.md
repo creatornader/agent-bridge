@@ -59,6 +59,12 @@ published and the supported clients pass a fresh end-to-end check.
   v4 requests. Repair remains monotonic, uninstall recovery is re-enrollment, and
   endpoint migration remains out of scope.
 
+- Inert gateway-client migration staging for managed clients. It probes active and
+  successor bearer credentials, records enrollment credential IDs and the source edge
+  scope, creates a private staged backend, and closes normal outbox publication when a
+  future drain lease begins. It does not modify the active registration or backend,
+  and it does not authorize cutover or prove database authority.
+
 - A pinned, non-root gateway image and a Compose development stack with ordered
   migration, restricted runtime-role bootstrap, health checks, private secret files,
   and a persistent PostgreSQL volume.
@@ -85,7 +91,9 @@ published and the supported clients pass a fresh end-to-end check.
 
 ### Installation and operations
 
-- Add endpoint migration tooling that does not strand an existing SQLite outbox.
+- Add an owner-mediated endpoint cutover that drains the recorded SQLite outbox. It
+  must prove that alternate URLs reach one database authority. Independent database
+  moves need a separate fence.
 - Publish a maintained client compatibility matrix.
 
 ### Storage lifecycle and observability

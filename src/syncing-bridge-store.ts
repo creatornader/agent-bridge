@@ -13,7 +13,12 @@ import type {
   MessageQuery,
 } from "./bridge-store.js";
 import {
+  EdgeMigrationDrainingError,
+  EdgeMigrationLeaseError,
+  EdgeMigrationRetiredError,
   edgeMessageFingerprint,
+  type EdgeDrainLease,
+  type EdgeMigrationGateState,
   type PendingMessage,
   SQLiteEdgeStore,
 } from "./sqlite-edge-store.js";
@@ -43,6 +48,9 @@ export interface SyncReport {
   lastSyncedAt?: string;
   lastError?: string;
   failureRetryable?: boolean;
+  migrationState?: EdgeMigrationGateState;
+  migrationOperationId?: string;
+  migrationLeaseExpiresAt?: string;
 }
 
 export interface SyncDiagnostics extends BridgeDiagnostics {
@@ -65,9 +73,12 @@ export interface SyncDiagnostics extends BridgeDiagnostics {
   lastOutboundSyncAt?: string;
   lastInboundSyncAt?: string;
   lastSyncAttemptAt?: string;
-  syncLoopState: "disabled" | "idle" | "running" | "backoff" | "stopped" | "failed";
+  syncLoopState: "disabled" | "idle" | "running" | "backoff" | "paused" | "stopped" | "failed";
   syncLoopError?: string;
   remoteError?: string;
+  migrationState: EdgeMigrationGateState;
+  migrationOperationId?: string;
+  migrationLeaseExpiresAt?: string;
 }
 
 export interface SyncingBridgeStoreOptions {
@@ -78,6 +89,7 @@ export interface SyncingBridgeStoreOptions {
   leaseMs?: number;
   autoSync?: boolean;
   idleDelayMs?: number;
+  edgeDrainLease?: EdgeDrainLease;
 }
 
 type FlushResult =
@@ -85,6 +97,7 @@ type FlushResult =
   | { state: "committed"; result: InsertMessageResult; messageId: string }
   | { state: "retry"; error: Error; retryable: boolean }
   | { state: "blocked"; error: Error; messageId: string }
+  | { state: "paused"; error: EdgeMigrationDrainingError | EdgeMigrationRetiredError | EdgeMigrationLeaseError }
   | { state: "fatal"; error: Error };
 
 function statusOf(error: unknown): number | undefined {
@@ -105,7 +118,7 @@ export function isRetryableSyncError(error: unknown): boolean {
   const status = statusOf(error);
   const code = codeOf(error);
   if (["network_error", "request_timeout"].includes(code)) return true;
-  if (["invalid_input", "idempotency_conflict", "edge_idempotency_conflict", "principal_mismatch", "protocol_mismatch", "store_closed"].includes(code)) return false;
+  if (["invalid_input", "idempotency_conflict", "edge_idempotency_conflict", "principal_mismatch", "protocol_mismatch", "store_closed", "client_migration_draining", "client_migration_retired", "client_migration_lease_lost"].includes(code)) return false;
   return status === 0 || status === 408 || status === 425 ||
     status === 429 || (status !== undefined && status >= 500);
 }
@@ -122,6 +135,7 @@ export class SyncingBridgeStore implements BridgeStore {
   private readonly leaseMs: number;
   private readonly autoSync: boolean;
   private readonly idleDelayMs: number;
+  private readonly edgeDrainLease?: EdgeDrainLease;
   private remoteReady: Promise<void> | undefined;
   private stopped = false;
   private wakeTimer: ReturnType<typeof setTimeout> | undefined;
@@ -146,6 +160,7 @@ export class SyncingBridgeStore implements BridgeStore {
     this.leaseMs = options.leaseMs ?? 30_000;
     this.autoSync = options.autoSync ?? true;
     this.idleDelayMs = Math.max(this.baseDelayMs + 1, options.idleDelayMs ?? 30_000);
+    this.edgeDrainLease = options.edgeDrainLease;
     this.loopState = this.autoSync ? "idle" : "disabled";
   }
 
@@ -208,6 +223,11 @@ export class SyncingBridgeStore implements BridgeStore {
       this.loopState = "running";
       const report = await this.sync({ maxPush: 100, maxPages: 1, signal: this.closeController.signal });
       if (this.stopped) break;
+      if (report.migrationState !== "active" && !this.edgeDrainLease) {
+        this.loopState = "paused";
+        await this.wait(this.idleDelayMs);
+        continue;
+      }
       if (report.failureRetryable === false) {
         this.backgroundError = Object.assign(
           new Error(`gateway synchronization failed permanently: ${report.lastError ?? "sync_error"}`),
@@ -267,6 +287,15 @@ export class SyncingBridgeStore implements BridgeStore {
   private async flushOne(signal?: AbortSignal): Promise<FlushResult> {
     await this.edge.noteAttempt(this.now());
     try {
+      if (this.edgeDrainLease) await this.edge.assertDrainLease(this.edgeDrainLease, this.now());
+      else await this.edge.assertScopeActive();
+    } catch (error) {
+      if (error instanceof EdgeMigrationDrainingError
+        || error instanceof EdgeMigrationRetiredError
+        || error instanceof EdgeMigrationLeaseError) return { state: "paused", error };
+      throw error;
+    }
+    try {
       await this.ensureRemote(signal);
     } catch (error) {
       await this.edge.noteError(codeOf(error));
@@ -276,7 +305,15 @@ export class SyncingBridgeStore implements BridgeStore {
         retryable: isRetryableSyncError(error),
       };
     }
-    const record = await this.edge.claimNext(this.now(), this.leaseMs);
+    let record;
+    try {
+      record = await this.edge.claimNext(this.now(), this.leaseMs, this.edgeDrainLease);
+    } catch (error) {
+      if (error instanceof EdgeMigrationDrainingError
+        || error instanceof EdgeMigrationRetiredError
+        || error instanceof EdgeMigrationLeaseError) return { state: "paused", error };
+      throw error;
+    }
     if (!record) return { state: "empty" };
     try {
       const result = await this.remote.insertMessage(record.draft, { signal });
@@ -322,6 +359,9 @@ export class SyncingBridgeStore implements BridgeStore {
   async insertMessage(message: PendingMessage): Promise<SyncInsertResult> {
     this.assertHealthy();
     this.assertPrincipal({ workspace: message.workspace, agent: message.source }, false);
+    // A drain lease authorizes only claimNext for work that existed before the
+    // gate closed. It never authorizes new publication or an early remote call.
+    await this.edge.assertScopeActive();
     let remoteError: unknown;
     try {
       await this.ensureRemote();
@@ -430,6 +470,10 @@ export class SyncingBridgeStore implements BridgeStore {
         continue;
       }
       if (result.state === "fatal") throw result.error;
+      if (result.state === "paused") {
+        lastError = codeOf(result.error);
+        break;
+      }
       lastError = codeOf(result.error);
       failureRetryable = result.state === "retry" ? result.retryable : undefined;
       if (result.state === "retry") online = false;
@@ -437,7 +481,7 @@ export class SyncingBridgeStore implements BridgeStore {
     }
 
     let pulled = 0;
-    if (maxPages > 0 && !this.cancelled(options.signal)) {
+    if (maxPages > 0 && !this.cancelled(options.signal) && !lastError?.startsWith("client_migration_")) {
       const pull = await this.pull(maxPages, options.signal);
       online = online && pull.online;
       pulled = pull.pulled;
@@ -460,6 +504,9 @@ export class SyncingBridgeStore implements BridgeStore {
       lastSyncedAt: stats.lastSyncAt,
       lastError: lastError ?? stats.lastError,
       failureRetryable,
+      migrationState: stats.migrationState,
+      migrationOperationId: stats.migrationOperationId,
+      migrationLeaseExpiresAt: stats.migrationLeaseExpiresAt,
     };
   }
 
@@ -597,6 +644,9 @@ export class SyncingBridgeStore implements BridgeStore {
       syncLoopState: this.backgroundError ? "failed" : this.loopState,
       syncLoopError: this.backgroundError ? codeOf(this.backgroundError) : undefined,
       remoteError,
+      migrationState: edge.migrationState,
+      migrationOperationId: edge.migrationOperationId,
+      migrationLeaseExpiresAt: edge.migrationLeaseExpiresAt,
     };
   }
 

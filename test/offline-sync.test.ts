@@ -188,6 +188,127 @@ describe("offline SQLite synchronization", () => {
     await localEdge.close();
   });
 
+  it("closes normal publication before a remote attempt while a stage lease drains prior work", async () => {
+    const root = directory();
+    const principal = { workspace: "acme", agent: "sender", instance: "desktop" };
+    const databasePath = join(root, "edge.sqlite3");
+    const writer = edge(databasePath, principal);
+    const now = new Date("2026-07-19T12:00:00.000Z");
+    await writer.enqueue(draft(principal), now);
+    await writer.assertScopeActive();
+    const lease = await writer.acquireDrainLease("019f7f32-0000-7000-8000-000000000001", now, 60_000);
+
+    const remote = new SwitchableRemote(); remote.online = true;
+    const initialize = vi.spyOn(remote, "initialize");
+    const normal = new SyncingBridgeStore(edge(databasePath, principal), remote, principal, { autoSync: false });
+    await normal.initialize();
+    await expect(normal.insertMessage(draft(principal, "019f7f32-0000-7000-8000-000000000002")))
+      .rejects.toMatchObject({ code: "client_migration_draining" });
+    await expect(normal.sync({ maxPush: 1, maxPages: 1 })).resolves.toMatchObject({
+      pushed: 0,
+      pulled: 0,
+      lastError: "client_migration_draining",
+      migrationState: "draining",
+    });
+    expect(initialize).not.toHaveBeenCalled();
+
+    const drainer = new SyncingBridgeStore(edge(databasePath, principal), remote, principal, {
+      autoSync: false,
+      edgeDrainLease: lease,
+      now: () => now,
+    });
+    await drainer.initialize();
+    await expect(drainer.sync({ maxPush: 1, maxPages: 0 })).resolves.toMatchObject({ pushed: 1, pending: 0 });
+    await writer.retireScope(lease, new Date(now.getTime() + 1_000));
+    await expect(writer.enqueue(draft(principal, "019f7f32-0000-7000-8000-000000000003")))
+      .rejects.toMatchObject({ code: "client_migration_retired" });
+    await drainer.close();
+    await normal.close();
+    await writer.close();
+  });
+
+  it("refuses an expired stage lease without an outbound remote attempt", async () => {
+    const root = directory();
+    const principal = { workspace: "acme", agent: "sender" };
+    const databasePath = join(root, "edge.sqlite3");
+    const local = edge(databasePath, principal);
+    const now = new Date("2026-07-19T12:00:00.000Z");
+    await local.enqueue(draft(principal), now);
+    const lease = await local.acquireDrainLease("019f7f32-0000-7000-8000-000000000004", now, 1_000);
+    const remote = new SwitchableRemote(); remote.online = true;
+    const initialize = vi.spyOn(remote, "initialize");
+    const drainer = new SyncingBridgeStore(edge(databasePath, principal), remote, principal, {
+      autoSync: false,
+      edgeDrainLease: lease,
+      now: () => new Date(now.getTime() + 1_001),
+    });
+    await drainer.initialize();
+    await expect(drainer.sync({ maxPush: 1, maxPages: 0 })).resolves.toMatchObject({
+      pushed: 0,
+      lastError: "client_migration_lease_lost",
+      migrationState: "draining",
+    });
+    expect(initialize).not.toHaveBeenCalled();
+    await drainer.close();
+    await local.close();
+  });
+
+  it("database-fences a pre-gate raw SQLite publisher", async () => {
+    const root = directory();
+    const principal = { workspace: "acme", agent: "sender" };
+    const databasePath = join(root, "edge.sqlite3");
+    const bootstrap = edge(databasePath, principal);
+    await bootstrap.initialize();
+    await bootstrap.close();
+    const { DatabaseSync } = require("node:sqlite") as typeof import("node:sqlite");
+    const legacy = new DatabaseSync(databasePath);
+    legacy.exec("DROP TRIGGER edge_outbox_migration_gate_insert");
+    const legacyInsert = legacy.prepare(`INSERT INTO edge_outbox
+      (scope_key,message_id,idempotency_key,payload_hash,draft_json,state,attempts,available_at,created_at)
+      VALUES (?,?,?,?,?,'pending',0,?,?)`);
+    const now = new Date("2026-07-19T12:00:00.000Z");
+    const current = edge(databasePath, principal);
+    await current.initialize();
+    await current.acquireDrainLease("019f7f32-0000-7000-8000-000000000005", now, 60_000);
+    expect(() => legacyInsert.run(
+      current.scopeKey,
+      "019f7f32-0000-7000-8000-000000000006",
+      "legacy-publisher-key",
+      "legacy-payload-hash",
+      "{}",
+      now.toISOString(),
+      now.toISOString(),
+    )).toThrow("edge migration gate rejects outbox publication");
+    legacy.close();
+    await current.close();
+  });
+
+  it("persists one drain lease across reopen, renewal, and expiry", async () => {
+    const root = directory();
+    const principal = { workspace: "acme", agent: "sender" };
+    const databasePath = join(root, "edge.sqlite3");
+    const now = new Date("2026-07-19T12:00:00.000Z");
+    const first = edge(databasePath, principal);
+    const lease = await first.acquireDrainLease("019f7f32-0000-7000-8000-000000000007", now, 1_000);
+    await first.close();
+
+    const reopened = edge(databasePath, principal);
+    await expect(reopened.migrationGate()).resolves.toMatchObject({
+      state: "draining", operationId: lease.operationId, leaseExpiresAt: lease.leaseExpiresAt,
+    });
+    await expect(reopened.acquireDrainLease("019f7f32-0000-7000-8000-000000000008", now, 1_000))
+      .rejects.toMatchObject({ code: "client_migration_draining" });
+    const renewed = await reopened.renewDrainLease(lease, new Date(now.getTime() + 500), 2_000);
+    await expect(reopened.assertDrainLease(lease, new Date(now.getTime() + 501)))
+      .rejects.toMatchObject({ code: "client_migration_lease_lost" });
+    await expect(reopened.assertDrainLease(renewed, new Date(now.getTime() + 501))).resolves.toBeUndefined();
+    const replacement = await reopened.acquireDrainLease(
+      lease.operationId, new Date(now.getTime() + 2_501), 1_000,
+    );
+    expect(replacement.leaseToken).not.toBe(renewed.leaseToken);
+    await reopened.close();
+  });
+
   it("measures blocked age from the blocked transition", async () => {
     const root = directory();
     const principal = { workspace: "acme", agent: "sender" };
@@ -893,7 +1014,7 @@ describe("offline SQLite synchronization", () => {
     await upgraded.close();
     const verified = new DatabaseSync(path, { readOnly: true });
     expect(sqliteSchemaContractHash(verified)).toBe(EDGE_SQLITE_SCHEMA_CONTRACTS.find(
-      (contract) => contract.id === "current-upgraded-project-column",
+      (contract) => contract.id === "current-upgraded-project-column-migration-gate",
     )!.sha256);
     verified.close();
   });
@@ -981,7 +1102,7 @@ describe("offline SQLite synchronization", () => {
     }>;
     expect(columns.filter((column) => column.name === "project")).toHaveLength(1);
     expect(sqliteSchemaContractHash(upgraded)).toBe(EDGE_SQLITE_SCHEMA_CONTRACTS.find(
-      (contract) => contract.id === "current-upgraded-project-column",
+      (contract) => contract.id === "current-upgraded-project-column-migration-gate",
     )!.sha256);
     upgraded.close();
   }, process.platform === "win32" ? 45_000 : 15_000);

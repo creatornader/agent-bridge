@@ -452,6 +452,8 @@ agent-bridge clients uninstall codex --identity codex --instance <stable-key> --
 agent-bridge clients rollback <update-operation-uuid> --identity codex
 agent-bridge clients rollback <update-operation-uuid> --identity codex --apply
 agent-bridge clients resume <operation-uuid>
+agent-bridge clients migrate stage codex --identity codex --instance <stable-key> \\
+  --enrollment-file <private-path>
 ```
 
 These commands return a plan by default. A managed registration that is already exact
@@ -494,8 +496,9 @@ and identity. It uses the recorded request instead of new flags. `--recover-lock
 requires `--apply` and only removes an old same-host lock after the process-death
 proof succeeds. Never delete a lock manually.
 
-`clients resume <operation-uuid>` takes only recorded v3 or supported v4 operation authority and
-an optional `--recover-lock`. It does not accept a replacement action, runtime,
+`clients resume <operation-uuid>` takes only recorded v3, supported v4, or v5
+migration-stage operation authority and an optional `--recover-lock`. It does not
+accept a replacement action, runtime,
 instance, identity, command, backend path, scope, or config locator. Use it for every
 generic resume. It is also required when an uninstall has already deleted its final
 metadata file, because the action-specific command has no metadata record left to
@@ -558,6 +561,18 @@ config shapes vary.
 
 The lifecycle ownership boundary and deferred endpoint-migration constraints are
 recorded in [ADR 0004](docs/decisions/0004-client-lifecycle-and-endpoint-migration.md).
+
+`clients migrate stage <runtime> --identity <name> --instance <key>
+--enrollment-file <path> --apply` prepares a private gateway successor from a rotation
+enrollment. It does not change the active registration or backend, and it does not
+authorize cutover. Staging records endpoint digests, credential IDs, the source edge
+path and scope key, and the predecessor grace cutoff without recording tokens or raw
+gateway URLs. These artifacts may support a later, separate drain. The stage is inert
+and does not prove that source and target reach the same database authority. A later
+cutover is limited to alternate URLs and must dynamically attest one logical authority.
+Moving to an independent database needs a separate owner-mediated process.
+The source backend must name an absolute, normalized edge database file. Relative and
+in-memory edge paths cannot identify one durable outbox and are rejected.
 
 [`SKILL.md`](SKILL.md) provides concise runtime-neutral operating instructions for agents. [`llms.txt`](llms.txt) gives tools and model crawlers a compact map of the package, modes, commands, and identity rules.
 
