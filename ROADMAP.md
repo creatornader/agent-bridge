@@ -57,13 +57,19 @@ published and the supported clients pass a fresh end-to-end check.
   `--apply`, creates a separate reverse journal after it proves the recorded forward
   state. Generic `clients resume` derives authority only from recorded v3 or supported
   v4 requests. Repair remains monotonic, uninstall recovery is re-enrollment, and
-  endpoint migration remains out of scope.
+  endpoint cutover remains out of scope.
 
 - Inert gateway-client migration staging for managed clients. It probes active and
   successor bearer credentials, records enrollment credential IDs and the source edge
   scope, creates a private staged backend, and closes normal outbox publication when a
   future drain lease begins. It does not modify the active registration or backend,
   and it does not authorize cutover or prove database authority.
+
+- Gateway-only HTTP 2.1 endpoint-migration challenge operations. An active issuer and
+  direct active successor use a 64-character challenge bound to the immutable gateway
+  authority UUID. PostgreSQL stores only a domain-separated commitment for at most 60
+  seconds. The challenge does not authorize endpoint cutover or prove two URLs reach
+  the same database authority.
 
 - A pinned, non-root gateway image and a Compose development stack with ordered
   migration, restricted runtime-role bootstrap, health checks, private secret files,

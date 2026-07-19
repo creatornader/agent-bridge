@@ -87,6 +87,8 @@ The canonical v2 operation registry generates [JSON Schema](schemas/agent-bridge
 
 Protocol 2.1 uses a gateway-first rollout. An upgraded gateway continues to serve released 2.0 clients, including headerless requests and their direct or null delivery results. A 2.1 client probes before mutation and proceeds only when complete, consistent response headers select 2.1 and advertise 2.1 support. It rejects mutation against a headerless or 2.0 gateway instead of downgrading. Upgrade the gateway before installing or starting 2.1 clients.
 
+Two gateway-only HTTP 2.1 operations establish a short-lived endpoint-migration challenge. The issuer supplies a caller-generated 64-character lowercase hexadecimal challenge, the expected gateway authority ID, and a direct successor credential. The successor consumes the same challenge with the expected authority ID and issuer credential. Both calls require active transaction-bound authority and use the canonical credential and operation rate buckets. PostgreSQL stores only a domain-separated SHA-256 commitment. A challenge expires within 60 seconds and does not authorize endpoint cutover.
+
 The OpenAPI paths describe protocol 2.1. The embedded `x-agent-bridge-protocol-2.0` and `x-agent-bridge-schemas-2.0` vendor extensions contain frozen compatibility schema metadata for released 2.0 clients. They are not a second OpenAPI description. Gateway credentials enforce the operation scopes declared by the canonical registry. Local mode uses process identity, and legacy mode uses its configured key. Provider-neutral artifacts report this difference instead of claiming one authorization model for every backend.
 
 ## Architecture
@@ -326,7 +328,8 @@ agent-bridge dr restore \
 PostgreSQL backup takes a repeatable-read snapshot while holding the native DR fence.
 It stores the `agent_bridge` schema dump plus a canonical inventory of required roles,
 memberships, and default privileges. The backup excludes transient data from agent
-instances, rate-limit buckets, request authority, and archive transaction authority.
+instances, rate-limit buckets, request authority, endpoint-migration challenge rows, and
+archive transaction authority.
 Restore turns claimed deliveries into immediately retryable work because a database
 restore cannot preserve a live lease.
 
@@ -961,7 +964,7 @@ Each gateway operation checks the scopes in the canonical registry. `capabilitie
 
 Migration 012 makes PostgreSQL the authority for each production gateway request that passes credential preflight. Node hashes the bearer credential before PostgreSQL receives it. The gateway checks out one connection, opens one explicit transaction, matches the credential ID and hash inside a narrow security-definer function, and derives the workspace, principal, and scopes from current database state. Security accounting and domain work share that transaction and backend. Delivery claim, cancel, and requeue reuse it without nested `BEGIN`. Runtime logins cannot read credential hashes, agent records, workspace records, or request-authority records.
 
-Migration 017 adds one immutable PostgreSQL authority UUID. The released request-authority opener keeps its return shape. Production gateway requests use a bound opener that returns the authority UUID with the database-derived credential. Authenticated gateway `/v2/status` replies include `gatewayAuthorityId` and `credentialId` when transaction-bound request authority is active. These additive fields remain optional in HTTP 2.1, and capabilities do not expose them. A later endpoint-migration client will require valid bindings before it switches a gateway URL.
+Migration 017 adds one immutable PostgreSQL authority UUID. The released request-authority opener keeps its return shape. Production gateway requests use a bound opener that returns the authority UUID with the database-derived credential. Authenticated gateway `/v2/status` replies include `gatewayAuthorityId` and `credentialId` when transaction-bound request authority is active. These additive fields remain optional in HTTP 2.1, and capabilities do not expose them. Migration 018 uses the same bound authority to issue and consume an expiring challenge for a direct credential successor. The challenge proves neither a database migration nor endpoint cutover.
 
 Migration 013 enables and forces row-level security on messages, receipts, deliveries, delivery events, and presence. Policies read workspace and principal from the transaction-bound request authority. The runtime role cannot set that authority through session variables, inherit a table-owner role, or bypass RLS. Separate no-login roles own domain tables, read request context, and write delivery audit events. Delivery identity and publisher bindings are immutable. A trigger lets recipients perform recipient lifecycle actions and reserves cancel and requeue for publishers.
 

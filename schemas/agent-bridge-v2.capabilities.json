@@ -135,6 +135,24 @@
       ]
     },
     {
+      "id": "issue_endpoint_migration_challenge",
+      "summary": "Issue a short-lived endpoint migration challenge commitment.",
+      "http": {
+        "method": "POST",
+        "path": "/v2/endpoint-migration-challenges"
+      },
+      "requiredScopes": []
+    },
+    {
+      "id": "consume_endpoint_migration_challenge",
+      "summary": "Consume a short-lived endpoint migration challenge commitment.",
+      "http": {
+        "method": "POST",
+        "path": "/v2/endpoint-migration-challenges/consume"
+      },
+      "requiredScopes": []
+    },
+    {
       "id": "gateway_metrics",
       "summary": "Read Prometheus gateway counters.",
       "http": {

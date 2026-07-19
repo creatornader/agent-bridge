@@ -412,6 +412,34 @@ export function createGateway(options: GatewayOptions) {
         return;
       }
 
+      if (req.method === "POST" && url.pathname === "/v2/endpoint-migration-challenges") {
+        requireCurrentProtocol(response);
+        await authorize("issue_endpoint_migration_challenge");
+        const input = validateRequestForProtocol("issue_endpoint_migration_challenge", await requestBody(), selectedProtocol(response));
+        if (!authority?.endpointMigrationChallenges) throw Object.assign(new Error("endpoint migration challenges require request authority"), { status: 503, code: "security_unavailable" });
+        active(abort.signal);
+        await authority.beginDomainWork(); mutationStarted = true;
+        sendOperation(response, 200, "issue_endpoint_migration_challenge", await authority.endpointMigrationChallenges.issue({
+          challenge: String(input.challenge),
+          expectedGatewayAuthorityId: String(input.expectedGatewayAuthorityId),
+          verifierCredentialId: String(input.verifierCredentialId),
+        }), requestId); return;
+      }
+
+      if (req.method === "POST" && url.pathname === "/v2/endpoint-migration-challenges/consume") {
+        requireCurrentProtocol(response);
+        await authorize("consume_endpoint_migration_challenge");
+        const input = validateRequestForProtocol("consume_endpoint_migration_challenge", await requestBody(), selectedProtocol(response));
+        if (!authority?.endpointMigrationChallenges) throw Object.assign(new Error("endpoint migration challenges require request authority"), { status: 503, code: "security_unavailable" });
+        active(abort.signal);
+        await authority.beginDomainWork(); mutationStarted = true;
+        sendOperation(response, 200, "consume_endpoint_migration_challenge", await authority.endpointMigrationChallenges.consume({
+          challenge: String(input.challenge),
+          expectedGatewayAuthorityId: String(input.expectedGatewayAuthorityId),
+          issuerCredentialId: String(input.issuerCredentialId),
+        }), requestId); return;
+      }
+
       if (req.method === "POST" && url.pathname === "/v2/messages") {
         await authorize("publish_message");
         const input = validateRequestForProtocol("publish_message", await requestBody(), String(response.getHeader(PROTOCOL_HEADER)));

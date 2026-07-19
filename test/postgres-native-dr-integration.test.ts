@@ -357,6 +357,48 @@ integration.each(matrix)("PostgreSQL $major native DR", ({ major, image, port })
     }
   }, 240_000);
 
+  it("refuses native DR backup when gateway authority trigger, catalog, or ACLs drift", async () => {
+    const directory = mkdtempSync(join(process.cwd(), `.agent-bridge-pg${major}-dr-readiness-`));
+    residues.add(directory);
+    const sourceName = `agent-bridge-native-dr-${major}-readiness`;
+    const sourceUrl = await startDatabase(sourceName, image, port, "source_admin", directory);
+    const source = new pg.Pool({ connectionString: sourceUrl, max: 2 });
+    try {
+      await runMigrations(source, migrationDirectory);
+      const suffix = createHash("md5").update("agent_bridge").digest("hex").slice(0, 16);
+      const runtimeRole = `agent_bridge_runtime_${suffix}`;
+      const drifts = [
+        {
+          apply: "ALTER TABLE agent_bridge.gateway_authority DISABLE TRIGGER gateway_authority_immutable",
+          undo: "ALTER TABLE agent_bridge.gateway_authority ENABLE TRIGGER gateway_authority_immutable",
+        },
+        {
+          apply: `ALTER TABLE agent_bridge.gateway_authority
+            RENAME CONSTRAINT gateway_authority_id_unique TO gateway_authority_id_unique_drifted`,
+          undo: `ALTER TABLE agent_bridge.gateway_authority
+            RENAME CONSTRAINT gateway_authority_id_unique_drifted TO gateway_authority_id_unique`,
+        },
+        {
+          apply: `GRANT SELECT ON agent_bridge.gateway_authority TO ${runtimeRole}`,
+          undo: `REVOKE SELECT ON agent_bridge.gateway_authority FROM ${runtimeRole}`,
+        },
+      ];
+      for (const drift of drifts) {
+        await source.query(drift.apply);
+        await expect(backupPostgresNativeDr({
+          stagingDirectory: directory,
+          environment: { AGENT_BRIDGE_DR_SOURCE_DATABASE_URL: sourceUrl },
+          dependencies: dockerToolDependencies(image, sourceName, directory),
+        })).rejects.toMatchObject({ code: "SOURCE_NOT_READY" });
+        await source.query(drift.undo);
+      }
+    } finally {
+      await source.end();
+      docker(["rm", "-f", sourceName], true);
+      residues.delete(`container:${sourceName}`);
+    }
+  }, 240_000);
+
   it("roundtrips through the public DR CLI handoff", async () => {
     const directory = mkdtempSync(join(process.cwd(), `.agent-bridge-pg${major}-cli-`));
     residues.add(directory);

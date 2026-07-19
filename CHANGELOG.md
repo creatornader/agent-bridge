@@ -8,6 +8,13 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and 
 
 ### Added
 
+- Add migration 018 with two gateway-only HTTP 2.1 endpoint-migration challenge
+  operations. An active issuer and direct active successor use the same 64-character
+  challenge against the immutable gateway authority UUID. PostgreSQL stores only a
+  domain-separated commitment, expires it within 60 seconds, and keeps issue, consume,
+  and expiration events append-only. The challenge does not authorize client endpoint
+  cutover.
+
 - Add migration 017 with an immutable PostgreSQL gateway authority UUID. Production
   request authority now uses a bound opener without changing the released opener's
   return shape. Authenticated gateway status adds optional `gatewayAuthorityId` and
@@ -31,7 +38,7 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and 
   and writes prior metadata last. Claude Desktop replaces only its Agent Bridge entry.
   Generic `clients resume` also resumes a reverse journal. The v4 source completion
   keeps only a bounded credential-free inverse contract. Repair remains monotonic,
-  uninstall stays forward-only, and endpoint migration is still unavailable. Managed
+  uninstall stays forward-only, and endpoint cutover is still unavailable. Managed
   operation summaries now report schema version 5 and include the `rollback` kind.
 
 - Add forward-only `clients uninstall` for metadata-owned Codex, Claude Code, and

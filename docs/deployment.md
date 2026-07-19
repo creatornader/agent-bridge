@@ -148,8 +148,9 @@ owner-control state, or security events.
    clients.
 2. Drain or preserve each gateway client's SQLite outbox. Do not discard an edge store
    with queued publications.
-3. Drain old gateway instances or remove them from traffic before migration 017. An old
-   process can serve ordinary requests until it exits even though its `/readyz` probe
+3. Drain old gateway instances or remove them from traffic before migration 017, then
+   keep them out of traffic before migration 018. An old process can serve ordinary
+   requests until it exits even though its `/readyz` probe
    fails after the newer migration is applied.
 4. Create and verify a native DR backup.
 5. Stop schema-changing jobs other than the selected migration job.

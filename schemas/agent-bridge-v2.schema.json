@@ -611,6 +611,111 @@
       },
       "additionalProperties": true
     },
+    "issue_endpoint_migration_challengeRequest": {
+      "type": "object",
+      "required": [
+        "challenge",
+        "expectedGatewayAuthorityId",
+        "verifierCredentialId"
+      ],
+      "properties": {
+        "challenge": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{64}$"
+        },
+        "expectedGatewayAuthorityId": {
+          "type": "string",
+          "pattern": "^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}$"
+        },
+        "verifierCredentialId": {
+          "type": "string",
+          "pattern": "^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}$"
+        }
+      },
+      "additionalProperties": false
+    },
+    "issue_endpoint_migration_challengeResponse": {
+      "type": "object",
+      "required": [
+        "gatewayAuthorityId",
+        "issuerCredentialId",
+        "verifierCredentialId",
+        "expiresAt"
+      ],
+      "properties": {
+        "gatewayAuthorityId": {
+          "type": "string"
+        },
+        "issuerCredentialId": {
+          "type": "string"
+        },
+        "verifierCredentialId": {
+          "type": "string"
+        },
+        "expiresAt": {
+          "type": "string"
+        }
+      },
+      "additionalProperties": false
+    },
+    "consume_endpoint_migration_challengeRequest": {
+      "type": "object",
+      "required": [
+        "challenge",
+        "expectedGatewayAuthorityId",
+        "issuerCredentialId"
+      ],
+      "properties": {
+        "challenge": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{64}$"
+        },
+        "expectedGatewayAuthorityId": {
+          "type": "string",
+          "pattern": "^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}$"
+        },
+        "issuerCredentialId": {
+          "type": "string",
+          "pattern": "^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}$"
+        }
+      },
+      "additionalProperties": false
+    },
+    "consume_endpoint_migration_challengeResponse": {
+      "type": "object",
+      "required": [
+        "gatewayAuthorityId",
+        "issuerCredentialId",
+        "verifierCredentialId",
+        "expiresAt",
+        "consumed"
+      ],
+      "properties": {
+        "gatewayAuthorityId": {
+          "type": "string"
+        },
+        "issuerCredentialId": {
+          "type": "string"
+        },
+        "verifierCredentialId": {
+          "type": "string"
+        },
+        "expiresAt": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "consumed": {
+          "type": "boolean"
+        }
+      },
+      "additionalProperties": false
+    },
     "client_statusRequest": {
       "type": "object",
       "properties": {},

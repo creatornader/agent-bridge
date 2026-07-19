@@ -1367,6 +1367,1017 @@
         }
       }
     },
+    "/v2/endpoint-migration-challenges": {
+      "post": {
+        "operationId": "issue_endpoint_migration_challenge",
+        "summary": "Issue a short-lived endpoint migration challenge commitment.",
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "x-agent-bridge-required-scopes": [],
+        "x-agent-bridge-scope-enforcement": true,
+        "parameters": [
+          {
+            "name": "x-agent-bridge-protocol-version",
+            "in": "header",
+            "required": true,
+            "description": "This OpenAPI operation describes protocol 2.1. Headerless protocol 2.0 uses the separate schemas named by x-agent-bridge-protocol-2.0.",
+            "schema": {
+              "type": "string",
+              "enum": [
+                "2.1"
+              ]
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "required": [
+                  "challenge",
+                  "expectedGatewayAuthorityId",
+                  "verifierCredentialId"
+                ],
+                "properties": {
+                  "challenge": {
+                    "type": "string",
+                    "pattern": "^[0-9a-f]{64}$"
+                  },
+                  "expectedGatewayAuthorityId": {
+                    "type": "string",
+                    "pattern": "^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}$"
+                  },
+                  "verifierCredentialId": {
+                    "type": "string",
+                    "pattern": "^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}$"
+                  }
+                },
+                "additionalProperties": false
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Successful response.",
+            "headers": {
+              "x-agent-bridge-protocol-version": {
+                "description": "Selected Agent Bridge protocol version.",
+                "required": true,
+                "schema": {
+                  "type": "string",
+                  "enum": [
+                    "2.0",
+                    "2.1"
+                  ]
+                }
+              },
+              "x-agent-bridge-supported-protocol-versions": {
+                "description": "Comma-separated protocol versions supported by this gateway.",
+                "required": true,
+                "schema": {
+                  "type": "string"
+                }
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "required": [
+                    "gatewayAuthorityId",
+                    "issuerCredentialId",
+                    "verifierCredentialId",
+                    "expiresAt"
+                  ],
+                  "properties": {
+                    "gatewayAuthorityId": {
+                      "type": "string"
+                    },
+                    "issuerCredentialId": {
+                      "type": "string"
+                    },
+                    "verifierCredentialId": {
+                      "type": "string"
+                    },
+                    "expiresAt": {
+                      "type": "string"
+                    }
+                  },
+                  "additionalProperties": false
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "The request does not match the operation contract.",
+            "headers": {
+              "x-agent-bridge-protocol-version": {
+                "description": "Selected Agent Bridge protocol version.",
+                "required": true,
+                "schema": {
+                  "type": "string",
+                  "enum": [
+                    "2.0",
+                    "2.1"
+                  ]
+                }
+              },
+              "x-agent-bridge-supported-protocol-versions": {
+                "description": "Comma-separated protocol versions supported by this gateway.",
+                "required": true,
+                "schema": {
+                  "type": "string"
+                }
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "The bearer credential is missing or invalid.",
+            "headers": {
+              "x-agent-bridge-protocol-version": {
+                "description": "Selected Agent Bridge protocol version.",
+                "required": true,
+                "schema": {
+                  "type": "string",
+                  "enum": [
+                    "2.0",
+                    "2.1"
+                  ]
+                }
+              },
+              "x-agent-bridge-supported-protocol-versions": {
+                "description": "Comma-separated protocol versions supported by this gateway.",
+                "required": true,
+                "schema": {
+                  "type": "string"
+                }
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "The credential cannot access the requested principal or origin.",
+            "headers": {
+              "x-agent-bridge-protocol-version": {
+                "description": "Selected Agent Bridge protocol version.",
+                "required": true,
+                "schema": {
+                  "type": "string",
+                  "enum": [
+                    "2.0",
+                    "2.1"
+                  ]
+                }
+              },
+              "x-agent-bridge-supported-protocol-versions": {
+                "description": "Comma-separated protocol versions supported by this gateway.",
+                "required": true,
+                "schema": {
+                  "type": "string"
+                }
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "The route or requested resource does not exist.",
+            "headers": {
+              "x-agent-bridge-protocol-version": {
+                "description": "Selected Agent Bridge protocol version.",
+                "required": true,
+                "schema": {
+                  "type": "string",
+                  "enum": [
+                    "2.0",
+                    "2.1"
+                  ]
+                }
+              },
+              "x-agent-bridge-supported-protocol-versions": {
+                "description": "Comma-separated protocol versions supported by this gateway.",
+                "required": true,
+                "schema": {
+                  "type": "string"
+                }
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "The request conflicts with current delivery or idempotency state.",
+            "headers": {
+              "x-agent-bridge-protocol-version": {
+                "description": "Selected Agent Bridge protocol version.",
+                "required": true,
+                "schema": {
+                  "type": "string",
+                  "enum": [
+                    "2.0",
+                    "2.1"
+                  ]
+                }
+              },
+              "x-agent-bridge-supported-protocol-versions": {
+                "description": "Comma-separated protocol versions supported by this gateway.",
+                "required": true,
+                "schema": {
+                  "type": "string"
+                }
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          },
+          "413": {
+            "description": "The request body exceeds the configured limit.",
+            "headers": {
+              "x-agent-bridge-protocol-version": {
+                "description": "Selected Agent Bridge protocol version.",
+                "required": true,
+                "schema": {
+                  "type": "string",
+                  "enum": [
+                    "2.0",
+                    "2.1"
+                  ]
+                }
+              },
+              "x-agent-bridge-supported-protocol-versions": {
+                "description": "Comma-separated protocol versions supported by this gateway.",
+                "required": true,
+                "schema": {
+                  "type": "string"
+                }
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          },
+          "415": {
+            "description": "The request content type is not application/json.",
+            "headers": {
+              "x-agent-bridge-protocol-version": {
+                "description": "Selected Agent Bridge protocol version.",
+                "required": true,
+                "schema": {
+                  "type": "string",
+                  "enum": [
+                    "2.0",
+                    "2.1"
+                  ]
+                }
+              },
+              "x-agent-bridge-supported-protocol-versions": {
+                "description": "Comma-separated protocol versions supported by this gateway.",
+                "required": true,
+                "schema": {
+                  "type": "string"
+                }
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          },
+          "426": {
+            "description": "The requested protocol version is unsupported.",
+            "headers": {
+              "x-agent-bridge-protocol-version": {
+                "description": "Selected Agent Bridge protocol version.",
+                "required": true,
+                "schema": {
+                  "type": "string",
+                  "enum": [
+                    "2.0",
+                    "2.1"
+                  ]
+                }
+              },
+              "x-agent-bridge-supported-protocol-versions": {
+                "description": "Comma-separated protocol versions supported by this gateway.",
+                "required": true,
+                "schema": {
+                  "type": "string"
+                }
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "The gateway has rate-limited the request.",
+            "headers": {
+              "x-agent-bridge-protocol-version": {
+                "description": "Selected Agent Bridge protocol version.",
+                "required": true,
+                "schema": {
+                  "type": "string",
+                  "enum": [
+                    "2.0",
+                    "2.1"
+                  ]
+                }
+              },
+              "x-agent-bridge-supported-protocol-versions": {
+                "description": "Comma-separated protocol versions supported by this gateway.",
+                "required": true,
+                "schema": {
+                  "type": "string"
+                }
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "The gateway could not complete the request.",
+            "headers": {
+              "x-agent-bridge-protocol-version": {
+                "description": "Selected Agent Bridge protocol version.",
+                "required": true,
+                "schema": {
+                  "type": "string",
+                  "enum": [
+                    "2.0",
+                    "2.1"
+                  ]
+                }
+              },
+              "x-agent-bridge-supported-protocol-versions": {
+                "description": "Comma-separated protocol versions supported by this gateway.",
+                "required": true,
+                "schema": {
+                  "type": "string"
+                }
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          },
+          "502": {
+            "description": "The upstream response does not match the selected protocol contract.",
+            "headers": {
+              "x-agent-bridge-protocol-version": {
+                "description": "Selected Agent Bridge protocol version.",
+                "required": true,
+                "schema": {
+                  "type": "string",
+                  "enum": [
+                    "2.0",
+                    "2.1"
+                  ]
+                }
+              },
+              "x-agent-bridge-supported-protocol-versions": {
+                "description": "Comma-separated protocol versions supported by this gateway.",
+                "required": true,
+                "schema": {
+                  "type": "string"
+                }
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "The backing service is unavailable.",
+            "headers": {
+              "x-agent-bridge-protocol-version": {
+                "description": "Selected Agent Bridge protocol version.",
+                "required": true,
+                "schema": {
+                  "type": "string",
+                  "enum": [
+                    "2.0",
+                    "2.1"
+                  ]
+                }
+              },
+              "x-agent-bridge-supported-protocol-versions": {
+                "description": "Comma-separated protocol versions supported by this gateway.",
+                "required": true,
+                "schema": {
+                  "type": "string"
+                }
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          },
+          "504": {
+            "description": "The request exceeded the gateway deadline.",
+            "headers": {
+              "x-agent-bridge-protocol-version": {
+                "description": "Selected Agent Bridge protocol version.",
+                "required": true,
+                "schema": {
+                  "type": "string",
+                  "enum": [
+                    "2.0",
+                    "2.1"
+                  ]
+                }
+              },
+              "x-agent-bridge-supported-protocol-versions": {
+                "description": "Comma-separated protocol versions supported by this gateway.",
+                "required": true,
+                "schema": {
+                  "type": "string"
+                }
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v2/endpoint-migration-challenges/consume": {
+      "post": {
+        "operationId": "consume_endpoint_migration_challenge",
+        "summary": "Consume a short-lived endpoint migration challenge commitment.",
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "x-agent-bridge-required-scopes": [],
+        "x-agent-bridge-scope-enforcement": true,
+        "parameters": [
+          {
+            "name": "x-agent-bridge-protocol-version",
+            "in": "header",
+            "required": true,
+            "description": "This OpenAPI operation describes protocol 2.1. Headerless protocol 2.0 uses the separate schemas named by x-agent-bridge-protocol-2.0.",
+            "schema": {
+              "type": "string",
+              "enum": [
+                "2.1"
+              ]
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "required": [
+                  "challenge",
+                  "expectedGatewayAuthorityId",
+                  "issuerCredentialId"
+                ],
+                "properties": {
+                  "challenge": {
+                    "type": "string",
+                    "pattern": "^[0-9a-f]{64}$"
+                  },
+                  "expectedGatewayAuthorityId": {
+                    "type": "string",
+                    "pattern": "^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}$"
+                  },
+                  "issuerCredentialId": {
+                    "type": "string",
+                    "pattern": "^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}$"
+                  }
+                },
+                "additionalProperties": false
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Successful response.",
+            "headers": {
+              "x-agent-bridge-protocol-version": {
+                "description": "Selected Agent Bridge protocol version.",
+                "required": true,
+                "schema": {
+                  "type": "string",
+                  "enum": [
+                    "2.0",
+                    "2.1"
+                  ]
+                }
+              },
+              "x-agent-bridge-supported-protocol-versions": {
+                "description": "Comma-separated protocol versions supported by this gateway.",
+                "required": true,
+                "schema": {
+                  "type": "string"
+                }
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "required": [
+                    "gatewayAuthorityId",
+                    "issuerCredentialId",
+                    "verifierCredentialId",
+                    "expiresAt",
+                    "consumed"
+                  ],
+                  "properties": {
+                    "gatewayAuthorityId": {
+                      "type": "string"
+                    },
+                    "issuerCredentialId": {
+                      "type": "string"
+                    },
+                    "verifierCredentialId": {
+                      "type": "string"
+                    },
+                    "expiresAt": {
+                      "anyOf": [
+                        {
+                          "type": "string"
+                        },
+                        {
+                          "type": "null"
+                        }
+                      ]
+                    },
+                    "consumed": {
+                      "type": "boolean"
+                    }
+                  },
+                  "additionalProperties": false
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "The request does not match the operation contract.",
+            "headers": {
+              "x-agent-bridge-protocol-version": {
+                "description": "Selected Agent Bridge protocol version.",
+                "required": true,
+                "schema": {
+                  "type": "string",
+                  "enum": [
+                    "2.0",
+                    "2.1"
+                  ]
+                }
+              },
+              "x-agent-bridge-supported-protocol-versions": {
+                "description": "Comma-separated protocol versions supported by this gateway.",
+                "required": true,
+                "schema": {
+                  "type": "string"
+                }
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "The bearer credential is missing or invalid.",
+            "headers": {
+              "x-agent-bridge-protocol-version": {
+                "description": "Selected Agent Bridge protocol version.",
+                "required": true,
+                "schema": {
+                  "type": "string",
+                  "enum": [
+                    "2.0",
+                    "2.1"
+                  ]
+                }
+              },
+              "x-agent-bridge-supported-protocol-versions": {
+                "description": "Comma-separated protocol versions supported by this gateway.",
+                "required": true,
+                "schema": {
+                  "type": "string"
+                }
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "The credential cannot access the requested principal or origin.",
+            "headers": {
+              "x-agent-bridge-protocol-version": {
+                "description": "Selected Agent Bridge protocol version.",
+                "required": true,
+                "schema": {
+                  "type": "string",
+                  "enum": [
+                    "2.0",
+                    "2.1"
+                  ]
+                }
+              },
+              "x-agent-bridge-supported-protocol-versions": {
+                "description": "Comma-separated protocol versions supported by this gateway.",
+                "required": true,
+                "schema": {
+                  "type": "string"
+                }
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "The route or requested resource does not exist.",
+            "headers": {
+              "x-agent-bridge-protocol-version": {
+                "description": "Selected Agent Bridge protocol version.",
+                "required": true,
+                "schema": {
+                  "type": "string",
+                  "enum": [
+                    "2.0",
+                    "2.1"
+                  ]
+                }
+              },
+              "x-agent-bridge-supported-protocol-versions": {
+                "description": "Comma-separated protocol versions supported by this gateway.",
+                "required": true,
+                "schema": {
+                  "type": "string"
+                }
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "The request conflicts with current delivery or idempotency state.",
+            "headers": {
+              "x-agent-bridge-protocol-version": {
+                "description": "Selected Agent Bridge protocol version.",
+                "required": true,
+                "schema": {
+                  "type": "string",
+                  "enum": [
+                    "2.0",
+                    "2.1"
+                  ]
+                }
+              },
+              "x-agent-bridge-supported-protocol-versions": {
+                "description": "Comma-separated protocol versions supported by this gateway.",
+                "required": true,
+                "schema": {
+                  "type": "string"
+                }
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          },
+          "413": {
+            "description": "The request body exceeds the configured limit.",
+            "headers": {
+              "x-agent-bridge-protocol-version": {
+                "description": "Selected Agent Bridge protocol version.",
+                "required": true,
+                "schema": {
+                  "type": "string",
+                  "enum": [
+                    "2.0",
+                    "2.1"
+                  ]
+                }
+              },
+              "x-agent-bridge-supported-protocol-versions": {
+                "description": "Comma-separated protocol versions supported by this gateway.",
+                "required": true,
+                "schema": {
+                  "type": "string"
+                }
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          },
+          "415": {
+            "description": "The request content type is not application/json.",
+            "headers": {
+              "x-agent-bridge-protocol-version": {
+                "description": "Selected Agent Bridge protocol version.",
+                "required": true,
+                "schema": {
+                  "type": "string",
+                  "enum": [
+                    "2.0",
+                    "2.1"
+                  ]
+                }
+              },
+              "x-agent-bridge-supported-protocol-versions": {
+                "description": "Comma-separated protocol versions supported by this gateway.",
+                "required": true,
+                "schema": {
+                  "type": "string"
+                }
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          },
+          "426": {
+            "description": "The requested protocol version is unsupported.",
+            "headers": {
+              "x-agent-bridge-protocol-version": {
+                "description": "Selected Agent Bridge protocol version.",
+                "required": true,
+                "schema": {
+                  "type": "string",
+                  "enum": [
+                    "2.0",
+                    "2.1"
+                  ]
+                }
+              },
+              "x-agent-bridge-supported-protocol-versions": {
+                "description": "Comma-separated protocol versions supported by this gateway.",
+                "required": true,
+                "schema": {
+                  "type": "string"
+                }
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "The gateway has rate-limited the request.",
+            "headers": {
+              "x-agent-bridge-protocol-version": {
+                "description": "Selected Agent Bridge protocol version.",
+                "required": true,
+                "schema": {
+                  "type": "string",
+                  "enum": [
+                    "2.0",
+                    "2.1"
+                  ]
+                }
+              },
+              "x-agent-bridge-supported-protocol-versions": {
+                "description": "Comma-separated protocol versions supported by this gateway.",
+                "required": true,
+                "schema": {
+                  "type": "string"
+                }
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "The gateway could not complete the request.",
+            "headers": {
+              "x-agent-bridge-protocol-version": {
+                "description": "Selected Agent Bridge protocol version.",
+                "required": true,
+                "schema": {
+                  "type": "string",
+                  "enum": [
+                    "2.0",
+                    "2.1"
+                  ]
+                }
+              },
+              "x-agent-bridge-supported-protocol-versions": {
+                "description": "Comma-separated protocol versions supported by this gateway.",
+                "required": true,
+                "schema": {
+                  "type": "string"
+                }
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          },
+          "502": {
+            "description": "The upstream response does not match the selected protocol contract.",
+            "headers": {
+              "x-agent-bridge-protocol-version": {
+                "description": "Selected Agent Bridge protocol version.",
+                "required": true,
+                "schema": {
+                  "type": "string",
+                  "enum": [
+                    "2.0",
+                    "2.1"
+                  ]
+                }
+              },
+              "x-agent-bridge-supported-protocol-versions": {
+                "description": "Comma-separated protocol versions supported by this gateway.",
+                "required": true,
+                "schema": {
+                  "type": "string"
+                }
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "The backing service is unavailable.",
+            "headers": {
+              "x-agent-bridge-protocol-version": {
+                "description": "Selected Agent Bridge protocol version.",
+                "required": true,
+                "schema": {
+                  "type": "string",
+                  "enum": [
+                    "2.0",
+                    "2.1"
+                  ]
+                }
+              },
+              "x-agent-bridge-supported-protocol-versions": {
+                "description": "Comma-separated protocol versions supported by this gateway.",
+                "required": true,
+                "schema": {
+                  "type": "string"
+                }
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          },
+          "504": {
+            "description": "The request exceeded the gateway deadline.",
+            "headers": {
+              "x-agent-bridge-protocol-version": {
+                "description": "Selected Agent Bridge protocol version.",
+                "required": true,
+                "schema": {
+                  "type": "string",
+                  "enum": [
+                    "2.0",
+                    "2.1"
+                  ]
+                }
+              },
+              "x-agent-bridge-supported-protocol-versions": {
+                "description": "Comma-separated protocol versions supported by this gateway.",
+                "required": true,
+                "schema": {
+                  "type": "string"
+                }
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/metrics": {
       "get": {
         "operationId": "gateway_metrics",

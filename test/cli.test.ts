@@ -10,7 +10,7 @@ import { SQLiteEdgeStore } from "../src/sqlite-edge-store.js";
 import { securePrivatePath, verifyPrivatePathAccess } from "../src/private-path.js";
 import { runDrCommand } from "../src/dr-cli.js";
 import {
-  POSTGRES_NATIVE_DR_EXCLUDED_DATA_TABLES, PostgresNativeDrError, type PostgresNativeDrBundleInput,
+  POSTGRES_NATIVE_DR_LEGACY_EXCLUDED_DATA_TABLES, PostgresNativeDrError, type PostgresNativeDrBundleInput,
 } from "../src/postgres-native-dr.js";
 
 const root = dirname(fileURLToPath(new URL("../package.json", import.meta.url)));
@@ -277,9 +277,9 @@ describe("agent-bridge CLI", () => {
       migrations: [{ version: 16, name: "native_dr_fence", checksum: "a".repeat(64) }],
       tableCounts: {
         "agent_bridge.deliveries": "1", "agent_bridge.delivery_events": "1",
-        ...Object.fromEntries(POSTGRES_NATIVE_DR_EXCLUDED_DATA_TABLES.map((table) => [table, "0"])),
+        ...Object.fromEntries(POSTGRES_NATIVE_DR_LEGACY_EXCLUDED_DATA_TABLES.map((table) => [table, "0"])),
       },
-      excludedDataTables: [...POSTGRES_NATIVE_DR_EXCLUDED_DATA_TABLES],
+      excludedDataTables: [...POSTGRES_NATIVE_DR_LEGACY_EXCLUDED_DATA_TABLES],
       claimedDeliveryCount: "1",
       pgDumpVersion: "pg_dump (PostgreSQL) 17.5",
       roleInventorySha256: "b".repeat(64),
@@ -463,9 +463,9 @@ describe("agent-bridge CLI", () => {
       migrations: [{ version: 16, name: "native_dr_fence", checksum: "a".repeat(64) }],
       tableCounts: {
         "agent_bridge.deliveries": "0", "agent_bridge.delivery_events": "0",
-        ...Object.fromEntries(POSTGRES_NATIVE_DR_EXCLUDED_DATA_TABLES.map((table) => [table, "0"])),
+        ...Object.fromEntries(POSTGRES_NATIVE_DR_LEGACY_EXCLUDED_DATA_TABLES.map((table) => [table, "0"])),
       },
-      excludedDataTables: [...POSTGRES_NATIVE_DR_EXCLUDED_DATA_TABLES], claimedDeliveryCount: "0",
+      excludedDataTables: [...POSTGRES_NATIVE_DR_LEGACY_EXCLUDED_DATA_TABLES], claimedDeliveryCount: "0",
       pgDumpVersion: "pg_dump (PostgreSQL) 17.5", roleInventorySha256: "b".repeat(64),
       readinessAttestations: {
         securitySchemaSha256: "c".repeat(64), rowIsolationSha256: "d".repeat(64),

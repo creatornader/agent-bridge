@@ -72,10 +72,19 @@ const POSTGRES_SCHEMA_FIELDS = [
   "databaseName", "serverVersionNum", "serverMajor", "schemaVersion", "migrations", "tableCounts",
   "excludedDataTables", "pgDumpVersion", "roleInventorySha256", "claimedDeliveryCount", "readinessAttestations",
 ] as const;
-const POSTGRES_EXCLUDED_DATA = [
+const POSTGRES_LEGACY_EXCLUDED_DATA = [
   "agent_bridge.agent_instances", "agent_bridge.rate_limit_buckets", "agent_bridge.request_authorities",
   "agent_bridge.archive_transaction_authorizations",
 ] as const;
+
+const POSTGRES_EXCLUDED_DATA = [
+  ...POSTGRES_LEGACY_EXCLUDED_DATA,
+  "agent_bridge.endpoint_migration_challenges",
+] as const;
+
+function postgresExcludedDataForSchemaVersion(schemaVersion: number): readonly string[] {
+  return schemaVersion <= 17 ? POSTGRES_LEGACY_EXCLUDED_DATA : POSTGRES_EXCLUDED_DATA;
+}
 
 function validateSchema(kind: NativeDrManifest["kind"], value: unknown): Record<string, unknown> {
   if (kind === "sqlite") {
@@ -95,7 +104,7 @@ function validateSchema(kind: NativeDrManifest["kind"], value: unknown): Record<
     throw new NativeDrBundleError("DR PostgreSQL schema metadata is invalid");
   }
   assertString(schema.databaseName, "DR database name"); assertString(schema.pgDumpVersion, "DR pg_dump version");
-  if (!Array.isArray(schema.migrations) || schema.migrations.length > 10_000) throw new NativeDrBundleError("DR PostgreSQL migration inventory is invalid");
+  if (!Array.isArray(schema.migrations) || schema.migrations.length === 0 || schema.migrations.length > 10_000) throw new NativeDrBundleError("DR PostgreSQL migration inventory is invalid");
   let priorVersion = 0;
   for (const raw of schema.migrations) {
     const migration = exactObject(raw, ["checksum", "name", "version"], "DR migration");
@@ -106,14 +115,18 @@ function validateSchema(kind: NativeDrManifest["kind"], value: unknown): Record<
     }
     priorVersion = Number(migration.version);
   }
+  if (priorVersion !== Number(schema.schemaVersion)) {
+    throw new NativeDrBundleError("DR PostgreSQL schema version does not match migrations");
+  }
   if (!schema.tableCounts || typeof schema.tableCounts !== "object" || Array.isArray(schema.tableCounts)) throw new NativeDrBundleError("DR PostgreSQL table counts are invalid");
   for (const [table, count] of Object.entries(schema.tableCounts as Record<string, unknown>)) {
     if (!/^[a-z_][a-z0-9_]*\.[a-z_][a-z0-9_]*$/.test(table) || typeof count !== "string" || !/^(0|[1-9][0-9]*)$/.test(count)) {
       throw new NativeDrBundleError("DR PostgreSQL table counts are invalid");
     }
   }
-  if (!Array.isArray(schema.excludedDataTables) || schema.excludedDataTables.length !== POSTGRES_EXCLUDED_DATA.length
-    || schema.excludedDataTables.some((name, index) => name !== POSTGRES_EXCLUDED_DATA[index])) {
+  const excludedData = postgresExcludedDataForSchemaVersion(Number(schema.schemaVersion));
+  if (!Array.isArray(schema.excludedDataTables) || schema.excludedDataTables.length !== excludedData.length
+    || schema.excludedDataTables.some((name, index) => name !== excludedData[index])) {
     throw new NativeDrBundleError("DR PostgreSQL excluded-data inventory is invalid");
   }
   const readiness = exactObject(schema.readinessAttestations, [
