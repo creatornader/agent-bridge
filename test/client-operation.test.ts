@@ -5,7 +5,7 @@ import {
 import { hostname, tmpdir } from "node:os";
 import { basename, join } from "node:path";
 import { createHash } from "node:crypto";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect } from "vitest";
 import {
   acquireClientOperationLock, ClientOperationError, createClientOperation,
   beginClientOperation, cleanupClientOperationArtifact, completeClientOperationCleanup,
@@ -16,6 +16,9 @@ import {
   validateClientOperation, writeClientOperationSnapshot,
 } from "../src/client-operation.js";
 import { securePrivatePath } from "../src/private-path.js";
+import { privatePathIt } from "./private-path-policy.js";
+
+const it = privatePathIt;
 
 const roots: string[] = [];
 afterEach(() => { for (const root of roots.splice(0)) rmSync(root, { recursive: true, force: true }); });

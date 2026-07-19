@@ -1,10 +1,11 @@
-import { chmodSync, mkdirSync, mkdtempSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { chmodSync, mkdirSync, mkdtempSync, renameSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 import {
-  createPrivateDirectoryAccessCache, preparePrivateSqliteLocation, securePrivatePath,
-  securePrivateSqliteSidecar, verifyPrivatePathAccess,
+  createInProcessPrivatePathPolicy, createPrivateDirectoryAccessCache,
+  preparePrivateSqliteLocation, securePrivatePath, securePrivateSqliteSidecar,
+  verifyPrivatePathAccess, withPrivatePathPolicy, type PrivatePathPolicy,
 } from "../src/private-path.js";
 
 function result(status: number) {
@@ -39,6 +40,46 @@ function directoryIdentity(symbolic = false, inode = 20) {
 }
 
 describe("private path policy", () => {
+  it("accepts test paths through an injected in-process policy", () => {
+    const policy = createInProcessPrivatePathPolicy();
+    const path = mkdtempSync(join(tmpdir(), "agent-bridge-private-scoped-"));
+    try {
+      withPrivatePathPolicy(policy, () => {
+        verifyPrivatePathAccess(path, "directory");
+      });
+    } finally {
+      rmSync(path, { recursive: true, force: true });
+    }
+  });
+
+  it.skipIf(process.platform !== "win32")("uses scoped policy for cached directories and rejects replacement", () => {
+    const root = mkdtempSync(join(tmpdir(), "agent-bridge-private-scoped-cache-"));
+    const selected = join(root, "selected");
+    const replacement = join(root, "replacement");
+    const moved = join(root, "moved");
+    mkdirSync(selected);
+    mkdirSync(replacement);
+    let verified = 0;
+    const policy: PrivatePathPolicy = {
+      secure: () => {},
+      verify: () => { verified += 1; },
+    };
+    try {
+      withPrivatePathPolicy(policy, () => {
+        const cache = createPrivateDirectoryAccessCache();
+        cache.verify(selected);
+        cache.verify(selected);
+        expect(verified).toBe(1);
+        renameSync(selected, moved);
+        renameSync(replacement, selected);
+        expect(() => cache.verify(selected)).toThrow(/identity changed after cached policy validation/);
+        expect(verified).toBe(1);
+      });
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
   it("accepts the user or token owner before binding a Windows path to the user SID", () => {
     let script = "";
     securePrivatePath("C:\\private\\credential.config", "file", {

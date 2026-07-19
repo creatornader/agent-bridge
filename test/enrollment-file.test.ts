@@ -7,7 +7,7 @@ import { spawn, spawnSync } from "node:child_process";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect } from "vitest";
 import { buildSync } from "esbuild";
 import {
   acquireEnrollmentLock,
@@ -22,6 +22,9 @@ import {
   validateEnrollmentFile,
   type EnrollmentFile,
 } from "../src/enrollment-file.js";
+import { privatePathIt } from "./private-path-policy.js";
+
+const it = privatePathIt;
 
 const roots: string[] = [];
 
