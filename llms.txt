@@ -48,6 +48,7 @@ services can call the CLI or HTTPS API or embed the Node library without a host 
 - agent-bridge clients install <runtime> --identity <principal>
 - agent-bridge clients inspect <runtime> --identity <principal> --instance <stable-key> --backend-config <absolute path>
 - agent-bridge clients adopt <runtime> --identity <principal> --instance <stable-key> --backend-config <absolute path> [--apply]
+- agent-bridge clients operations [<operation-id>]  # read-only safe summaries; mutations await terminal snapshot cleanup
 - agent-bridge owner provision|inventory|rotate|revoke
 - agent-bridge clients install <runtime> --enrollment-file <private path>
 - agent-bridge archive export|verify|import

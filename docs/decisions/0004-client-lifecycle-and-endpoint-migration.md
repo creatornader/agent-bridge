@@ -77,6 +77,31 @@ enrollment still refuses an existing backend file or MCP registration, so adopti
 cannot weaken first-install collision protection. This unit does not add repair,
 update, uninstall, credential rotation, or endpoint mutation.
 
+The next lifecycle unit adds only the crash-safe operation substrate and read-only
+inspection. Revisioned manifests live below the owner-private
+`~/.agent-bridge/operations/<uuid>` tree, snapshot contents remain private, and locks
+serialize by runtime and stable instance. Stale recovery requires same-host PID-death
+proof, with operation-root and locks identities pinned throughout recovery. Sensitive
+file access pins its immediate directory, and snapshot enumeration and reads pin the
+snapshots directory. The manifest contains an immutable ordered plan whose steps record
+target kind, non-sensitive locator, unique snapshot artifact, expected before/after
+digests, durable pre-write intent, and durable post-verification observed-applied state.
+Snapshot publication is atomic and no-replace. Every bounded before-state snapshot must
+match its step before mutation can start. Restart names the exact pending step: matching
+before-state is retryable, matching after-state advances only after durable intent, and
+every other state blocks as ambiguous. Linked, replaced, corrupt, oversized,
+contradictory, or ambiguous state fails closed without changing external files, while
+`clients operations [<operation-id>]` returns only safe summaries.
+
+Public repair, update, uninstall, and endpoint-migration mutations remain deferred and
+cannot ship before terminal snapshot cleanup. Active or ambiguous operations retain
+their artifacts. After a terminal manifest is durable, cleanup must verify and unlink
+each artifact, sync the directory where supported, and report uncertain durability.
+Rollback status remains unavailable until reverse steps record durable intent and
+verify restored bytes. Physical erasure is outside the filesystem contract. Future
+commands must minimize credential-bearing snapshots and rotate credentials when
+retained copies contained them.
+
 ## Consequences
 
 Later lifecycle operations have an explicit local ownership record and can fail closed
