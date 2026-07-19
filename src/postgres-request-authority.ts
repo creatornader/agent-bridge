@@ -5,6 +5,7 @@ import { PostgresBridgeStore, type PgQueryable } from "./postgres-bridge-store.j
 import { PostgresGatewaySecurity } from "./gateway-security.js";
 
 export interface RequestAuthorityContext {
+  gatewayAuthorityId: string;
   credential: { id: string; principal: BridgePrincipal; scopes: readonly AuthorizationScope[] };
   store: PostgresBridgeStore;
   security: PostgresGatewaySecurity;
@@ -17,6 +18,7 @@ export interface RequestAuthority {
 }
 
 type AuthorityRow = {
+  gateway_authority_id: string;
   credential_id: string;
   workspace_id: string;
   principal: string;
@@ -46,8 +48,8 @@ export class PostgresRequestAuthority implements RequestAuthority {
       await client.query("BEGIN");
       transactionOpen = true;
       const opened = await client.query<AuthorityRow>(
-        `SELECT credential_id,workspace_id,principal,scopes
-         FROM agent_bridge.open_request_authority($1::uuid,$2::text,$3::uuid)`,
+        `SELECT gateway_authority_id,credential_id,workspace_id,principal,scopes
+         FROM agent_bridge.open_request_authority_bound($1::uuid,$2::text,$3::uuid)`,
         [credentialId, credentialHash, requestId],
       );
       const row = opened.rows[0];
@@ -58,6 +60,7 @@ export class PostgresRequestAuthority implements RequestAuthority {
       }
       if (signal.aborted) throw signal.reason;
       const context: RequestAuthorityContext = {
+        gatewayAuthorityId: row.gateway_authority_id,
         credential: { id: row.credential_id, principal: { workspace: row.workspace_id, agent: row.principal }, scopes: row.scopes },
         store: new PostgresBridgeStore(db),
         security: new PostgresGatewaySecurity(db),

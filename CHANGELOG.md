@@ -8,6 +8,13 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and 
 
 ### Added
 
+- Add migration 017 with an immutable PostgreSQL gateway authority UUID. Production
+  request authority now uses a bound opener without changing the released opener's
+  return shape. Authenticated gateway status adds optional `gatewayAuthorityId` and
+  `credentialId` fields under HTTP 2.1. Native DR preserves the UUID as logical
+  authority continuity, not live-clone fencing. Deployments must drain old gateway
+  instances before the migration.
+
 - Add `clients migrate stage <runtime>` for inert gateway-client migration
   preparation. The command probes the active and successor bearer credentials, records
   enrollment credential IDs and credential-free source and target bindings, and

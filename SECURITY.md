@@ -80,6 +80,11 @@ plan and protected catalog state. Once a migration changes the database, startin
 older image is not a safe rollback. Apply a forward fix or restore the backup into a
 fresh target and switch authority only after verification.
 
+Drain old gateway instances before migration 017. An old image reports `/readyz` as
+not ready after the new migration is visible, but a process that was already running
+can still serve ordinary requests until traffic is removed or it exits. Start the new
+gateway only after the migration and runtime bootstrap finish.
+
 ### Legacy Supabase mode
 
 The legacy adapter keeps existing v1 deployments working, but its publishable key can
@@ -97,6 +102,9 @@ through a separately trusted channel.
 PostgreSQL restore executes SQL from the source dump. Use
 `--accept-source-sql-risk` only for a bundle from a trusted source. Never activate the
 source and restored target as authorities at the same time.
+The restored gateway authority UUID identifies the same logical authority. It does not
+prevent an operator from activating a live clone, so the deployment cutover remains an
+operator-controlled safety boundary.
 
 ### Optional integrations
 

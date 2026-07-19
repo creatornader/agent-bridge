@@ -148,14 +148,18 @@ owner-control state, or security events.
    clients.
 2. Drain or preserve each gateway client's SQLite outbox. Do not discard an edge store
    with queued publications.
-3. Create and verify a native DR backup.
-4. Stop schema-changing jobs other than the selected migration job.
-5. Run the new image's migration command once with schema-owner authority.
-6. Run the runtime bootstrap with separate runtime-login credentials.
-7. Start the new gateway and require `/readyz` plus an authenticated capability probe.
-8. Send, read, claim, and settle a disposable targeted delivery.
-9. Roll clients forward only after the gateway proof passes.
-10. Keep the previous authority available but inactive until the observation window
+3. Drain old gateway instances or remove them from traffic before migration 017. An old
+   process can serve ordinary requests until it exits even though its `/readyz` probe
+   fails after the newer migration is applied.
+4. Create and verify a native DR backup.
+5. Stop schema-changing jobs other than the selected migration job.
+6. Run the new image's migration command once with schema-owner authority.
+7. Run the runtime bootstrap with separate runtime-login credentials.
+8. Start the new gateway and require `/readyz`, an authenticated capability probe, and
+   an authenticated status probe.
+9. Send, read, claim, and settle a disposable targeted delivery.
+10. Roll clients forward only after the gateway proof passes.
+11. Keep the previous authority available but inactive until the observation window
     closes.
 
 Run one migration job at a time. The migration ledger makes ordered application
@@ -173,6 +177,9 @@ idempotent, but it does not make concurrent deployment orchestration desirable.
 An older gateway may refuse a database with a newer migration plan. Starting the old
 image is therefore not a general schema rollback. A volume snapshot is also not enough
 unless its consistency and restore procedure have been proved for the database setup.
+Migration 017 makes this readiness failure explicit for an old compiled migration
+plan. It does not terminate an already-running old gateway. Drain it before applying
+the migration.
 
 ## Operational checks
 

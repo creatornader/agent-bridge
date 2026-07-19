@@ -1514,7 +1514,7 @@ integration("PostgreSQL BridgeStore integration", () => {
       await expect(
         client.query("SELECT * FROM agent_bridge.rate_limit_policies"),
       ).rejects.toThrow(/permission denied/);
-      for (const table of ["credentials", "agents", "workspaces", "request_authorities"]) {
+      for (const table of ["credentials", "agents", "workspaces", "request_authorities", "gateway_authority"]) {
         await expect(
           client.query(`SELECT * FROM agent_bridge.${table}`),
         ).rejects.toThrow(/permission denied/);
@@ -2018,14 +2018,20 @@ integration("PostgreSQL BridgeStore integration", () => {
     );
   });
 
-  it("records the portable membership attestation as the final migration state", async () => {
+  it("records the gateway authority binding as the final migration state", async () => {
     const directory = fileURLToPath(new URL("../sql/migrations", import.meta.url));
     const plan = await loadMigrationPlan(directory);
-    expect(plan.at(-1)).toMatchObject({ version: 16, name: "native_dr_fence" });
+    expect(plan.at(-1)).toMatchObject({ version: 17, name: "gateway_authority_binding" });
     expect(await migrationsReady(pool!, plan)).toBe(true);
+    expect(await migrationsReady(pool!, plan.slice(0, -1))).toBe(false);
     expect((await pool!.query<{ version: number; name: string }>(
       "SELECT version,name FROM agent_bridge.schema_migrations ORDER BY version DESC LIMIT 1",
-    )).rows).toEqual([{ version: 16, name: "native_dr_fence" }]);
+    )).rows).toEqual([{ version: 17, name: "gateway_authority_binding" }]);
+    expect((await pool!.query<{ authority_id: string }>(
+      "SELECT authority_id::text FROM agent_bridge.gateway_authority",
+    )).rows).toEqual([{
+      authority_id: expect.stringMatching(/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/),
+    }]);
     expect((await pool!.query<{ name: string }>(
       `SELECT name FROM agent_bridge.owner_control_attestations
        WHERE name='owner-control-v4'`,
@@ -2315,7 +2321,7 @@ integration("PostgreSQL BridgeStore integration", () => {
     await withTemporaryDatabase(async (upgrade) => {
       const directory = fileURLToPath(new URL("../sql/migrations", import.meta.url));
       const plan = await loadMigrationPlan(directory);
-      for (const migration of plan.slice(0, 15)) {
+      for (const migration of plan.slice(0, 16)) {
         await upgrade.query(
           migration.source.split("__AGENT_BRIDGE_MIGRATION_CHECKSUM__").join(migration.checksum),
         );
@@ -2328,10 +2334,10 @@ integration("PostgreSQL BridgeStore integration", () => {
         await new Promise((resolve) => setTimeout(resolve, 75));
         expect(settled).toBe(false);
         expect((await fence.query(
-          "SELECT 1 FROM agent_bridge.schema_migrations WHERE version=16",
+          "SELECT 1 FROM agent_bridge.schema_migrations WHERE version=17",
         )).rowCount).toBe(0);
         await fence.query("SELECT pg_advisory_unlock($1::bigint)", [NATIVE_DR_ADVISORY_LOCK_KEY]);
-        await expect(migration).resolves.toHaveLength(16);
+        await expect(migration).resolves.toHaveLength(17);
       } finally {
         await fence.query("SELECT pg_advisory_unlock($1::bigint)", [NATIVE_DR_ADVISORY_LOCK_KEY]).catch(() => {});
         fence.release();
@@ -2396,6 +2402,44 @@ integration("PostgreSQL BridgeStore integration", () => {
       await client.query(`REVOKE INSERT ON agent_bridge.request_authorities FROM ${role}`);
       expect(await ready()).toBe(true);
 
+      await client.query(`GRANT SELECT(authority_id) ON agent_bridge.gateway_authority TO ${role}`);
+      expect(await ready()).toBe(false);
+      await client.query(`REVOKE SELECT(authority_id) ON agent_bridge.gateway_authority FROM ${role}`);
+      expect(await ready()).toBe(true);
+
+      await client.query("GRANT SELECT(authority_id) ON agent_bridge.gateway_authority TO public");
+      expect(await ready()).toBe(false);
+      await client.query("REVOKE SELECT(authority_id) ON agent_bridge.gateway_authority FROM public");
+      expect(await ready()).toBe(true);
+
+      for (const statement of [
+        "UPDATE agent_bridge.gateway_authority SET authority_id=gen_random_uuid()",
+        "DELETE FROM agent_bridge.gateway_authority",
+        "TRUNCATE agent_bridge.gateway_authority",
+      ]) {
+        await expect(client.query(statement)).rejects.toThrow(/gateway authority is immutable/);
+      }
+
+      await client.query("ALTER TABLE agent_bridge.gateway_authority DROP CONSTRAINT gateway_authority_singleton");
+      expect(await ready()).toBe(false);
+      await client.query("ALTER TABLE agent_bridge.gateway_authority ADD CONSTRAINT gateway_authority_singleton PRIMARY KEY (singleton)");
+      expect(await ready()).toBe(true);
+
+      await client.query("ALTER TABLE agent_bridge.gateway_authority DROP CONSTRAINT gateway_authority_singleton_true");
+      expect(await ready()).toBe(false);
+      await client.query("ALTER TABLE agent_bridge.gateway_authority ADD CONSTRAINT gateway_authority_singleton_true CHECK (singleton)");
+      expect(await ready()).toBe(true);
+
+      await client.query("ALTER TABLE agent_bridge.gateway_authority DROP CONSTRAINT gateway_authority_id_unique");
+      expect(await ready()).toBe(false);
+      await client.query("ALTER TABLE agent_bridge.gateway_authority ADD CONSTRAINT gateway_authority_id_unique UNIQUE (authority_id)");
+      expect(await ready()).toBe(true);
+
+      await client.query("ALTER TABLE agent_bridge.gateway_authority ALTER COLUMN authority_id DROP NOT NULL");
+      expect(await ready()).toBe(false);
+      await client.query("ALTER TABLE agent_bridge.gateway_authority ALTER COLUMN authority_id SET NOT NULL");
+      expect(await ready()).toBe(true);
+
       await client.query(
         "ALTER FUNCTION agent_bridge.open_request_authority(uuid,text,uuid) SECURITY INVOKER",
       );
@@ -2404,11 +2448,50 @@ integration("PostgreSQL BridgeStore integration", () => {
         "ALTER FUNCTION agent_bridge.open_request_authority(uuid,text,uuid) SECURITY DEFINER",
       );
       expect(await ready()).toBe(true);
+
+      await client.query(
+        "ALTER FUNCTION agent_bridge.open_request_authority_bound(uuid,text,uuid) SECURITY INVOKER",
+      );
+      expect(await ready()).toBe(false);
+      await client.query(
+        "ALTER FUNCTION agent_bridge.open_request_authority_bound(uuid,text,uuid) SECURITY DEFINER",
+      );
+      expect(await ready()).toBe(true);
+
+      await client.query("ALTER FUNCTION agent_bridge.reject_gateway_authority_mutation() SECURITY DEFINER");
+      expect(await ready()).toBe(false);
+      await client.query("ALTER FUNCTION agent_bridge.reject_gateway_authority_mutation() SECURITY INVOKER");
+      expect(await ready()).toBe(true);
+
+      await client.query("ALTER FUNCTION agent_bridge.reject_gateway_authority_mutation() RESET search_path");
+      expect(await ready()).toBe(false);
+      await client.query("ALTER FUNCTION agent_bridge.reject_gateway_authority_mutation() SET search_path TO ''");
+      expect(await ready()).toBe(true);
+
+      await client.query("ALTER TABLE agent_bridge.gateway_authority DISABLE TRIGGER gateway_authority_immutable");
+      expect(await ready()).toBe(false);
+      await client.query("ALTER TABLE agent_bridge.gateway_authority ENABLE TRIGGER gateway_authority_immutable");
+      expect(await ready()).toBe(true);
     } finally {
       await client.query(`REVOKE INSERT ON agent_bridge.request_authorities FROM ${role}`);
+      await client.query(`REVOKE SELECT(authority_id) ON agent_bridge.gateway_authority FROM ${role}`);
+      await client.query("REVOKE SELECT(authority_id) ON agent_bridge.gateway_authority FROM public");
       await client.query(
         "ALTER FUNCTION agent_bridge.open_request_authority(uuid,text,uuid) SECURITY DEFINER",
       );
+      await client.query(
+        "ALTER FUNCTION agent_bridge.open_request_authority_bound(uuid,text,uuid) SECURITY DEFINER",
+      );
+      await client.query("ALTER FUNCTION agent_bridge.reject_gateway_authority_mutation() SECURITY INVOKER");
+      await client.query("ALTER FUNCTION agent_bridge.reject_gateway_authority_mutation() SET search_path TO ''");
+      await client.query("ALTER TABLE agent_bridge.gateway_authority ENABLE TRIGGER gateway_authority_immutable");
+      await client.query("ALTER TABLE agent_bridge.gateway_authority DROP CONSTRAINT IF EXISTS gateway_authority_singleton");
+      await client.query("ALTER TABLE agent_bridge.gateway_authority ADD CONSTRAINT gateway_authority_singleton PRIMARY KEY (singleton)");
+      await client.query("ALTER TABLE agent_bridge.gateway_authority DROP CONSTRAINT IF EXISTS gateway_authority_singleton_true");
+      await client.query("ALTER TABLE agent_bridge.gateway_authority ADD CONSTRAINT gateway_authority_singleton_true CHECK (singleton)");
+      await client.query("ALTER TABLE agent_bridge.gateway_authority DROP CONSTRAINT IF EXISTS gateway_authority_id_unique");
+      await client.query("ALTER TABLE agent_bridge.gateway_authority ADD CONSTRAINT gateway_authority_id_unique UNIQUE (authority_id)");
+      await client.query("ALTER TABLE agent_bridge.gateway_authority ALTER COLUMN authority_id SET NOT NULL");
       client.release();
     }
   });
@@ -2729,10 +2812,12 @@ integration("PostgreSQL BridgeStore integration", () => {
       const ownerControlPlaneMigration = plan[13]!;
       const portableArchiveMigration = plan[14]!;
       const nativeDrFenceMigration = plan[15]!;
+      const gatewayAuthorityMigration = plan[16]!;
       expect(rowIsolationMigration).toMatchObject({ version: 13, name: "row_isolation" });
       expect(ownerControlPlaneMigration).toMatchObject({ version: 14, name: "owner_control_plane" });
       expect(portableArchiveMigration).toMatchObject({ version: 15, name: "portable_archives" });
       expect(nativeDrFenceMigration).toMatchObject({ version: 16, name: "native_dr_fence" });
+      expect(gatewayAuthorityMigration).toMatchObject({ version: 17, name: "gateway_authority_binding" });
 
       const workspaceId = "upgrade-row-isolation";
       const messageId = "018f4a70-0000-7000-8000-000000000201";
@@ -2838,6 +2923,11 @@ integration("PostgreSQL BridgeStore integration", () => {
         nativeDrFenceMigration.source
           .split("__AGENT_BRIDGE_MIGRATION_CHECKSUM__")
           .join(nativeDrFenceMigration.checksum),
+      );
+      await upgrade.query(
+        gatewayAuthorityMigration.source
+          .split("__AGENT_BRIDGE_MIGRATION_CHECKSUM__")
+          .join(gatewayAuthorityMigration.checksum),
       );
       expect(await migrationsReady(upgrade, plan)).toBe(true);
       expect(await runtimeSchemaReady(upgrade, { allowPrivilegedCaller: true })).toBe(true);

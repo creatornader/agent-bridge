@@ -239,12 +239,16 @@ integration.each(matrix)("PostgreSQL $major native DR", ({ major, image, port })
     const sourceUrl = await startDatabase(sourceName, image, port, "source_admin", directory);
     const sourcePool = new pg.Pool({ connectionString: sourceUrl, max: 4 });
     let backup: Awaited<ReturnType<typeof backupPostgresNativeDr>>;
+    let sourceGatewayAuthorityId: string;
     try {
       await runMigrationsThrough(sourcePool, 15);
       const currentSuffix = createHash("md5").update("agent_bridge").digest("hex").slice(0, 16);
       await sourcePool.query(`ALTER DEFAULT PRIVILEGES FOR ROLE agent_bridge_control_owner_${currentSuffix}
         REVOKE EXECUTE ON FUNCTIONS FROM PUBLIC`);
       await runMigrations(sourcePool, migrationDirectory);
+      sourceGatewayAuthorityId = (await sourcePool.query<{ authority_id: string }>(
+        "SELECT authority_id::text FROM agent_bridge.gateway_authority",
+      )).rows[0]!.authority_id;
       await sourcePool.query(`CREATE ROLE other_admin LOGIN SUPERUSER PASSWORD '${password}'`);
       await sourcePool.query(`CREATE DATABASE agent_bridge_other OWNER other_admin`);
       const otherSuffix = createHash("md5").update("agent_bridge_other").digest("hex").slice(0, 16);
@@ -341,6 +345,9 @@ integration.each(matrix)("PostgreSQL $major native DR", ({ major, image, port })
           +(SELECT count(*) FROM agent_bridge.archive_transaction_authorizations)
         )::text AS count`);
       expect(excluded.rows[0]?.count).toBe("0");
+      expect((await targetPool.query<{ authority_id: string }>(
+        "SELECT authority_id::text FROM agent_bridge.gateway_authority",
+      )).rows[0]!.authority_id).toBe(sourceGatewayAuthorityId);
       const external = await targetPool.query<{ rolcanlogin: boolean }>(
         `SELECT rolcanlogin FROM pg_catalog.pg_roles WHERE rolname='source_admin'`,
       );

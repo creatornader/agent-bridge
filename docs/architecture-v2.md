@@ -152,6 +152,11 @@ authorizations. The manifest binds migration inventory, table counts, claimed-de
 count, tool major, role inventory, and the security, row-isolation, owner-control, and
 portable-archive readiness definitions.
 
+The immutable gateway authority UUID is ordinary PostgreSQL data, so native backup and
+restore preserve it. The UUID proves that a restored target represents the same logical
+authority. It does not fence a live clone. Operators must still keep the source and
+restored target from serving traffic at the same time.
+
 PostgreSQL restore requires a dedicated fresh database, the same database name and
 server major, an exact-major `pg_restore`, and superuser authority. It restores role
 shells as `NOLOGIN`, then schema objects, memberships, and default privileges. Claimed
@@ -487,6 +492,14 @@ The stored definition is scoped to the control plane and its dependencies. It in
 
 Migration 012 removes direct runtime reads of credential digest material and establishes transaction-bound request authority. Node computes the credential hash, so PostgreSQL never receives the raw bearer credential. Request authority, security accounting, and domain work use one checked-out PostgreSQL client and one explicit transaction. A security-definer opener matches the credential ID and hash against current revocation, expiry, successor-grace, agent, and workspace state in one locked statement, then records the database-derived credential, workspace, principal, and scopes for that backend and transaction. Instance remains validated same-principal attribution and never establishes authority. Claim, cancel, and requeue reuse the outer transaction without nested `BEGIN`.
 
+Migration 017 adds an immutable singleton authority UUID and a separate bound opener.
+The released opener retains its original result shape. The bound opener returns the
+same credential, workspace, principal, and scopes with the authority UUID in the same
+request transaction. Runtime readiness checks the singleton row, mutation trigger,
+function catalog, and direct table and column privileges. The UUID is returned only by
+authenticated gateway status. It is not a capability field, log field, or readiness
+field.
+
 The domain savepoint separates expected rejected domain work from security effects: expected scope and rate accounting can commit while failed domain mutations are rolled back. An abort before commit rolls the whole request back. Once commit dispatch begins, the gateway never retries and reports `mutation_outcome_unknown` if the outcome is ambiguous. A failed rollback discards the pooled connection.
 
 Migration 013 enables and forces RLS on the five domain tables: messages, receipts, deliveries, delivery events, and agent instances. A database-specific no-login role owns those tables. Two more no-login roles isolate request-context reads and delivery-event writes. The gateway login inherits only the runtime role, which has `NOBYPASSRLS` and cannot inherit any of the owner roles. Zero-argument stable context functions read the workspace and principal from the authority row bound to the current backend, transaction ID, and session user. Policies call those functions through scalar subqueries so PostgreSQL evaluates them as InitPlans rather than once per row.
@@ -503,7 +516,7 @@ Limits apply to content bytes, payload bytes, metadata depth, target count, batc
 
 The CLI provides `init`, `doctor`, `status`, `demo`, `send`, `inbox`, `history`, `claim`, `ack`, `nack`, `watch`, `sync`, portable archive, and migration commands. Existing `post` and `get` aliases remain available.
 
-`/readyz` reports storage and schema readiness. Authenticated HTTP status reports the bound principal, provider schema, delivery counts, and the oldest due delivery. CLI `doctor` and `status` use a separate client-status contract that also reports local edge state and remote gateway reachability.
+`/readyz` reports storage and schema readiness. Authenticated HTTP status reports the bound principal, provider schema, delivery counts, and the oldest due delivery. When production request authority is active, it also returns additive `gatewayAuthorityId` and `credentialId` fields. They are optional in HTTP 2.1. CLI `doctor` and `status` use a separate client-status contract that also reports local edge state and remote gateway reachability.
 
 Gateway responses carry a request ID, including stable error envelopes. Scope failures return required scopes under `error.details`. Rate failures return a rounded retry delay in both the HTTP header and error details. Authenticated Prometheus output counts requests, errors, timeouts, and authentication failures. Responses, metrics, and append-only security events exclude bearer tokens, hashes, database URLs, payload bodies, arbitrary metadata, and credential material.
 

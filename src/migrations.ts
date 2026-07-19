@@ -57,6 +57,8 @@ const REQUIRED_COLUMNS = new Map([
   ["request_authorities.principal", "text"],
   ["request_authorities.scopes", "_text"],
   ["request_authorities.opened_session_user", "name"],
+  ["gateway_authority.singleton", "bool"],
+  ["gateway_authority.authority_id", "uuid"],
   ["row_isolation_attestations.name", "text"],
   ["row_isolation_attestations.catalog_definition", "text"],
   ["row_isolation_attestations.attested_at", "timestamptz"],
@@ -209,6 +211,7 @@ export const REQUIRED_MIGRATIONS = [
   { version: 14, name: "owner_control_plane" },
   { version: 15, name: "portable_archives" },
   { version: 16, name: "native_dr_fence" },
+  { version: 17, name: "gateway_authority_binding" },
 ] as const;
 
 function withNativeDrSharedLock(source: string): string {
@@ -585,7 +588,7 @@ export async function runtimeSchemaReady(
   );
   if ([...REQUIRED_COLUMNS].some(([name, type]) => actual.get(name) !== type)) return false;
 
-  const objects = await db.query<{ immutable: boolean; deliveryAudit: boolean; idempotency: boolean; claim: boolean; publisher: boolean; terminal: boolean; source: boolean; thread: boolean; created: boolean; presence: boolean; project: boolean; targets: boolean; scopeSets: boolean; securityEvents: boolean; ratePolicies: boolean; rateBuckets: boolean; replacement: boolean; rateCleanup: boolean; credentialSecurity: boolean; eventAppendOnly: boolean; scopeAudit: boolean; rateConsume: boolean; securityReady: boolean; requestAuthorities: boolean; authorityOpen: boolean; authorityClose: boolean; credentialDigestHidden: boolean; authorityRowsHidden: boolean; principalTablesHidden: boolean; authorityTablesLocked: boolean; authorityCatalog: boolean }>(
+  const objects = await db.query<{ immutable: boolean; deliveryAudit: boolean; idempotency: boolean; claim: boolean; publisher: boolean; terminal: boolean; source: boolean; thread: boolean; created: boolean; presence: boolean; project: boolean; targets: boolean; scopeSets: boolean; securityEvents: boolean; ratePolicies: boolean; rateBuckets: boolean; replacement: boolean; rateCleanup: boolean; credentialSecurity: boolean; eventAppendOnly: boolean; scopeAudit: boolean; rateConsume: boolean; securityReady: boolean; requestAuthorities: boolean; gatewayAuthority: boolean; gatewayAuthorityShape: boolean; gatewayAuthorityImmutable: boolean; authorityOpen: boolean; authorityBoundOpen: boolean; authorityClose: boolean; authorityReady: boolean; credentialDigestHidden: boolean; authorityRowsHidden: boolean; gatewayAuthorityRowsHidden: boolean; principalTablesHidden: boolean; authorityTablesLocked: boolean; gatewayAuthorityPublicLocked: boolean; authorityCatalog: boolean }>(
     `WITH names AS (
        SELECT ('agent_bridge_runtime_' || substr(md5(current_database()),1,16))::name AS runtime_role
      ) SELECT
@@ -629,11 +632,70 @@ export async function runtimeSchemaReady(
        to_regprocedure('agent_bridge.consume_rate_limit(uuid,text,uuid)') IS NOT NULL AS "rateConsume",
        to_regprocedure('agent_bridge.security_schema_ready()') IS NOT NULL AS "securityReady",
        to_regclass('agent_bridge.request_authorities') IS NOT NULL AS "requestAuthorities",
+       to_regclass('agent_bridge.gateway_authority') IS NOT NULL AS "gatewayAuthority",
+       (
+         (SELECT attribute.attnotnull
+          FROM pg_attribute attribute
+          WHERE attribute.attrelid=to_regclass('agent_bridge.gateway_authority')
+            AND attribute.attname='singleton' AND attribute.attnum>0 AND NOT attribute.attisdropped)
+         AND (SELECT attribute.attnotnull
+          FROM pg_attribute attribute
+          WHERE attribute.attrelid=to_regclass('agent_bridge.gateway_authority')
+            AND attribute.attname='authority_id' AND attribute.attnum>0 AND NOT attribute.attisdropped)
+         AND EXISTS (
+           SELECT 1 FROM pg_constraint table_constraint
+           WHERE table_constraint.conrelid=to_regclass('agent_bridge.gateway_authority')
+             AND table_constraint.conname='gateway_authority_singleton'
+             AND table_constraint.contype='p'
+             AND table_constraint.conkey::smallint[]=ARRAY[(SELECT attribute.attnum FROM pg_attribute attribute
+               WHERE attribute.attrelid=to_regclass('agent_bridge.gateway_authority')
+                 AND attribute.attname='singleton' AND attribute.attnum>0 AND NOT attribute.attisdropped)]
+         )
+         AND EXISTS (
+           SELECT 1 FROM pg_constraint table_constraint
+           WHERE table_constraint.conrelid=to_regclass('agent_bridge.gateway_authority')
+             AND table_constraint.conname='gateway_authority_singleton_true'
+             AND table_constraint.contype='c'
+             AND regexp_replace(
+               pg_get_expr(table_constraint.conbin,table_constraint.conrelid),'[[:space:]()]','','g'
+             )='singleton'
+         )
+         AND EXISTS (
+           SELECT 1 FROM pg_constraint table_constraint
+           WHERE table_constraint.conrelid=to_regclass('agent_bridge.gateway_authority')
+             AND table_constraint.conname='gateway_authority_id_unique'
+             AND table_constraint.contype='u'
+             AND table_constraint.conkey::smallint[]=ARRAY[(SELECT attribute.attnum FROM pg_attribute attribute
+               WHERE attribute.attrelid=to_regclass('agent_bridge.gateway_authority')
+                 AND attribute.attname='authority_id' AND attribute.attnum>0 AND NOT attribute.attisdropped)]
+         )
+       ) AS "gatewayAuthorityShape",
+       EXISTS (
+         SELECT 1
+         FROM pg_trigger trigger
+         JOIN pg_proc trigger_function ON trigger_function.oid=trigger.tgfoid
+         JOIN pg_namespace trigger_namespace ON trigger_namespace.oid=trigger_function.pronamespace
+         WHERE trigger.tgrelid=to_regclass('agent_bridge.gateway_authority')
+           AND trigger.tgname='gateway_authority_immutable'
+           AND NOT trigger.tgisinternal AND trigger.tgenabled='O'
+           AND (trigger.tgtype::integer & 1)=0
+           AND (trigger.tgtype::integer & 2)=2
+           AND (trigger.tgtype::integer & 56)=56
+           AND trigger_function.proname='reject_gateway_authority_mutation'
+           AND trigger_namespace.nspname='agent_bridge'
+           AND trigger_function.proowner=(SELECT nspowner FROM pg_namespace WHERE nspname='agent_bridge')
+           AND NOT trigger_function.prosecdef
+           AND coalesce(trigger_function.proconfig @> ARRAY['search_path=""'],false)
+       ) AS "gatewayAuthorityImmutable",
        to_regprocedure('agent_bridge.open_request_authority(uuid,text,uuid)') IS NOT NULL
          AND to_regprocedure('agent_bridge.resolve_credential_hash(text)') IS NOT NULL AS "authorityOpen",
+       to_regprocedure('agent_bridge.open_request_authority_bound(uuid,text,uuid)') IS NOT NULL AS "authorityBoundOpen",
        to_regprocedure('agent_bridge.close_request_authority()') IS NOT NULL AS "authorityClose",
+       to_regprocedure('agent_bridge.gateway_authority_ready()') IS NOT NULL AS "authorityReady",
        NOT has_table_privilege((SELECT runtime_role FROM names),'agent_bridge.credentials','SELECT') AS "credentialDigestHidden",
        NOT has_table_privilege((SELECT runtime_role FROM names),'agent_bridge.request_authorities','SELECT') AS "authorityRowsHidden",
+       (NOT has_table_privilege((SELECT runtime_role FROM names),'agent_bridge.gateway_authority','SELECT')
+         AND NOT has_table_privilege('public','agent_bridge.gateway_authority','SELECT')) AS "gatewayAuthorityRowsHidden",
        (NOT has_table_privilege((SELECT runtime_role FROM names),'agent_bridge.agents','SELECT')
          AND NOT has_table_privilege((SELECT runtime_role FROM names),'agent_bridge.workspaces','SELECT')) AS "principalTablesHidden",
        (
@@ -641,7 +703,8 @@ export async function runtimeSchemaReady(
            SELECT 1
            FROM unnest(ARRAY[
              'agent_bridge.credentials','agent_bridge.agents',
-             'agent_bridge.workspaces','agent_bridge.request_authorities'
+             'agent_bridge.workspaces','agent_bridge.request_authorities',
+             'agent_bridge.gateway_authority'
            ]) protected_table(value)
            CROSS JOIN unnest(ARRAY[
              'SELECT','INSERT','UPDATE','DELETE','TRUNCATE','REFERENCES','TRIGGER'
@@ -654,7 +717,8 @@ export async function runtimeSchemaReady(
            SELECT 1
            FROM unnest(ARRAY[
              'agent_bridge.credentials','agent_bridge.agents',
-             'agent_bridge.workspaces','agent_bridge.request_authorities'
+             'agent_bridge.workspaces','agent_bridge.request_authorities',
+             'agent_bridge.gateway_authority'
            ]) protected_table(value)
            CROSS JOIN unnest(ARRAY['SELECT','INSERT','UPDATE','REFERENCES']) requested_privilege(value)
            WHERE has_any_column_privilege(
@@ -662,10 +726,26 @@ export async function runtimeSchemaReady(
            )
          )
        ) AS "authorityTablesLocked",
+       NOT EXISTS (
+         SELECT 1
+         FROM unnest(ARRAY[
+           'SELECT','INSERT','UPDATE','DELETE','TRUNCATE','REFERENCES','TRIGGER'
+         ]) requested_privilege(value)
+         WHERE has_table_privilege('public','agent_bridge.gateway_authority',requested_privilege.value)
+       )
+       AND NOT EXISTS (
+         SELECT 1
+         FROM unnest(ARRAY['SELECT','INSERT','UPDATE','REFERENCES']) requested_privilege(value)
+         WHERE has_any_column_privilege(
+           'public','agent_bridge.gateway_authority',requested_privilege.value
+         )
+       ) AS "gatewayAuthorityPublicLocked",
        (
          has_function_privilege((SELECT runtime_role FROM names),'agent_bridge.resolve_credential_hash(text)','EXECUTE')
          AND has_function_privilege((SELECT runtime_role FROM names),'agent_bridge.open_request_authority(uuid,text,uuid)','EXECUTE')
+         AND has_function_privilege((SELECT runtime_role FROM names),'agent_bridge.open_request_authority_bound(uuid,text,uuid)','EXECUTE')
          AND has_function_privilege((SELECT runtime_role FROM names),'agent_bridge.close_request_authority()','EXECUTE')
+         AND has_function_privilege((SELECT runtime_role FROM names),'agent_bridge.gateway_authority_ready()','EXECUTE')
          AND has_function_privilege((SELECT runtime_role FROM names),'agent_bridge.record_scope_denial(uuid,text,uuid)','EXECUTE')
          AND has_function_privilege((SELECT runtime_role FROM names),'agent_bridge.consume_rate_limit(uuid,text,uuid)','EXECUTE')
          AND NOT has_function_privilege((SELECT runtime_role FROM names),'agent_bridge.active_request_authority()','EXECUTE')
@@ -674,7 +754,9 @@ export async function runtimeSchemaReady(
          AND NOT has_function_privilege((SELECT runtime_role FROM names),'agent_bridge.consume_rate_limit_unbound_011(uuid,text,uuid)','EXECUTE')
          AND NOT has_function_privilege('public','agent_bridge.resolve_credential_hash(text)','EXECUTE')
          AND NOT has_function_privilege('public','agent_bridge.open_request_authority(uuid,text,uuid)','EXECUTE')
+         AND NOT has_function_privilege('public','agent_bridge.open_request_authority_bound(uuid,text,uuid)','EXECUTE')
          AND NOT has_function_privilege('public','agent_bridge.close_request_authority()','EXECUTE')
+         AND NOT has_function_privilege('public','agent_bridge.gateway_authority_ready()','EXECUTE')
          AND NOT has_function_privilege('public','agent_bridge.record_scope_denial(uuid,text,uuid)','EXECUTE')
          AND NOT has_function_privilege('public','agent_bridge.consume_rate_limit(uuid,text,uuid)','EXECUTE')
          AND NOT has_function_privilege('public','agent_bridge.record_scope_denial_unbound_011(uuid,text,uuid)','EXECUTE')
@@ -684,7 +766,8 @@ export async function runtimeSchemaReady(
            JOIN pg_namespace namespace ON namespace.oid=procedure.pronamespace
            WHERE namespace.nspname='agent_bridge'
              AND procedure.proname IN (
-               'resolve_credential_hash','open_request_authority','active_request_authority',
+               'resolve_credential_hash','open_request_authority','open_request_authority_bound',
+               'gateway_authority_ready','active_request_authority',
                'assert_active_request_credential','close_request_authority','record_scope_denial',
                'consume_rate_limit','record_scope_denial_unbound_011','consume_rate_limit_unbound_011'
              )
@@ -703,8 +786,11 @@ export async function runtimeSchemaReady(
     row.targets && row.scopeSets && row.securityEvents && row.ratePolicies && row.rateBuckets &&
     row.replacement && row.rateCleanup && row.credentialSecurity && row.eventAppendOnly &&
     row.scopeAudit && row.rateConsume && row.securityReady && row.requestAuthorities &&
-    row.authorityOpen && row.authorityClose && row.credentialDigestHidden && row.authorityRowsHidden &&
-    row.principalTablesHidden && row.authorityTablesLocked && row.authorityCatalog
+    row.gatewayAuthority && row.gatewayAuthorityShape && row.gatewayAuthorityImmutable && row.authorityOpen &&
+    row.authorityBoundOpen && row.authorityClose && row.authorityReady &&
+    row.credentialDigestHidden && row.authorityRowsHidden && row.gatewayAuthorityRowsHidden &&
+    row.principalTablesHidden && row.authorityTablesLocked && row.gatewayAuthorityPublicLocked &&
+    row.authorityCatalog
   )) return false;
   try {
     const security = await db.query<{ ready: boolean }>(
@@ -716,8 +802,12 @@ export async function runtimeSchemaReady(
     const portableArchive = await db.query<{ ready: boolean }>(
       "SELECT agent_bridge.portable_archive_ready() AS ready",
     );
+    const gatewayAuthority = await db.query<{ ready: boolean }>(
+      "SELECT agent_bridge.gateway_authority_ready() AS ready",
+    );
     return security.rows[0]?.ready === true && ownerControl.rows[0]?.ready === true &&
-      portableArchive.rows[0]?.ready === true && await rowIsolationReady(
+      portableArchive.rows[0]?.ready === true && gatewayAuthority.rows[0]?.ready === true &&
+      await rowIsolationReady(
       db,
       options.allowPrivilegedCaller === true,
     );

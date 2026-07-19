@@ -245,6 +245,7 @@ describe("authenticated v2 gateway", () => {
       rowIsolationReady: async () => true,
       requestAuthority: {
         run: async (credentialId: string, _credentialHash: string, _requestId: string, _signal: AbortSignal, work: any) => work({
+          gatewayAuthorityId: "00000000-0000-4000-8000-000000000003",
           credential: {
             id: credentialId,
             principal: { workspace: "workspace-a", agent: "agent-a" },
@@ -263,6 +264,7 @@ describe("authenticated v2 gateway", () => {
       rowIsolationReady: async () => false,
       requestAuthority: {
         run: async (credentialId: string, _credentialHash: string, _requestId: string, _signal: AbortSignal, work: any) => work({
+          gatewayAuthorityId: "00000000-0000-4000-8000-000000000003",
           credential: {
             id: credentialId,
             principal: { workspace: "workspace-a", agent: "agent-a" },
@@ -282,6 +284,7 @@ describe("authenticated v2 gateway", () => {
       rowIsolationReady: async () => { throw new Error("private database failure"); },
       requestAuthority: {
         run: async (credentialId: string, _credentialHash: string, _requestId: string, _signal: AbortSignal, work: any) => work({
+          gatewayAuthorityId: "00000000-0000-4000-8000-000000000003",
           credential: {
             id: credentialId,
             principal: { workspace: "workspace-a", agent: "agent-a" },
@@ -298,6 +301,57 @@ describe("authenticated v2 gateway", () => {
     const failedBody = await unavailableAfterFailure.text();
     expect(failedBody).not.toContain("private database failure");
     expect(JSON.parse(failedBody)).toMatchObject({ requestAuthority: true, rowIsolation: false });
+  });
+
+  it("returns authority binding only from authenticated status", async () => {
+    const gatewayAuthorityId = "00000000-0000-4000-8000-000000000003";
+    const base = await gateway(undefined, {
+      requestAuthority: {
+        run: async (credentialId: string, _credentialHash: string, _requestId: string, _signal: AbortSignal, work: any) => work({
+          gatewayAuthorityId,
+          credential: {
+            id: credentialId,
+            principal: { workspace: "workspace-a", agent: "agent-a" },
+            scopes: AUTHORIZATION_SCOPES,
+          },
+          store: undefined,
+          security: {
+            recordScopeDenial: async () => {},
+            consume: async () => ({ allowed: true, policyId: null, limit: 100, remaining: 99, retryAfterSeconds: 0 }),
+          },
+          beginDomainWork: async () => {},
+        }),
+      },
+    });
+
+    const status = await fetch(`${base}/v2/status`, { headers: auth() });
+    expect(status.status).toBe(200);
+    expect(await status.json()).toMatchObject({
+      gatewayAuthorityId,
+      credentialId: "credential",
+    });
+
+    for (const headers of [
+      { authorization: "Bearer good", "content-type": "application/json" },
+      {
+        authorization: "Bearer good",
+        "content-type": "application/json",
+        "x-agent-bridge-protocol-version": "2.0",
+      },
+    ]) {
+      const legacyStatus = await fetch(`${base}/v2/status`, { headers });
+      expect(legacyStatus.status).toBe(200);
+      expect(legacyStatus.headers.get("x-agent-bridge-protocol-version")).toBe("2.0");
+      const legacyBody = await legacyStatus.json();
+      expect(legacyBody).not.toHaveProperty("gatewayAuthorityId");
+      expect(legacyBody).not.toHaveProperty("credentialId");
+    }
+
+    const capabilities = await fetch(`${base}/v2/capabilities`, { headers: auth() });
+    expect(capabilities.status).toBe(200);
+    const document = await capabilities.json();
+    expect(document).not.toHaveProperty("gatewayAuthorityId");
+    expect(document).not.toHaveProperty("credentialId");
   });
 
   it("returns 404 for 2.1-only routes selected as 2.0", async () => {
@@ -726,6 +780,7 @@ describe("authenticated v2 gateway", () => {
         run: async (credentialId: string, credentialHash: string, _requestId: string, _signal: AbortSignal, work: any) => {
           receivedHash = credentialHash;
           return work({
+            gatewayAuthorityId: "00000000-0000-4000-8000-000000000003",
             credential: {
               id: credentialId,
               principal: { workspace: "workspace-a", agent: "agent-a" },
@@ -761,6 +816,7 @@ describe("authenticated v2 gateway", () => {
         }
         if (sql.includes("open_request_authority")) {
           return { rows: [{
+            gateway_authority_id: "00000000-0000-4000-8000-000000000003",
             credential_id: "credential",
             workspace_id: "workspace-a",
             principal: "agent-a",

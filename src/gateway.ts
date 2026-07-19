@@ -400,10 +400,14 @@ export function createGateway(options: GatewayOptions) {
         closedQuery(url, "status", []);
         validateRequest("status", {});
         const activeStore = authority?.store ?? options.store;
+        const authorityBinding = authority && response.getHeader(PROTOCOL_HEADER) === PROTOCOL_VERSION ? {
+          gatewayAuthorityId: authority.gatewayAuthorityId,
+          credentialId: authority.credential.id,
+        } : {};
         if (!activeStore.diagnostics) {
-          sendOperation(response, 200, "status", { schemaVersion: "postgres-v2", deliverySupported: false, pending: null, claimed: null, retrying: null, dead: null, principal: credential.principal }, requestId);
+          sendOperation(response, 200, "status", { schemaVersion: "postgres-v2", deliverySupported: false, pending: null, claimed: null, retrying: null, dead: null, ...authorityBinding, principal: credential.principal }, requestId);
         } else {
-          sendOperation(response, 200, "status", { ...await activeStore.diagnostics(principal), principal: credential.principal }, requestId);
+          sendOperation(response, 200, "status", { ...await activeStore.diagnostics(principal), ...authorityBinding, principal: credential.principal }, requestId);
         }
         return;
       }
