@@ -927,6 +927,7 @@
                 "idle",
                 "running",
                 "backoff",
+                "paused",
                 "stopped",
                 "failed"
               ]
@@ -935,6 +936,19 @@
               "type": "string"
             },
             "remoteError": {
+              "type": "string"
+            },
+            "migrationState": {
+              "enum": [
+                "active",
+                "draining",
+                "retired"
+              ]
+            },
+            "migrationOperationId": {
+              "type": "string"
+            },
+            "migrationLeaseExpiresAt": {
               "type": "string"
             }
           },
@@ -1288,6 +1302,7 @@
                 "idle",
                 "running",
                 "backoff",
+                "paused",
                 "stopped",
                 "failed"
               ]
@@ -1296,6 +1311,19 @@
               "type": "string"
             },
             "remoteError": {
+              "type": "string"
+            },
+            "migrationState": {
+              "enum": [
+                "active",
+                "draining",
+                "retired"
+              ]
+            },
+            "migrationOperationId": {
+              "type": "string"
+            },
+            "migrationLeaseExpiresAt": {
               "type": "string"
             }
           },

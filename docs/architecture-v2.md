@@ -394,6 +394,35 @@ records and cannot take replacement caller authority. Generic resume finishes an
 uninstall interrupted after metadata deletion and a reverse rollback interrupted after
 any recorded boundary.
 
+### Gateway client migration staging prepares a later cutover
+
+`clients migrate stage <runtime>` creates a private successor backend and a
+credential-free stage record. It leaves the managed registration, active backend, and
+source edge gate state unchanged after initializing the gate schema. It requires a
+rotation enrollment that keeps the predecessor valid through a future grace cutoff.
+The stage record binds the managed
+identity, source and target endpoint digests, both credential IDs, the source edge
+database path and scope key, and the grace cutoff. It does not store either token or a
+raw gateway URL.
+
+The source backend must bind an absolute, normalized edge database file. Relative and
+in-memory paths cannot identify the same durable outbox across harness working
+directories, so staging rejects them.
+
+An applied stage probes the active and staged bearer credentials, records the
+enrollment credential IDs, initializes the recorded source edge database, and requires
+its migration gate to be active. SQLite rejects a new outbox insert as soon as that
+gate begins draining, including inserts from a client that had already opened the
+database. These checks prepare a later drain and cutover. They do not authorize either
+action.
+
+The stage does not prove that source and target reach the same database authority. A
+later endpoint cutover may use alternate URLs only after it dynamically attests one
+logical authority. The authority identifier must survive clone and restore. Moving to
+an independent database requires a separate owner-mediated fence and is outside this
+staging command. A copied authority identifier does not prove that a live clone is
+fenced.
+
 ### v1 compatibility is additive
 
 The MCP tools `post_context`, `get_context`, and `ack_context` remain available. Existing CLI verbs and flags remain accepted. Text responses remain present while v2 adds structured result data.

@@ -220,9 +220,12 @@ const ClientDiagnosticsSchema = Type.Object({
   lastOutboundSyncAt: OptionalString(),
   lastInboundSyncAt: OptionalString(),
   lastSyncAttemptAt: OptionalString(),
-  syncLoopState: Type.Optional(Type.Enum(["disabled", "idle", "running", "backoff", "stopped", "failed"])),
+  syncLoopState: Type.Optional(Type.Enum(["disabled", "idle", "running", "backoff", "paused", "stopped", "failed"])),
   syncLoopError: OptionalString(),
   remoteError: OptionalString(),
+  migrationState: Type.Optional(Type.Enum(["active", "draining", "retired"])),
+  migrationOperationId: OptionalString(),
+  migrationLeaseExpiresAt: OptionalString(),
 }, { additionalProperties: true });
 
 const ClientStatusSchema = Type.Object({

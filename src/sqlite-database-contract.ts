@@ -16,6 +16,8 @@ export const LOCAL_SQLITE_SCHEMA_CONTRACTS = Object.freeze([
 export const EDGE_SQLITE_SCHEMA_CONTRACTS = Object.freeze([
   Object.freeze({ id: "current-created-schema", sha256: "27f22b2f4024585c87e8d6f76f8999a8df92bb1f585d46594a7a1e852fd53c4c" }),
   Object.freeze({ id: "current-upgraded-project-column", sha256: "171ae11f520b4963f517d3102de64cb8a5f45c080078ff02e20aeb17891b585c" }),
+  Object.freeze({ id: "current-upgraded-project-column-migration-gate", sha256: "790b4bfed373ff776ba6700065154f7a3cbbecd94f37ea09a654768ac2a8455c" }),
+  Object.freeze({ id: "current-upgraded-migration-gate", sha256: "64634eae28f344f02324e6c002e4cc35ea9a99fe878de843df018482bdde38ef" }),
 ] as const);
 const localContractHashes = new Set<string>(LOCAL_SQLITE_SCHEMA_CONTRACTS.map((contract) => contract.sha256));
 const edgeContractHashes = new Set<string>(EDGE_SQLITE_SCHEMA_CONTRACTS.map((contract) => contract.sha256));
@@ -84,6 +86,7 @@ const localObjects = new Map<string, [string, string]>([
 const edgeColumns: Record<string, readonly string[]> = {
   agent_bridge_metadata: ["singleton", "database_kind", "schema_name", "schema_version"],
   edge_scopes: ["scope_key", "endpoint_hash", "workspace", "agent", "pull_cursor", "last_sync_at", "last_error", "last_outbound_sync_at", "last_inbound_sync_at", "last_attempt_at", "cache_contract"],
+  edge_migration_gates: ["scope_key", "state", "operation_id", "lease_token", "lease_expires_at", "updated_at"],
   edge_outbox: ["position", "scope_key", "message_id", "idempotency_key", "payload_hash", "draft_json", "state", "attempts", "available_at", "lease_token", "lease_expires_at", "last_error", "blocked_at", "created_at"],
   edge_inbox: ["scope_key", "message_id", "remote_sequence", "sequence_key", "workspace", "project", "source", "type", "thread_id", "created_at", "expires_at", "message_json"],
 };
@@ -91,6 +94,7 @@ const edgeColumns: Record<string, readonly string[]> = {
 const edgeObjects = new Map<string, [string, string]>([
   ["agent_bridge_metadata", ["table", "agent_bridge_metadata"]],
   ["edge_scopes", ["table", "edge_scopes"]],
+  ["edge_migration_gates", ["table", "edge_migration_gates"]],
   ["edge_outbox", ["table", "edge_outbox"]],
   ["edge_inbox", ["table", "edge_inbox"]],
   ["edge_inbox_created", ["index", "edge_inbox"]],
@@ -99,6 +103,8 @@ const edgeObjects = new Map<string, [string, string]>([
   ["edge_inbox_source", ["index", "edge_inbox"]],
   ["edge_inbox_thread", ["index", "edge_inbox"]],
   ["edge_outbox_due", ["index", "edge_outbox"]],
+  ["edge_migration_gates_state", ["index", "edge_migration_gates"]],
+  ["edge_outbox_migration_gate_insert", ["trigger", "edge_outbox"]],
   ["agent_bridge_metadata_no_delete", ["trigger", "agent_bridge_metadata"]],
   ["agent_bridge_metadata_no_update", ["trigger", "agent_bridge_metadata"]],
 ]);

@@ -128,9 +128,12 @@ are prepared, snapshotted, in-progress, applied, cleaning, and committed. Inspec
 separately reports resumable, classification-required, blocked, or complete.
 
 Repair and uninstall journals use operation format version 3. New update journals use
-v4 and carry a bounded credential-free inverse contract. A version 2 journal keeps its
-released request shape and remains inspectable. A non-terminal version 2 journal
-cannot resume because it lacks an identity-bound request.
+v4 and carry a bounded credential-free inverse contract. Gateway migration staging
+uses v5 and binds a managed identity, source and target endpoint digests, enrollment
+credential IDs, a source edge database path and scope key, and a predecessor grace
+cutoff. It contains no raw gateway URL or token. A version 2 journal keeps its released
+request shape and remains inspectable. A non-terminal version 2 journal cannot resume
+because it lacks an identity-bound request.
 
 Creation pins the operation root before it publishes state. Cleanup pins that root,
 the operation directory, and the snapshots directory before it records intent or
@@ -164,17 +167,30 @@ contract. A changed current state, v2 or v3 source, repair, uninstall, unsafe in
 fields, or a different host fails closed. A failed forward update never rolls back
 automatically. Repair remains monotonic. Uninstall recovery is re-enrollment.
 
+`clients migrate stage <runtime> --identity <name> --instance <key>
+--enrollment-file <path>` is plan-first. With `--apply`, it creates a private staged
+successor backend and a credential-free v5 record without changing the managed
+registration or active backend. It initializes the source edge gate and leaves its
+state active. It probes active and staged bearer credentials and requires a
+non-immediate predecessor grace cutoff. It neither drains the outbox nor authorizes a
+cutover. It requires an absolute, normalized source edge database path and rejects
+in-memory edge state. The stage does not prove that source and target URLs reach the
+same database authority.
+
 `clients resume <operation-id> [--recover-lock]` resumes v3 repair, update, and
-uninstall requests plus supported v4 update and rollback requests. It derives action,
-runtime, instance, identity, launch, and reverse source from the record and accepts no
-replacement client authority. It cannot resume a version 2 operation. It also
-completes an uninstall interrupted after metadata deletion and a rollback interrupted
-after any ordered step. Endpoint migration remains deferred. Physical erasure is
-outside the contract.
+uninstall requests, supported v4 update and rollback requests, and v5 migration-stage
+requests. It derives action, runtime, instance, identity, launch, and reverse source
+from the record and accepts no replacement client authority. It cannot resume a version
+2 operation. It also completes an uninstall interrupted after metadata deletion and a
+rollback interrupted after any ordered step. A later endpoint cutover is limited to
+alternate URLs and must dynamically attest one logical database authority. Physical
+erasure is outside the contract.
 
 ## Consequences
 
-Managed repair, update, and uninstall have a narrow authority boundary and can fail closed on drift,
-metadata corruption, ambiguous crash state, and unsafe backend policy changes. Existing
-exact registrations still require intentional, reviewable adoption. Endpoint migration
-remains deferred until it can also preserve and prove gateway edge outbox state.
+Managed repair, update, and uninstall have a narrow authority boundary and can fail
+closed on drift, metadata corruption, ambiguous crash state, and unsafe backend policy
+changes. Existing exact registrations still require intentional, reviewable adoption.
+Migration staging preserves active state while it prepares later work. Endpoint cutover
+remains deferred until it can preserve gateway edge outbox state and dynamically attest
+the same logical database authority.

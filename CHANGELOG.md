@@ -8,6 +8,15 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and 
 
 ### Added
 
+- Add `clients migrate stage <runtime>` for inert gateway-client migration
+  preparation. The command probes the active and successor bearer credentials, records
+  enrollment credential IDs and credential-free source and target bindings, and
+  prepares a private successor backend without changing the active registration or
+  backend. It does not authorize cutover. The source SQLite edge gate prevents new
+  outbox inserts once a later drain starts, including from a client that opened the
+  database before the gate changed. Staging requires an absolute, normalized source
+  edge database path and rejects in-memory edge state.
+
 - Add explicit, plan-first `clients rollback <update-operation-id> --identity <name>`
   for committed same-host v4 updates. `--apply` creates a separate reverse journal.
   It verifies the source inverse contract and current forward metadata and
@@ -16,7 +25,7 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and 
   Generic `clients resume` also resumes a reverse journal. The v4 source completion
   keeps only a bounded credential-free inverse contract. Repair remains monotonic,
   uninstall stays forward-only, and endpoint migration is still unavailable. Managed
-  operation summaries now report schema version 4 and include the `rollback` kind.
+  operation summaries now report schema version 5 and include the `rollback` kind.
 
 - Add forward-only `clients uninstall` for metadata-owned Codex, Claude Code, and
   Claude Desktop registrations. Uninstall proves and removes the managed

@@ -976,7 +976,7 @@ function executionStepsFromManifest(
     else {
       kind = registrationSteps.length === 2 && registrationIndex++ === 0 ? "native-remove" : "native-add";
     }
-    return { kind, target: step.target, locator: step.locator, before: "", after: "" };
+    return { kind, target: step.target as PlannedStep["target"], locator: step.locator, before: "", after: "" };
   });
 }
 
@@ -1281,8 +1281,8 @@ function resumeUninstallAfterMetadataDeletion(
   const begun = resumeClientOperation(manifest.operationId, env);
   let current = begun.manifest;
   const steps = current.steps.map((step) => ({
-    target: step.target,
-    action: uninstallStepAction(step, current.runtime),
+    target: step.target as "registration" | "backend" | "metadata",
+    action: uninstallStepAction(step as { target: "registration" | "backend" | "metadata" }, current.runtime),
   }));
   try {
     if (current.version !== 3 || !current.request || current.request.kind !== "uninstall"

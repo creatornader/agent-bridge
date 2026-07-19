@@ -104,11 +104,23 @@ rollback removes the forward entry, adds the prior entry, and writes prior metad
 last. Claude Desktop replaces only its Agent Bridge entry and preserves unrelated JSON.
 Repair has no rollback. Uninstall remains forward-only, so recovery is re-enrollment.
 
+Use `clients migrate stage <runtime> --identity <name> --instance <key>
+--enrollment-file <path>` to review a gateway successor prepared from a non-immediate
+rotation enrollment. Add `--apply` only after reviewing the plan. Staging writes a
+private successor backend and a credential-free operation record. It leaves the active
+registration and active backend unchanged. It initializes the source edge gate but
+leaves that gate active. It does not drain, cut over, or prove that two gateway URLs
+reach the same database authority. The source backend must use an absolute, normalized
+edge database path, not `:memory:`. Resume an interrupted stage with `clients resume
+<operation-id> [--recover-lock]`. Use lock
+recovery only after the recorded same-host process has stopped. Never remove a lock
+manually.
+
 Resume an action-specific operation with the same action, runtime, instance, and
 identity: `--apply --resume <uuid>`. The stored request controls resume. Do not supply
 a new command unless it exactly matches the recorded update request. Use
-`clients resume <uuid> [--recover-lock]` to resume from a recorded v3 or supported v4
-request alone. It does
+`clients resume <uuid> [--recover-lock]` to resume from a recorded v3, supported v4,
+or v5 migration-stage request alone. It does
 not accept replacement client authority. Use the generic form after uninstall has
 deleted metadata. `--recover-lock` on an action-specific command also requires
 `--apply`; it only recovers a stale same-host lock after process-death proof. Never

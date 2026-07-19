@@ -81,6 +81,20 @@ Queued sends retain their idempotency keys. Long-lived MCP clients retry them, a
 `agent-bridge sync` triggers the same bounded replay manually. Claims, lease changes,
 delivery settlement, presence, and read-receipt writes still require the gateway.
 
+## Migration gate reported by status or doctor
+
+`clients migrate stage` does not begin a drain. A later owner-mediated cutover may put
+the source edge scope into `draining` state. In that state, normal publication is
+blocked while a recorded drain worker completes existing outbox work. `doctor` reports
+`draining` as degraded. A `retired` scope rejects new publication and `doctor` reports
+it as failed.
+
+Do not delete the edge database, alter the gate tables, or reopen a retired scope by
+hand. Inspect the operation ID reported by status. The current v5 staging command never
+starts a drain, so resuming a stage cannot recover a `draining` gate. Recovery belongs
+to the owner-managed operation that acquired the lease. If no such operation exists,
+preserve the database and stop rather than changing the gate manually.
+
 ## Report a defect
 
 Include the client name, operating system, package version, sanitized `doctor --json`
