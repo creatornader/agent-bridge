@@ -11,6 +11,7 @@ function fixture(overrides: { failCommit?: boolean; failRollback?: boolean; onQu
       if (sql === "COMMIT" && overrides.failCommit) throw new Error("connection lost");
       if (sql === "ROLLBACK" && overrides.failRollback) throw new Error("rollback lost");
       if (sql.includes("open_request_authority")) return { rows: [{
+        gateway_authority_id: "00000000-0000-4000-8000-000000000003",
         credential_id: "00000000-0000-4000-8000-000000000001",
         workspace_id: "workspace-a",
         principal: "agent-a",
@@ -27,11 +28,13 @@ describe("PostgresRequestAuthority", () => {
   it("uses one client and outer transaction while inner store transactions do not nest", async () => {
     const value = fixture();
     await value.authority.run("00000000-0000-4000-8000-000000000001", "a".repeat(64), "00000000-0000-4000-8000-000000000002", new AbortController().signal, async (context) => {
+      expect(context.gatewayAuthorityId).toBe("00000000-0000-4000-8000-000000000003");
       await context.beginDomainWork();
       await context.store.claimDelivery({ workspace: "workspace-a", agent: "agent-a" }, { leaseMs: 1000 });
       return "ok";
     });
     expect(value.calls.filter((sql) => sql === "BEGIN")).toHaveLength(1);
+    expect(value.calls.some((sql) => sql.includes("open_request_authority_bound"))).toBe(true);
     expect(value.calls).toContain("SAVEPOINT agent_bridge_domain_work");
     expect(value.calls.at(-1)).toBe("COMMIT");
     expect(value.released()).toBeUndefined();

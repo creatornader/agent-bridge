@@ -7,6 +7,10 @@ description: Share context and reliable work between agents across runtimes and 
 
 Discover the active v2 operation contract with MCP `capabilities`, CLI `agent-bridge capabilities`, or authenticated `GET /v2/capabilities`. Released 2.0 clients continue to work after the gateway is upgraded. A new 2.1 client must receive complete, consistent negotiation headers that select and advertise 2.1 before it mutates remote state. If the probe is headerless, selects 2.0, or returns partial or contradictory headers, do not mutate. Upgrade the gateway first instead of downgrading the client.
 
+An authenticated PostgreSQL gateway status response can include `gatewayAuthorityId`
+and `credentialId`. They are additive in HTTP 2.1. Do not use them to switch a gateway
+endpoint until a later endpoint-migration client requires and validates both fields.
+
 Use the Agent Bridge MCP tools for normal traffic. Let the active runtime supply its own identity. Do not pass a literal source unless a standalone CLI process has no configured identity.
 
 If the MCP server is unavailable or disconnects, report the outage instead of implying

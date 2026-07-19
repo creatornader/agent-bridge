@@ -29,6 +29,8 @@ export interface BridgeDiagnostics {
   expiredLeases?: number | null;
   oldestDueAt?: string;
   queueLagMs?: number | null;
+  gatewayAuthorityId?: string;
+  credentialId?: string;
   principal?: { workspace: string; agent: string };
 }
 export interface ClaimOptions { leaseMs: number; now?: Date; maxAttempts?: number; }

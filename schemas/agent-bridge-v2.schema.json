@@ -586,6 +586,12 @@
             }
           ]
         },
+        "gatewayAuthorityId": {
+          "type": "string"
+        },
+        "credentialId": {
+          "type": "string"
+        },
         "principal": {
           "type": "object",
           "required": [
@@ -833,6 +839,12 @@
                   "type": "null"
                 }
               ]
+            },
+            "gatewayAuthorityId": {
+              "type": "string"
+            },
+            "credentialId": {
+              "type": "string"
             },
             "principal": {
               "type": "object",
@@ -1208,6 +1220,12 @@
                   "type": "null"
                 }
               ]
+            },
+            "gatewayAuthorityId": {
+              "type": "string"
+            },
+            "credentialId": {
+              "type": "string"
             },
             "principal": {
               "type": "object",

@@ -116,11 +116,16 @@ excludes transient request, rate-limit, instance, and archive-authorization rows
 normalizes claimed deliveries on restore. Never run source and restored target at the
 same time. The package API is @creatornader/agent-bridge/dr. Bundle hashes detect
 changed bytes but do not encrypt or authenticate the source.
+The immutable PostgreSQL gateway authority UUID is preserved by native DR. It identifies
+one logical authority across restore but does not fence a live clone.
 
 ## MCP tools
 
 - `capabilities`: return operations, required scopes, provider-specific enforcement, and supported protocol versions. Gateway access needs an active credential but no named scope for this operation.
 - Production gateway capabilities report `requestAuthority: true` and `rowIsolation: true` only after the migration and live catalog, role, policy, privilege, and function checks pass. PostgreSQL forces RLS on messages, receipts, deliveries, delivery events, and presence. Lease transitions and target-to-delivery membership remain service-enforced.
+- Authenticated gateway `/v2/status` returns optional `gatewayAuthorityId` and
+  `credentialId` fields when PostgreSQL request authority is active. They are additive
+  in HTTP 2.1 and do not appear in capabilities.
 
 Compatibility: post_context, get_context, ack_context.
 Reliable messaging: send, history, claim, extend, acknowledge, negative_acknowledge, heartbeat, presence, sync.

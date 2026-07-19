@@ -194,6 +194,8 @@ const DeliveryDiagnosticsProperties = {
   expiredLeases: Type.Optional(NullableNumber()),
   oldestDueAt: OptionalString(),
   queueLagMs: Type.Optional(NullableNumber()),
+  gatewayAuthorityId: OptionalString(),
+  credentialId: OptionalString(),
   principal: Type.Optional(Type.Object({ workspace: Type.String(), agent: Type.String() }, { additionalProperties: true })),
 } as const;
 

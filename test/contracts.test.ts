@@ -71,6 +71,19 @@ describe("canonical v2 contract registry", () => {
     expect(parseResponse("record_receipt", { recorded: 1, futureField: true })).toMatchObject({ futureField: true });
     expect(parseResponse("claim_delivery", { delivery: null })).toEqual({ delivery: null });
     expect(() => parseResponse("claim_delivery", { delivery: null, leaseToken: "unexpected" })).toThrow();
+    expect(parseResponse("status", {
+      schemaVersion: "postgres-v2", deliverySupported: true,
+      pending: 0, claimed: 0, retrying: 0, dead: 0,
+    })).not.toHaveProperty("gatewayAuthorityId");
+    expect(parseResponse("status", {
+      schemaVersion: "postgres-v2", deliverySupported: true,
+      pending: 0, claimed: 0, retrying: 0, dead: 0,
+      gatewayAuthorityId: "00000000-0000-4000-8000-000000000003",
+      credentialId: "00000000-0000-4000-8000-000000000004",
+    })).toMatchObject({
+      gatewayAuthorityId: "00000000-0000-4000-8000-000000000003",
+      credentialId: "00000000-0000-4000-8000-000000000004",
+    });
   });
 
   it("negotiates only versions the gateway serves", () => {

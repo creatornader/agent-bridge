@@ -946,6 +946,12 @@
                         }
                       ]
                     },
+                    "gatewayAuthorityId": {
+                      "type": "string"
+                    },
+                    "credentialId": {
+                      "type": "string"
+                    },
                     "principal": {
                       "type": "object",
                       "required": [
