@@ -406,6 +406,31 @@ const POSTGRES_TOC_DESCRIPTORS = [
 ] as const;
 const POSTGRES_TOC_MAX_BYTES = 16 * 1024 * 1024;
 
+function parsePostgresDumpTocBody(entry: string): string | undefined {
+  let cursor = 0;
+  const readDigits = (): boolean => {
+    const start = cursor;
+    while (cursor < entry.length) {
+      const code = entry.charCodeAt(cursor);
+      if (code < 48 || code > 57) break;
+      cursor += 1;
+    }
+    return cursor > start;
+  };
+  const readSeparator = (): boolean => {
+    const start = cursor;
+    while (entry[cursor] === " " || entry[cursor] === "\t") cursor += 1;
+    return cursor > start;
+  };
+
+  if (!readDigits() || entry[cursor] !== ";") return undefined;
+  cursor += 1;
+  if (!readSeparator() || !readDigits() || !readSeparator() || !readDigits() || !readSeparator()) {
+    return undefined;
+  }
+  return cursor < entry.length ? entry.slice(cursor) : undefined;
+}
+
 export function validatePostgresDumpToc(text: string): void {
   if (Buffer.byteLength(text, "utf8") > POSTGRES_TOC_MAX_BYTES) {
     throw new PostgresNativeDrError("PG_DUMP_TOC_INVALID", "PostgreSQL dump table of contents exceeds 16 MiB");
@@ -414,9 +439,8 @@ export function validatePostgresDumpToc(text: string): void {
     .filter((line) => line.length > 0 && !line.startsWith(";"));
   if (entries.length === 0) throw new PostgresNativeDrError("PG_DUMP_TOC_INVALID", "PostgreSQL dump table of contents is empty");
   for (const entry of entries) {
-    const match = /^\d+;\s+\d+\s+\d+\s+(.+)$/u.exec(entry);
-    if (!match) throw new PostgresNativeDrError("PG_DUMP_TOC_INVALID", "PostgreSQL dump table of contents has an invalid record");
-    const body = match[1]!;
+    const body = parsePostgresDumpTocBody(entry);
+    if (body === undefined) throw new PostgresNativeDrError("PG_DUMP_TOC_INVALID", "PostgreSQL dump table of contents has an invalid record");
     const descriptor = POSTGRES_TOC_DESCRIPTORS.find((candidate) => body.startsWith(`${candidate} `));
     if (!descriptor) throw new PostgresNativeDrError("PG_DUMP_TOC_OUT_OF_SCOPE", "PostgreSQL dump contains an unsupported object kind");
     const remainder = body.slice(descriptor.length + 1).split(/\s+/u);
