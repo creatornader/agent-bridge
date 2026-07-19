@@ -82,6 +82,24 @@ describe("agent-bridge CLI", () => {
     }
   });
 
+  it("inspects managed-client operations without creating operation state", () => {
+    const home = mkdtempSync(join(tmpdir(), "agent-bridge-cli-operations-")); homes.push(home);
+    const result = runAt(home, ["clients", "operations"]);
+    expect(result.status).toBe(0);
+    expect(JSON.parse(result.stdout)).toEqual({ schemaVersion: 1, operations: [] });
+    expect(result.stderr).toBe("");
+    expect(existsSync(join(home, ".agent-bridge", "operations"))).toBe(false);
+
+    const invalid = runAt(home, ["clients", "operations", "not-an-operation-id"]);
+    expect(invalid.status).toBe(1);
+    expect(invalid.stderr).not.toContain(home);
+    expect(invalid.stderr).not.toContain("AGENT_BRIDGE_TOKEN");
+
+    const undocumentedAlias = runAt(home, ["clients", "operation"]);
+    expect(undocumentedAlias.status).toBe(1);
+    expect(undocumentedAlias.stderr).toContain("clients <install|inspect|adopt>");
+  });
+
   it("exports, verifies, dry-runs, and applies a local portable archive", () => {
     const home = mkdtempSync(join(tmpdir(), "agent-bridge-cli-")); homes.push(home);
     const source = join(home, "source.sqlite3");

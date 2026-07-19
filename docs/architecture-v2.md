@@ -289,6 +289,35 @@ Enrollment-based first-time provisioning retains strict registration and backend
 collision refusal. See
 [ADR 0004](decisions/0004-client-lifecycle-and-endpoint-migration.md).
 
+Managed-client mutations have a local crash-safe substrate even though public
+mutation commands remain pending. Owner-private revisioned manifests live under
+`~/.agent-bridge/operations/<uuid>` with private snapshots and an exclusive lock keyed
+by runtime plus stable instance. Manifest publication fsyncs files, atomically renames,
+verifies private paths, and fsyncs directories where supported. Snapshot publication
+uses atomic no-replace links, so residue from an interrupted manifest update cannot be
+overwritten. Sensitive file access pins its immediate directory. Operation-root and
+locks identities remain pinned throughout stale recovery, and the snapshots identity
+remains pinned across enumeration and every artifact read. An immutable ordered plan
+records each target kind, non-sensitive locator, unique snapshot artifact, and expected
+before/after digest. All bounded before-state snapshots must match their expected
+digests before mutation can start. A step's intent is durable before its external
+write; observed-applied becomes durable only after verifying its after-state. Restart
+classification names the exact pending step: its before-state is retryable, its
+after-state advances only after durable intent, and every other state is ambiguous and
+blocked. Stale recovery requires an old same-host record and OS proof that its PID
+stopped. Corrupt, linked, replaced, mismatched, oversized, contradictory, or ambiguous
+state fails closed without changing external files. `clients operations
+[<operation-id>]` exposes safe summaries only.
+
+No public mutation command creates operation snapshots yet. Such commands cannot ship
+until terminal cleanup exists. Active and ambiguous operations retain their snapshots.
+After a committed manifest is durable, cleanup verifies each artifact, unlinks it,
+syncs the snapshots directory where supported, and reports uncertain durability
+instead of success. Rollback status remains unavailable until reverse steps record
+durable intent and verify restored bytes. Physical erasure cannot be guaranteed on
+SSDs or journaled filesystems. Commands must minimize credential-bearing snapshots
+and rotate credentials when retained copies contained them.
+
 ### v1 compatibility is additive
 
 The MCP tools `post_context`, `get_context`, and `ack_context` remain available. Existing CLI verbs and flags remain accepted. Text responses remain present while v2 adds structured result data.

@@ -8,6 +8,16 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and 
 
 ### Added
 
+- Add the crash-safe managed-client operation substrate and read-only `clients
+  operations [<operation-id>]` inspection. Owner-private revisioned manifests,
+  immutable ordered step plans, snapshot artifacts, pinned directory identities,
+  per-client locks, and same-host stale-lock proof keep private contents out of JSON
+  and errors. Restart classification distinguishes exact before-state retries,
+  verified after-state advancement, and blocked ambiguity. Snapshot publication never
+  replaces residue, every step requires a verified before-state snapshot, and bounded
+  manifests reject contradictory state. Mutating lifecycle commands remain blocked on
+  terminal snapshot cleanup.
+
 - Add read-only `clients inspect` and plan-first `clients adopt` for Codex, Claude
   Code, and Claude Desktop. Exact unmanaged registrations can be adopted only with
   `--apply`, which writes owner-only credential-free management metadata. Inspection

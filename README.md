@@ -434,6 +434,29 @@ use. Backend files and their immediate parents must satisfy the owner-only no-li
 policy. Registration state is independent of connectivity health, and applied
 adoption re-inspects before reporting success.
 
+Managed-client operations now have a crash-safe local substrate under the owner-only
+`~/.agent-bridge/operations/` directory. `agent-bridge clients operations` lists safe
+operation summaries, and appending an operation UUID inspects one manifest. Output
+never includes snapshot contents or backend values. Each immutable ordered plan names
+registration, backend, and management-metadata targets with non-sensitive locators,
+snapshot artifacts, and expected before/after digests. Intent is durable before an
+external write; observed-applied is durable only after the after-state is verified.
+On restart, the exact pending step is retryable only at its before-state, advances only
+at its after-state, and otherwise blocks as ambiguous. Sensitive file access checks and
+pins its immediate directory. Stale-lock recovery separately pins the operation root
+and locks directory for the full recovery sequence.
+
+The substrate currently retains snapshots because no public mutation command creates
+them. Repair, update, uninstall, and endpoint migration cannot ship until terminal
+cleanup is implemented. Active or ambiguous operations must retain their snapshots.
+After a committed manifest is durable, cleanup must unlink each verified artifact,
+sync the snapshots directory where supported, and report uncertain durability instead
+of claiming success. Rollback status remains unavailable until reverse steps record
+durable intent and verify restored bytes. Agent Bridge cannot promise physical erasure
+on SSDs or journaled filesystems, so future commands must minimize credential-bearing
+snapshots and rotate credentials when retained copies contained them. Inspection
+changes no registration, backend, metadata, or snapshot file.
+
 The v1 host-adapter manifests are under [`clients/`](clients/). Their compatibility
 field is named `runtime`, but its value identifies the installation target, not a
 unique process. OpenClaw and generic MCP manifests declare the required environment

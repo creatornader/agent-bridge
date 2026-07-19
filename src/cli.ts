@@ -15,6 +15,7 @@ import { BridgeHttpError } from "./http-bridge-store.js";
 import { LegacySupabaseError } from "./legacy-supabase-store.js";
 import { installClient, type InstallableRuntime } from "./client-installer.js";
 import { adoptClient, inspectClient } from "./client-lifecycle.js";
+import { inspectClientOperation, listClientOperations } from "./client-operation.js";
 import { capabilityDocument, operationForCli, parseCliResponse, validateRequest } from "./contracts/registry.js";
 import { runOwnerCommand, type OwnerOptions } from "./owner-control.js";
 import { ArchiveCommandError, runArchiveCommand } from "./archive-cli.js";
@@ -155,7 +156,7 @@ function packageVersion(): string {
   if (typeof manifest.version !== "string" || !manifest.version) throw new Error("package version is unavailable");
   return manifest.version;
 }
-function help(): void { process.stdout.write(`agent-bridge: provider-neutral agent messaging\n\nCommands:\n  init, doctor, status, capabilities, pending, migrate, reconcile-legacy-projects, sync, demo, join, presence\n  send (post), inbox (get), sent, history, acknowledge, claim, extend, ack, nack, watch\n  deliveries, dead-letters, delivery-events, cancel, requeue\n  owner <provision|inventory|rotate|revoke>\n  archive <export|verify|import>\n  dr <backup|verify|restore>\n  clients install <codex|claude-code|claude-desktop> --identity <name>\n  clients inspect <codex|claude-code|claude-desktop> --identity <name> --instance <key> --backend-config <path>\n  clients adopt <codex|claude-code|claude-desktop> --identity <name> --instance <key> --backend-config <path> [--apply]\n\nOptions:\n  -V, --version  Print the installed package version\n  -h, --help     Show this help\n`); }
+function help(): void { process.stdout.write(`agent-bridge: provider-neutral agent messaging\n\nCommands:\n  init, doctor, status, capabilities, pending, migrate, reconcile-legacy-projects, sync, demo, join, presence\n  send (post), inbox (get), sent, history, acknowledge, claim, extend, ack, nack, watch\n  deliveries, dead-letters, delivery-events, cancel, requeue\n  owner <provision|inventory|rotate|revoke>\n  archive <export|verify|import>\n  dr <backup|verify|restore>\n  clients install <codex|claude-code|claude-desktop> --identity <name>\n  clients inspect <codex|claude-code|claude-desktop> --identity <name> --instance <key> --backend-config <path>\n  clients adopt <codex|claude-code|claude-desktop> --identity <name> --instance <key> --backend-config <path> [--apply]\n  clients operations [<operation-id>]\n\nOptions:\n  -V, --version  Print the installed package version\n  -h, --help     Show this help\n`); }
 function rejectUnknownOptions(options: Options): void {
   const unknown = Object.keys(options).filter((key) => !SUPPORTED_OPTIONS.has(key));
   if (unknown.length) throw new Error(`unknown option: --${unknown[0]}`);
@@ -352,6 +353,19 @@ export async function runCli(argv = process.argv.slice(2)): Promise<void> {
   }
   if (command === "clients") {
     const action = positionals[0];
+    if (action === "operations") {
+      rejectOptionsOutside(options, new Set(), "clients operations");
+      const operationId = positionals[1];
+      const expectedLength = operationId ? 2 : 1;
+      if (positionals.length !== expectedLength) {
+        throw new Error("usage: agent-bridge clients operations [<operation-id>]");
+      }
+      output(operationId ? inspectClientOperation(operationId, process.env) : {
+        schemaVersion: 1,
+        operations: listClientOperations(process.env),
+      });
+      return;
+    }
     if (positionals.length !== 2 || !["install", "inspect", "adopt"].includes(action ?? "") || !positionals[1]) {
       throw new Error(action === "install"
         ? "usage: agent-bridge clients install <runtime> --identity <name>"
