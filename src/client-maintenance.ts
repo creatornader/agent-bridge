@@ -805,7 +805,7 @@ function assertUninstallPathIsolation(metadata: ManagedClientMetadata, env: Node
     if (prior) throw new Error(`managed uninstall paths alias: ${prior} and ${role}`);
     seen.set(normalized, role);
     try {
-      const entry = lstatSync(resolved);
+      const entry = lstatSync(resolved, { bigint: true });
       const identity = `${entry.dev}:${entry.ino}`;
       const existingRole = existing.get(identity);
       if (existingRole) throw new Error(`managed uninstall paths alias: ${existingRole} and ${role}`);
