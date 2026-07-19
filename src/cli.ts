@@ -16,7 +16,7 @@ import { LegacySupabaseError } from "./legacy-supabase-store.js";
 import { installClient, type InstallableRuntime } from "./client-installer.js";
 import { adoptClient, inspectClient } from "./client-lifecycle.js";
 import {
-  repairManagedClient, resumeManagedClientOperation, uninstallManagedClient, updateManagedClient,
+  repairManagedClient, resumeManagedClientOperation, rollbackManagedClient, uninstallManagedClient, updateManagedClient,
 } from "./client-maintenance.js";
 import { inspectClientOperation, listClientOperations } from "./client-operation.js";
 import { capabilityDocument, operationForCli, parseCliResponse, validateRequest } from "./contracts/registry.js";
@@ -159,7 +159,7 @@ function packageVersion(): string {
   if (typeof manifest.version !== "string" || !manifest.version) throw new Error("package version is unavailable");
   return manifest.version;
 }
-function help(): void { process.stdout.write(`agent-bridge: provider-neutral agent messaging\n\nCommands:\n  init, doctor, status, capabilities, pending, migrate, reconcile-legacy-projects, sync, demo, join, presence\n  send (post), inbox (get), sent, history, acknowledge, claim, extend, ack, nack, watch\n  deliveries, dead-letters, delivery-events, cancel, requeue\n  owner <provision|inventory|rotate|revoke>\n  archive <export|verify|import>\n  dr <backup|verify|restore>\n  clients install <codex|claude-code|claude-desktop> --identity <name>\n  clients inspect <codex|claude-code|claude-desktop> --identity <name> --instance <key> --backend-config <path>\n  clients adopt <codex|claude-code|claude-desktop> --identity <name> --instance <key> --backend-config <path> [--apply]\n  clients repair <codex|claude-code|claude-desktop> --identity <name> --instance <key> [--apply] [--resume <uuid>] [--recover-lock]\n  clients update <codex|claude-code|claude-desktop> --identity <name> --instance <key> [--command <command>] [--apply] [--resume <uuid>] [--recover-lock]\n  clients uninstall <codex|claude-code|claude-desktop> --identity <name> --instance <key> [--apply] [--resume <uuid>] [--recover-lock]\n  clients resume <operation-id> [--recover-lock]\n  clients operations [<operation-id>]\n\nOptions:\n  -V, --version  Print the installed package version\n  -h, --help     Show this help\n`); }
+function help(): void { process.stdout.write(`agent-bridge: provider-neutral agent messaging\n\nCommands:\n  init, doctor, status, capabilities, pending, migrate, reconcile-legacy-projects, sync, demo, join, presence\n  send (post), inbox (get), sent, history, acknowledge, claim, extend, ack, nack, watch\n  deliveries, dead-letters, delivery-events, cancel, requeue\n  owner <provision|inventory|rotate|revoke>\n  archive <export|verify|import>\n  dr <backup|verify|restore>\n  clients install <codex|claude-code|claude-desktop> --identity <name>\n  clients inspect <codex|claude-code|claude-desktop> --identity <name> --instance <key> --backend-config <path>\n  clients adopt <codex|claude-code|claude-desktop> --identity <name> --instance <key> --backend-config <path> [--apply]\n  clients repair <codex|claude-code|claude-desktop> --identity <name> --instance <key> [--apply] [--resume <uuid>] [--recover-lock]\n  clients update <codex|claude-code|claude-desktop> --identity <name> --instance <key> [--command <command>] [--apply] [--resume <uuid>] [--recover-lock]\n  clients uninstall <codex|claude-code|claude-desktop> --identity <name> --instance <key> [--apply] [--resume <uuid>] [--recover-lock]\n  clients rollback <source-operation-id> --identity <name> [--apply] [--recover-lock]\n  clients resume <operation-id> [--recover-lock]\n  clients operations [<operation-id>]\n\nOptions:\n  -V, --version  Print the installed package version\n  -h, --help     Show this help\n`); }
 function rejectUnknownOptions(options: Options): void {
   const unknown = Object.keys(options).filter((key) => !SUPPORTED_OPTIONS.has(key));
   if (unknown.length) throw new Error(`unknown option: --${unknown[0]}`);
@@ -364,7 +364,7 @@ export async function runCli(argv = process.argv.slice(2)): Promise<void> {
         throw new Error("usage: agent-bridge clients operations [<operation-id>]");
       }
       output(operationId ? inspectClientOperation(operationId, process.env) : {
-        schemaVersion: 3,
+        schemaVersion: 4,
         operations: listClientOperations(process.env),
       });
       return;
@@ -376,6 +376,20 @@ export async function runCli(argv = process.argv.slice(2)): Promise<void> {
       }
       output(resumeManagedClientOperation({
         operationId: positionals[1], recoverLock: boolean(options, "recover-lock"), env: process.env,
+      }));
+      return;
+    }
+    if (action === "rollback") {
+      rejectOptionsOutside(options, new Set(["identity", "apply", "recover-lock"]), "clients rollback");
+      if (positionals.length !== 2 || !positionals[1]) {
+        throw new Error("usage: agent-bridge clients rollback <source-operation-id> --identity <name> [--apply] [--recover-lock]");
+      }
+      if (!boolean(options, "apply") && options["recover-lock"] !== undefined) {
+        throw new Error("--recover-lock requires --apply");
+      }
+      output(rollbackManagedClient({
+        sourceOperationId: positionals[1], identity: one(options, "identity") ?? "",
+        apply: boolean(options, "apply"), recoverLock: boolean(options, "recover-lock"), env: process.env,
       }));
       return;
     }

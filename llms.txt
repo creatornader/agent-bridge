@@ -51,7 +51,8 @@ services can call the CLI or HTTPS API or embed the Node library without a host 
 - agent-bridge clients repair <runtime> --identity <principal> --instance <stable-key> [--apply] [--resume <uuid>] [--recover-lock]
 - agent-bridge clients update <runtime> --identity <principal> --instance <stable-key> [--command <command>] [--apply] [--resume <uuid>] [--recover-lock]
 - agent-bridge clients uninstall <runtime> --identity <principal> --instance <stable-key> [--apply] [--resume <uuid>] [--recover-lock]
-- agent-bridge clients resume <operation-id> [--recover-lock]  # resumes only the identity-bound v3 request
+- agent-bridge clients rollback <update-operation-id> --identity <principal> [--apply] [--recover-lock]
+- agent-bridge clients resume <operation-id> [--recover-lock]  # resumes recorded v3 or supported v4 authority
 - agent-bridge clients operations [<operation-id>]  # read-only resumable/classification-required/blocked/complete summaries
 - agent-bridge owner provision|inventory|rotate|revoke
 - agent-bridge clients install <runtime> --enrollment-file <private path>

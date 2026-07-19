@@ -13,20 +13,65 @@ import {
 import type { InstallableRuntime } from "./client-installer.js";
 
 export const CLIENT_OPERATION_SCHEMA = "agent-bridge.client-operation";
-export const CLIENT_OPERATION_VERSION = 3;
+export const CLIENT_OPERATION_VERSION = 4;
+export type ClientOperationVersion = 2 | 3 | typeof CLIENT_OPERATION_VERSION;
 export type ClientOperationState =
   | "prepared" | "snapshotted" | "in-progress" | "applied" | "cleaning" | "committed";
-export type ClientOperationKind = "repair" | "update" | "uninstall" | "migrate";
+export type ClientOperationKind = "repair" | "update" | "uninstall" | "rollback" | "migrate";
 export interface ClientOperationLaunch {
   command: string;
   args: string[];
   scope: "local" | "user" | "project" | null;
   envKeys: ["AGENT_BRIDGE_AGENT", "AGENT_BRIDGE_CONFIG", "AGENT_BRIDGE_INSTANCE"];
 }
+export interface ClientOperationManagedMetadata {
+  schema: "agent-bridge.client-management";
+  version: 1;
+  runtime: InstallableRuntime;
+  identity: string;
+  instance: string;
+  backendConfigPath: string;
+  launch: { command: string; args: string[]; scope: "local" | "user" | "project" | null };
+  locator:
+    | { kind: "codex-profile"; configPath: string }
+    | { kind: "claude-code-scope"; scope: "local" | "user" | "project"; contextPath: string | null }
+    | { kind: "claude-desktop-config"; configPath: string };
+}
+export interface ClientOperationRegistrationProof {
+  state: "exact";
+  target: {
+    runtime: InstallableRuntime;
+    identity: string;
+    instance: string;
+    backendConfigPath: string;
+    launch: ClientOperationManagedMetadata["launch"];
+    locator: ClientOperationManagedMetadata["locator"];
+  };
+  observed: {
+    state: "present";
+    command: string;
+    args: string[];
+    env: {
+      AGENT_BRIDGE_AGENT: string;
+      AGENT_BRIDGE_CONFIG: string;
+      AGENT_BRIDGE_INSTANCE: string;
+    };
+  };
+}
+export interface ClientOperationRollbackContract {
+  schema: "agent-bridge.client-update-rollback";
+  version: 1;
+  identity: string;
+  priorMetadata: ClientOperationManagedMetadata;
+  priorRegistration: ClientOperationRegistrationProof;
+  forwardMetadataSha256: string;
+  forwardRegistrationSha256: string;
+}
 export type ClientOperationRequest =
   | { kind: "repair"; identity: string }
-  | { kind: "update"; identity: string; launch: ClientOperationLaunch }
+  | { kind: "update"; identity: string; launch: ClientOperationLaunch; rollback?: ClientOperationRollbackContract }
   | { kind: "uninstall"; identity: string }
+  | { kind: "rollback"; identity: string; sourceOperationId: string; rollback: ClientOperationRollbackContract }
   | { kind: "migrate"; endpoint: string; workspace: string };
 type LegacyClientOperationRequest =
   | { kind: "repair" }
@@ -39,6 +84,7 @@ export interface ClientOperationCompletion {
   stepCount: number;
   completedAt: string;
   cleanupDirectoryDurability: "durable" | "unavailable";
+  rollback?: ClientOperationRollbackContract | null;
 }
 export type ClientOperationTargetKind = "registration" | "backend" | "metadata";
 export type ClientOperationStepState = "pending" | "intent-recorded" | "observed-applied";
@@ -69,7 +115,7 @@ export interface ClientOperationArtifact {
 
 export interface ClientOperationManifest {
   schema: typeof CLIENT_OPERATION_SCHEMA;
-  version: 2 | typeof CLIENT_OPERATION_VERSION;
+  version: ClientOperationVersion;
   operationId: string;
   request: RecordedClientOperationRequest | null;
   runtime: InstallableRuntime;
@@ -85,7 +131,7 @@ export interface ClientOperationManifest {
 }
 
 export interface ClientOperationSummary {
-  schemaVersion: 3;
+  schemaVersion: 4;
   operationId: string;
   operation: ClientOperationKind | null;
   runtime: InstallableRuntime | null;
@@ -149,8 +195,13 @@ const MAX_LISTED_OPERATIONS = 1000;
 const MAX_SNAPSHOT_BYTES = 16 * 1024 * 1024;
 const MAX_TOTAL_SNAPSHOT_BYTES = 64 * 1024 * 1024;
 const STATES: ClientOperationState[] = ["prepared", "snapshotted", "in-progress", "applied", "cleaning", "committed"];
-const OPERATIONS: ClientOperationKind[] = ["repair", "update", "uninstall", "migrate"];
+const OPERATIONS: ClientOperationKind[] = ["repair", "update", "uninstall", "rollback", "migrate"];
 const RUNTIMES: InstallableRuntime[] = ["codex", "claude-code", "claude-desktop"];
+const RESUMABLE_OPERATION_KINDS: Readonly<Record<ClientOperationVersion, ReadonlySet<ClientOperationKind>>> = {
+  2: new Set(),
+  3: new Set(["repair", "update", "uninstall"]),
+  4: new Set(["update", "rollback"]),
+};
 
 function fail(code: string, message: string): never { throw new ClientOperationError(code, message); }
 function syncDirectory(path: string): void {
@@ -327,8 +378,230 @@ function validateStep(value: unknown, index: number): ClientOperationStep {
     observedAppliedAt: step.observedAppliedAt as string | null,
   };
 }
+
+function safeAbsolutePath(value: unknown, label: string): string {
+  const path = safeText(value, label, 4096);
+  if (!isAbsolute(path) || resolve(path) !== path) fail("CORRUPT_OPERATION", "operation manifest is corrupt");
+  return path;
+}
+
+function validateOperationLocator(
+  runtime: InstallableRuntime,
+  value: unknown,
+): ClientOperationManagedMetadata["locator"] {
+  if (!value || typeof value !== "object" || Array.isArray(value)) fail("CORRUPT_OPERATION", "operation manifest is corrupt");
+  const locator = value as Record<string, unknown>;
+  if (runtime === "codex") {
+    if (Object.keys(locator).sort().join(",") !== "configPath,kind" || locator.kind !== "codex-profile") {
+      fail("CORRUPT_OPERATION", "operation manifest is corrupt");
+    }
+    const configPath = safeAbsolutePath(locator.configPath, "locator configPath");
+    if (!configPath.endsWith("/config.toml") && !configPath.endsWith("\\config.toml")) {
+      fail("CORRUPT_OPERATION", "operation manifest is corrupt");
+    }
+    return { kind: "codex-profile", configPath };
+  }
+  if (runtime === "claude-code") {
+    if (Object.keys(locator).sort().join(",") !== "contextPath,kind,scope"
+      || locator.kind !== "claude-code-scope"
+      || !["local", "user", "project"].includes(String(locator.scope))) {
+      fail("CORRUPT_OPERATION", "operation manifest is corrupt");
+    }
+    const scope = locator.scope as "local" | "user" | "project";
+    if ((scope === "user" && locator.contextPath !== null)
+      || (scope !== "user" && typeof locator.contextPath !== "string")) {
+      fail("CORRUPT_OPERATION", "operation manifest is corrupt");
+    }
+    return {
+      kind: "claude-code-scope", scope,
+      contextPath: scope === "user" ? null : safeAbsolutePath(locator.contextPath, "locator contextPath"),
+    };
+  }
+  if (Object.keys(locator).sort().join(",") !== "configPath,kind" || locator.kind !== "claude-desktop-config") {
+    fail("CORRUPT_OPERATION", "operation manifest is corrupt");
+  }
+  return { kind: "claude-desktop-config", configPath: safeAbsolutePath(locator.configPath, "locator configPath") };
+}
+
+function validateOperationMetadata(
+  value: unknown,
+  runtime?: InstallableRuntime,
+  instance?: string,
+): ClientOperationManagedMetadata {
+  if (!value || typeof value !== "object" || Array.isArray(value)) fail("CORRUPT_OPERATION", "operation manifest is corrupt");
+  const metadata = value as Record<string, unknown>;
+  if (Object.keys(metadata).sort().join(",")
+    !== "backendConfigPath,identity,instance,launch,locator,runtime,schema,version"
+    || metadata.schema !== "agent-bridge.client-management" || metadata.version !== 1
+    || !RUNTIMES.includes(metadata.runtime as InstallableRuntime)
+    || (runtime !== undefined && metadata.runtime !== runtime)) {
+    fail("CORRUPT_OPERATION", "operation manifest is corrupt");
+  }
+  const recordedRuntime = metadata.runtime as InstallableRuntime;
+  const identity = safeIdentity(metadata.identity);
+  const recordedInstance = safeText(metadata.instance, "instance", 128);
+  if (instance !== undefined && recordedInstance !== instance) fail("CORRUPT_OPERATION", "operation manifest is corrupt");
+  const backendConfigPath = safeAbsolutePath(metadata.backendConfigPath, "backend config path");
+  if (!metadata.launch || typeof metadata.launch !== "object" || Array.isArray(metadata.launch)) {
+    fail("CORRUPT_OPERATION", "operation manifest is corrupt");
+  }
+  const launch = metadata.launch as Record<string, unknown>;
+  if (Object.keys(launch).sort().join(",") !== "args,command,scope"
+    || !Array.isArray(launch.args) || launch.args.length > 16
+    || launch.args.some((arg) => {
+      try { safeText(arg, "launch argument", 1024); return false; } catch { return true; }
+    })
+    || ![null, "local", "user", "project"].includes(launch.scope as null | string)) {
+    fail("CORRUPT_OPERATION", "operation manifest is corrupt");
+  }
+  const locator = validateOperationLocator(recordedRuntime, metadata.locator);
+  const command = safeText(launch.command, "launch command", 4096);
+  const scope = launch.scope as "local" | "user" | "project" | null;
+  if ((recordedRuntime !== "claude-code" && scope !== null)
+    || (recordedRuntime === "claude-code"
+      && scope !== (locator as Extract<ClientOperationManagedMetadata["locator"], { kind: "claude-code-scope" }>).scope)
+    || ((recordedRuntime === "codex" || recordedRuntime === "claude-code") && launch.args.length !== 0)) {
+    fail("CORRUPT_OPERATION", "operation manifest is corrupt");
+  }
+  if (recordedRuntime === "codex" || recordedRuntime === "claude-code") safeNativeLaunchCommand(command);
+  if (recordedRuntime === "claude-desktop" && !isAbsolute(command)) fail("CORRUPT_OPERATION", "operation manifest is corrupt");
+  return {
+    schema: "agent-bridge.client-management", version: 1, runtime: recordedRuntime, identity, instance: recordedInstance,
+    backendConfigPath, launch: { command, args: [...launch.args] as string[], scope }, locator,
+  };
+}
+
+function canonical(value: unknown): string {
+  if (Array.isArray(value)) return `[${value.map(canonical).join(",")}]`;
+  if (!value || typeof value !== "object") return JSON.stringify(value);
+  return `{${Object.keys(value as Record<string, unknown>).sort()
+    .map((key) => `${JSON.stringify(key)}:${canonical((value as Record<string, unknown>)[key])}`).join(",")}}`;
+}
+
+function sameCanonicalValue(left: unknown, right: unknown): boolean {
+  return canonical(left) === canonical(right);
+}
+
+function canonicalDigest(value: unknown): string {
+  return createHash("sha256").update(canonical(value)).digest("hex");
+}
+
+function exactRegistrationProof(metadata: ClientOperationManagedMetadata): ClientOperationRegistrationProof {
+  return {
+    state: "exact",
+    target: {
+      runtime: metadata.runtime, identity: metadata.identity, instance: metadata.instance,
+      backendConfigPath: metadata.backendConfigPath,
+      launch: { command: metadata.launch.command, args: [...metadata.launch.args], scope: metadata.launch.scope },
+      locator: metadata.locator,
+    },
+    observed: {
+      state: "present", command: metadata.launch.command, args: [...metadata.launch.args],
+      env: {
+        AGENT_BRIDGE_AGENT: metadata.identity,
+        AGENT_BRIDGE_INSTANCE: metadata.instance,
+        AGENT_BRIDGE_CONFIG: metadata.backendConfigPath,
+      },
+    },
+  };
+}
+
+function forwardMetadataFromUpdate(
+  prior: ClientOperationManagedMetadata,
+  launch: ClientOperationLaunch,
+): ClientOperationManagedMetadata {
+  return {
+    ...prior,
+    launch: { command: launch.command, args: [...launch.args], scope: launch.scope },
+  };
+}
+
+function validateRegistrationProof(
+  value: unknown,
+  metadata: ClientOperationManagedMetadata,
+): ClientOperationRegistrationProof {
+  if (!value || typeof value !== "object" || Array.isArray(value)) fail("CORRUPT_OPERATION", "operation manifest is corrupt");
+  const proof = value as Record<string, unknown>;
+  if (Object.keys(proof).sort().join(",") !== "observed,state,target" || proof.state !== "exact"
+    || !proof.target || typeof proof.target !== "object" || Array.isArray(proof.target)
+    || !proof.observed || typeof proof.observed !== "object" || Array.isArray(proof.observed)) {
+    fail("CORRUPT_OPERATION", "operation manifest is corrupt");
+  }
+  const target = proof.target as Record<string, unknown>;
+  if (Object.keys(target).sort().join(",") !== "backendConfigPath,identity,instance,launch,locator,runtime") {
+    fail("CORRUPT_OPERATION", "operation manifest is corrupt");
+  }
+  const targetMetadata = validateOperationMetadata({
+    schema: "agent-bridge.client-management", version: 1,
+    runtime: target.runtime, identity: target.identity, instance: target.instance,
+    backendConfigPath: target.backendConfigPath, launch: target.launch, locator: target.locator,
+  }, metadata.runtime, metadata.instance);
+  if (!sameCanonicalValue(targetMetadata, metadata)) fail("CORRUPT_OPERATION", "operation manifest is corrupt");
+  const observed = proof.observed as Record<string, unknown>;
+  if (Object.keys(observed).sort().join(",") !== "args,command,env,state" || observed.state !== "present"
+    || safeText(observed.command, "registration command", 4096) !== metadata.launch.command
+    || !Array.isArray(observed.args) || !sameCanonicalValue(observed.args, metadata.launch.args)
+    || !observed.env || typeof observed.env !== "object" || Array.isArray(observed.env)) {
+    fail("CORRUPT_OPERATION", "operation manifest is corrupt");
+  }
+  const env = observed.env as Record<string, unknown>;
+  if (Object.keys(env).sort().join(",") !== "AGENT_BRIDGE_AGENT,AGENT_BRIDGE_CONFIG,AGENT_BRIDGE_INSTANCE"
+    || env.AGENT_BRIDGE_AGENT !== metadata.identity
+    || env.AGENT_BRIDGE_CONFIG !== metadata.backendConfigPath
+    || env.AGENT_BRIDGE_INSTANCE !== metadata.instance) {
+    fail("CORRUPT_OPERATION", "operation manifest is corrupt");
+  }
+  return {
+    state: "exact",
+    target: {
+      runtime: metadata.runtime, identity: metadata.identity, instance: metadata.instance,
+      backendConfigPath: metadata.backendConfigPath,
+      launch: { command: metadata.launch.command, args: [...metadata.launch.args], scope: metadata.launch.scope },
+      locator: metadata.locator,
+    },
+    observed: {
+      state: "present", command: metadata.launch.command, args: [...metadata.launch.args],
+      env: {
+        AGENT_BRIDGE_AGENT: metadata.identity,
+        AGENT_BRIDGE_CONFIG: metadata.backendConfigPath,
+        AGENT_BRIDGE_INSTANCE: metadata.instance,
+      },
+    },
+  };
+}
+
+function validateRollbackContract(
+  value: unknown,
+  runtime: InstallableRuntime,
+  instance: string,
+): ClientOperationRollbackContract {
+  if (!value || typeof value !== "object" || Array.isArray(value)) fail("CORRUPT_OPERATION", "operation manifest is corrupt");
+  const contract = value as Record<string, unknown>;
+  if (Object.keys(contract).sort().join(",")
+    !== "forwardMetadataSha256,forwardRegistrationSha256,identity,priorMetadata,priorRegistration,schema,version"
+    || contract.schema !== "agent-bridge.client-update-rollback" || contract.version !== 1
+    || typeof contract.forwardMetadataSha256 !== "string" || !/^[0-9a-f]{64}$/.test(contract.forwardMetadataSha256)
+    || typeof contract.forwardRegistrationSha256 !== "string" || !/^[0-9a-f]{64}$/.test(contract.forwardRegistrationSha256)) {
+    fail("CORRUPT_OPERATION", "operation manifest is corrupt");
+  }
+  const priorMetadata = validateOperationMetadata(contract.priorMetadata, runtime, instance);
+  const identity = safeIdentity(contract.identity);
+  if (identity !== priorMetadata.identity) fail("CORRUPT_OPERATION", "operation manifest is corrupt");
+  const priorRegistration = validateRegistrationProof(contract.priorRegistration, priorMetadata);
+  return {
+    schema: "agent-bridge.client-update-rollback", version: 1, identity,
+    priorMetadata, priorRegistration,
+    forwardMetadataSha256: contract.forwardMetadataSha256,
+    forwardRegistrationSha256: contract.forwardRegistrationSha256,
+  };
+}
+
+export function clientOperationSupportsResume(version: ClientOperationVersion, kind: ClientOperationKind): boolean {
+  return RESUMABLE_OPERATION_KINDS[version].has(kind);
+}
 function validateRequest(
-  value: unknown, runtime?: InstallableRuntime, version: 2 | typeof CLIENT_OPERATION_VERSION = CLIENT_OPERATION_VERSION,
+  value: unknown, runtime?: InstallableRuntime, version: ClientOperationVersion = CLIENT_OPERATION_VERSION,
+  instance?: string,
 ): RecordedClientOperationRequest {
   if (!value || typeof value !== "object" || Array.isArray(value)) fail("CORRUPT_OPERATION", "operation manifest is corrupt");
   const request = value as Record<string, unknown>;
@@ -363,15 +636,18 @@ function validateRequest(
     return { kind: "migrate", endpoint: parsed.toString(), workspace };
   }
   if (request.kind === "repair") {
+    if (version === 4) fail("CORRUPT_OPERATION", "operation manifest is corrupt");
     if (keys !== "identity,kind") fail("CORRUPT_OPERATION", "operation manifest is corrupt");
     return { kind: "repair", identity: safeIdentity(request.identity) };
   }
   if (request.kind === "uninstall") {
+    if (version === 4) fail("CORRUPT_OPERATION", "operation manifest is corrupt");
     if (keys !== "identity,kind") fail("CORRUPT_OPERATION", "operation manifest is corrupt");
     return { kind: "uninstall", identity: safeIdentity(request.identity) };
   }
   if (request.kind === "update") {
-    if (keys !== "identity,kind,launch" || !request.launch || typeof request.launch !== "object"
+    const expectedKeys = version === 4 ? "identity,kind,launch,rollback" : "identity,kind,launch";
+    if (keys !== expectedKeys || !request.launch || typeof request.launch !== "object"
       || Array.isArray(request.launch)) fail("CORRUPT_OPERATION", "operation manifest is corrupt");
     const launch = request.launch as Record<string, unknown>;
     if (Object.keys(launch).sort().join(",") !== "args,command,envKeys,scope") {
@@ -397,7 +673,7 @@ function validateRequest(
     if (runtime === "claude-desktop" && (launch.scope !== null || !isAbsolute(command))) {
       fail("CORRUPT_OPERATION", "operation manifest is corrupt");
     }
-    return {
+    const base: { kind: "update"; identity: string; launch: ClientOperationLaunch } = {
       kind: "update",
       identity: safeIdentity(request.identity),
       launch: {
@@ -407,8 +683,35 @@ function validateRequest(
         envKeys: ["AGENT_BRIDGE_AGENT", "AGENT_BRIDGE_CONFIG", "AGENT_BRIDGE_INSTANCE"],
       },
     };
+    if (version === 4) {
+      if (!runtime) fail("CORRUPT_OPERATION", "operation manifest is corrupt");
+      if (!instance) fail("CORRUPT_OPERATION", "operation manifest is corrupt");
+      const rollback = validateRollbackContract(request.rollback, runtime, instance);
+      if (base.identity !== rollback.identity) fail("CORRUPT_OPERATION", "operation manifest is corrupt");
+      const forwardMetadata = forwardMetadataFromUpdate(rollback.priorMetadata, base.launch);
+      const forwardRegistration = exactRegistrationProof(forwardMetadata);
+      if (canonicalDigest({ role: "metadata", metadata: forwardMetadata }) !== rollback.forwardMetadataSha256
+        || canonicalDigest({ role: "registration", observation: forwardRegistration })
+          !== rollback.forwardRegistrationSha256) {
+        fail("CORRUPT_OPERATION", "operation manifest is corrupt");
+      }
+      return { ...base, rollback };
+    }
+    return base;
+  }
+  if (request.kind === "rollback") {
+    if (version !== 4 || keys !== "identity,kind,rollback,sourceOperationId" || !runtime) {
+      fail("CORRUPT_OPERATION", "operation manifest is corrupt");
+    }
+    const sourceOperationId = safeText(request.sourceOperationId, "source operation id", 36).toLowerCase();
+    if (!UUID.test(sourceOperationId)) fail("CORRUPT_OPERATION", "operation manifest is corrupt");
+    if (!instance) fail("CORRUPT_OPERATION", "operation manifest is corrupt");
+    const rollback = validateRollbackContract(request.rollback, runtime, instance);
+    if (rollback.identity !== safeIdentity(request.identity)) fail("CORRUPT_OPERATION", "operation manifest is corrupt");
+    return { kind: "rollback", identity: rollback.identity, sourceOperationId, rollback };
   }
   if (request.kind === "migrate") {
+    if (version === 4) fail("CORRUPT_OPERATION", "operation manifest is corrupt");
     if (keys !== "endpoint,kind,workspace") fail("CORRUPT_OPERATION", "operation manifest is corrupt");
     const endpoint = safeText(request.endpoint, "endpoint", 512);
     let parsed: URL;
@@ -422,10 +725,13 @@ function validateRequest(
   }
   fail("CORRUPT_OPERATION", "operation manifest is corrupt");
 }
-function validateCompletion(value: unknown): ClientOperationCompletion {
+function validateCompletion(value: unknown, version: ClientOperationVersion, runtime: InstallableRuntime, instance: string): ClientOperationCompletion {
   if (!value || typeof value !== "object" || Array.isArray(value)) fail("CORRUPT_OPERATION", "operation manifest is corrupt");
   const completion = value as Record<string, unknown>;
-  if (Object.keys(completion).sort().join(",") !== "cleanupDirectoryDurability,completedAt,operation,stepCount"
+  const expectedKeys = version === 4
+    ? "cleanupDirectoryDurability,completedAt,operation,rollback,stepCount"
+    : "cleanupDirectoryDurability,completedAt,operation,stepCount";
+  if (Object.keys(completion).sort().join(",") !== expectedKeys
     || !OPERATIONS.includes(completion.operation as ClientOperationKind)
     || !Number.isSafeInteger(completion.stepCount) || Number(completion.stepCount) < 1
     || Number(completion.stepCount) > MAX_OPERATION_STEPS
@@ -433,16 +739,29 @@ function validateCompletion(value: unknown): ClientOperationCompletion {
     || !["durable", "unavailable"].includes(String(completion.cleanupDirectoryDurability))) {
     fail("CORRUPT_OPERATION", "operation manifest is corrupt");
   }
+  const rollback = version === 4
+    ? completion.rollback === null ? null : validateRollbackContract(completion.rollback, runtime, instance)
+    : undefined;
+  const allowedOperations = version === 4
+    ? ["update", "rollback"]
+    : ["repair", "update", "uninstall", "migrate"];
+  if (!allowedOperations.includes(String(completion.operation))) {
+    fail("CORRUPT_OPERATION", "operation manifest is corrupt");
+  }
+  if (version === 4 && completion.operation !== "update" && rollback !== null) {
+    fail("CORRUPT_OPERATION", "operation manifest is corrupt");
+  }
   return {
     operation: completion.operation as ClientOperationKind,
     stepCount: Number(completion.stepCount), completedAt: completion.completedAt,
     cleanupDirectoryDurability: completion.cleanupDirectoryDurability as "durable" | "unavailable",
+    ...(version === 4 ? { rollback } : {}),
   };
 }
 export function validateClientOperation(value: unknown): ClientOperationManifest {
   if (!value || typeof value !== "object" || Array.isArray(value)) fail("CORRUPT_OPERATION", "operation manifest is corrupt");
   const file = value as Record<string, unknown>;
-  if (file.schema !== CLIENT_OPERATION_SCHEMA || (file.version !== 2 && file.version !== CLIENT_OPERATION_VERSION)
+  if (file.schema !== CLIENT_OPERATION_SCHEMA || ![2, 3, CLIENT_OPERATION_VERSION].includes(Number(file.version))
     || !UUID.test(String(file.operationId))
     || !RUNTIMES.includes(file.runtime as InstallableRuntime) || !STATES.includes(file.state as ClientOperationState)
     || !Number.isSafeInteger(file.revision) || Number(file.revision) < 0
@@ -453,13 +772,19 @@ export function validateClientOperation(value: unknown): ClientOperationManifest
   const updatedAt = safeText(file.updatedAt, "updatedAt", 64);
   if (!Number.isFinite(Date.parse(createdAt)) || !Number.isFinite(Date.parse(updatedAt))) fail("CORRUPT_OPERATION", "operation manifest is corrupt");
   const terminal = file.state === "committed";
-  const version = file.version as 2 | typeof CLIENT_OPERATION_VERSION;
-  const request = terminal && file.request === null ? null : validateRequest(file.request, file.runtime as InstallableRuntime, version);
-  const completion = terminal ? validateCompletion(file.completion) : null;
+  const version = file.version as ClientOperationVersion;
+  const instance = safeText(file.instance, "instance");
+  const request = terminal && file.request === null
+    ? null
+    : validateRequest(file.request, file.runtime as InstallableRuntime, version, instance);
+  const completion = terminal ? validateCompletion(file.completion, version, file.runtime as InstallableRuntime, instance) : null;
   const artifacts = file.artifacts.map(validateArtifact);
   const steps = file.steps.map(validateStep);
   if ((!terminal && (!request || file.completion !== null || steps.length === 0))
     || (terminal && (request !== null || steps.length !== 0 || artifacts.length !== 0))) {
+    fail("CORRUPT_OPERATION", "operation manifest is corrupt");
+  }
+  if (terminal && version === 4 && completion?.operation === "update" && completion.rollback === null) {
     fail("CORRUPT_OPERATION", "operation manifest is corrupt");
   }
   const firstIncomplete = steps.findIndex((step) => step.state !== "observed-applied");
@@ -504,7 +829,7 @@ export function validateClientOperation(value: unknown): ClientOperationManifest
   return {
     schema: CLIENT_OPERATION_SCHEMA, version,
     operationId: String(file.operationId).toLowerCase(), request,
-    runtime: file.runtime as InstallableRuntime, instance: safeText(file.instance, "instance"),
+    runtime: file.runtime as InstallableRuntime, instance,
     state: file.state as ClientOperationState, revision: Number(file.revision),
     host: safeText(file.host, "host", 255), createdAt, updatedAt, completion,
     artifacts, steps,
@@ -633,7 +958,7 @@ function publishAfterArtifact(
 }
 
 function createClientOperationWithCache(input: {
-  operationId?: string; request: ClientOperationRequest; runtime: InstallableRuntime; instance: string;
+  operationId?: string; version?: 3 | typeof CLIENT_OPERATION_VERSION; request: ClientOperationRequest; runtime: InstallableRuntime; instance: string;
   steps: Array<Pick<ClientOperationStep, "target" | "locator" | "beforeArtifact" | "afterArtifact" | "expectedBeforeSha256" | "expectedAfterSha256">>;
 }, env: NodeJS.ProcessEnv = process.env, filesystem: ClientOperationFilesystem = filesystemDefaults,
 cache?: PrivateDirectoryAccessCache): ClientOperationManifest {
@@ -641,8 +966,9 @@ cache?: PrivateDirectoryAccessCache): ClientOperationManifest {
   if (!UUID.test(operationId) || !RUNTIMES.includes(input.runtime)) {
     fail("INVALID_OPERATION", "operation request is invalid");
   }
-  const request = validateRequest(input.request, input.runtime, CLIENT_OPERATION_VERSION) as ClientOperationRequest;
   const instance = safeText(input.instance.trim(), "instance");
+  const version = input.version ?? 3;
+  const request = validateRequest(input.request, input.runtime, version, instance) as ClientOperationRequest;
   const pinned = pinOperationRoot(env, true, cache);
   const directory = join(pinned.root, operationId);
   assertPinnedRoot(pinned, cache);
@@ -658,7 +984,7 @@ cache?: PrivateDirectoryAccessCache): ClientOperationManifest {
   assertPinnedRoot(pinned, cache);
   const now = new Date().toISOString();
   const manifest: ClientOperationManifest = {
-    schema: CLIENT_OPERATION_SCHEMA, version: CLIENT_OPERATION_VERSION, operationId,
+    schema: CLIENT_OPERATION_SCHEMA, version, operationId,
     request, runtime: input.runtime, instance, state: "prepared", revision: 0,
     host: hostname(), createdAt: now, updatedAt: now, completion: null, artifacts: [],
     steps: input.steps.map((step, index) => ({ ...step, index, state: "pending" as const, intentRecordedAt: null, observedAppliedAt: null })),
@@ -688,7 +1014,7 @@ cache?: PrivateDirectoryAccessCache): ClientOperationManifest {
 }
 
 export function createClientOperation(input: {
-  operationId?: string; request: ClientOperationRequest; runtime: InstallableRuntime; instance: string;
+  operationId?: string; version?: 3 | typeof CLIENT_OPERATION_VERSION; request: ClientOperationRequest; runtime: InstallableRuntime; instance: string;
   steps: Array<Pick<ClientOperationStep, "target" | "locator" | "beforeArtifact" | "afterArtifact" | "expectedBeforeSha256" | "expectedAfterSha256">>;
 }, env: NodeJS.ProcessEnv = process.env, filesystem: ClientOperationFilesystem = filesystemDefaults): ClientOperationManifest {
   return createClientOperationWithCache(input, env, filesystem);
@@ -718,7 +1044,7 @@ export function beginClientOperation(input: Parameters<typeof createClientOperat
 export function resumeClientOperation(operationId: string, env: NodeJS.ProcessEnv = process.env, filesystem: ClientOperationFilesystem = filesystemDefaults): BegunClientOperation {
   const manifest = readClientOperation(operationId, env);
   if (manifest.state === "committed") fail("OPERATION_COMPLETE", "committed operation cannot be resumed");
-  if (manifest.version !== CLIENT_OPERATION_VERSION) {
+  if (!manifest.request || !clientOperationSupportsResume(manifest.version, manifest.request.kind)) {
     fail("LEGACY_OPERATION", "legacy operation cannot resume without an identity-bound request");
   }
   if (manifest.host !== hostname()) fail("CROSS_HOST_RESUME", "operation can only resume on its creating host");
@@ -1040,12 +1366,16 @@ function cleanupClientOperationArtifactWithCache(
     filesystem.hook("before-cleanup-commit", operationManifest);
     assertCleanupPaths();
     const now = new Date().toISOString();
+    const rollback = disk.version === 4 && disk.request?.kind === "update" && "rollback" in disk.request
+      ? disk.request.rollback ?? null
+      : null;
     const completion: ClientOperationCompletion = {
       operation: disk.request!.kind,
       stepCount: disk.steps.length,
       completedAt: now,
       cleanupDirectoryDurability: disk.artifacts.some((item) => item.directoryDurability === "unavailable")
         ? "unavailable" : "durable",
+      ...(disk.version === 4 ? { rollback } : {}),
     };
     const terminal = validateClientOperation({
       ...disk, request: null, state: "committed", revision: disk.revision + 1,
@@ -1210,12 +1540,13 @@ export function inspectClientOperation(operationId: string, env: NodeJS.ProcessE
     const pending = pendingStep(manifest);
     const ambiguous = pending?.state === "intent-recorded";
     const sameHost = manifest.host === hostname();
-    const legacy = manifest.version !== CLIENT_OPERATION_VERSION && manifest.state !== "committed";
+    const unsupported = manifest.state !== "committed"
+      && (!manifest.request || !clientOperationSupportsResume(manifest.version, manifest.request.kind));
     const inspectionState: ClientOperationSummary["inspectionState"] = !intact
       ? "blocked" : manifest.state === "committed" ? "complete" : !sameHost
-        ? "blocked" : legacy ? "blocked" : ambiguous ? "classification-required" : "resumable";
+        ? "blocked" : unsupported ? "blocked" : ambiguous ? "classification-required" : "resumable";
     return {
-      schemaVersion: 3, operationId: manifest.operationId,
+      schemaVersion: 4, operationId: manifest.operationId,
       operation: manifest.request?.kind ?? manifest.completion?.operation ?? null,
       runtime: manifest.runtime, instance: manifest.instance,
       state: intact ? manifest.state : "corrupt", inspectionState, revision: manifest.revision,
@@ -1226,7 +1557,9 @@ export function inspectClientOperation(operationId: string, env: NodeJS.ProcessE
       recoverable: inspectionState === "resumable" || inspectionState === "classification-required",
       reason: !intact ? "operation artifacts do not match the durable manifest"
         : !sameHost ? "operation can only resume on its creating host"
-        : legacy ? "legacy operation lacks an identity-bound request and cannot resume"
+        : unsupported ? manifest.version === 2
+          ? "legacy operation lacks an identity-bound request and cannot resume"
+          : "operation format and kind do not support resume"
         : ambiguous ? `operation stopped at ordered step ${pending.index} and requires external-state classification`
           : manifest.state === "committed" ? "operation is complete and retains a credential-free audit record"
           : artifactInspection.resumableResidue ? "operation contains expected crash residue and can resume safely"
@@ -1234,7 +1567,7 @@ export function inspectClientOperation(operationId: string, env: NodeJS.ProcessE
     };
   } catch (error) {
     if (!(error instanceof ClientOperationError) || error.code === "INVALID_OPERATION_ID") throw error;
-    return { schemaVersion: 3, operationId: operationId.toLowerCase(), operation: null, runtime: null, instance: null, state: "corrupt", inspectionState: "blocked", revision: null, createdAt: null, updatedAt: null, completedAt: null, cleanupDirectoryDurability: null, artifacts: [], pendingStep: null, recoverable: false, reason: "operation state is corrupt or insecure" };
+    return { schemaVersion: 4, operationId: operationId.toLowerCase(), operation: null, runtime: null, instance: null, state: "corrupt", inspectionState: "blocked", revision: null, createdAt: null, updatedAt: null, completedAt: null, cleanupDirectoryDurability: null, artifacts: [], pendingStep: null, recoverable: false, reason: "operation state is corrupt or insecure" };
   }
 }
 export function reconcileClientOperation(operationId: string, env: NodeJS.ProcessEnv = process.env): ClientOperationSummary {

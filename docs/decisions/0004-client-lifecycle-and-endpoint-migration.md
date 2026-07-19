@@ -127,9 +127,10 @@ resume. Resume is same-host only. Journal states
 are prepared, snapshotted, in-progress, applied, cleaning, and committed. Inspection
 separately reports resumable, classification-required, blocked, or complete.
 
-New repair, update, and uninstall journals use operation format version 3. A version 2 journal
-keeps its released request shape and remains inspectable. A non-terminal version 2
-journal cannot resume because it lacks an identity-bound request.
+Repair and uninstall journals use operation format version 3. New update journals use
+v4 and carry a bounded credential-free inverse contract. A version 2 journal keeps its
+released request shape and remains inspectable. A non-terminal version 2 journal
+cannot resume because it lacks an identity-bound request.
 
 Creation pins the operation root before it publishes state. Cleanup pins that root,
 the operation directory, and the snapshots directory before it records intent or
@@ -151,12 +152,24 @@ verified absence. Windows records unavailable directory durability. Node's pathn
 unlink cannot provide a transaction against a same-user writer, so this is an advisory
 race boundary. Desktop removes only `mcpServers.agent-bridge`.
 
-`clients resume <operation-id> [--recover-lock]` resumes only the v3 request recorded
-in the operation. It derives action, runtime, instance, identity, and update launch
-from that request and accepts no replacement client authority. It cannot resume a
-version 2 operation. It also completes an uninstall interrupted after metadata
-deletion, when an action-specific resume cannot reload the deleted record. Endpoint
-migration remains deferred, and no rolled-back state is added. Physical erasure is
+`clients rollback <source-operation-id> --identity <name>` is plan-first and accepts
+only a committed same-host v4 update source. `--apply` creates a new v4 `rollback`
+operation. It verifies the asserted identity, prior nonsecret metadata and exact
+registration contract, and the current forward metadata and registration digests.
+Native rollback removes the forward registration, proves absence, adds the prior
+registration, proves it, then writes prior metadata. Desktop replaces only
+`mcpServers.agent-bridge` and writes prior metadata last. The source journal remains
+unchanged. Reverse resume derives authority from its recorded source UUID and inverse
+contract. A changed current state, v2 or v3 source, repair, uninstall, unsafe inverse
+fields, or a different host fails closed. A failed forward update never rolls back
+automatically. Repair remains monotonic. Uninstall recovery is re-enrollment.
+
+`clients resume <operation-id> [--recover-lock]` resumes v3 repair, update, and
+uninstall requests plus supported v4 update and rollback requests. It derives action,
+runtime, instance, identity, launch, and reverse source from the record and accepts no
+replacement client authority. It cannot resume a version 2 operation. It also
+completes an uninstall interrupted after metadata deletion and a rollback interrupted
+after any ordered step. Endpoint migration remains deferred. Physical erasure is
 outside the contract.
 
 ## Consequences

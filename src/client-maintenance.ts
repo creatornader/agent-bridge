@@ -3,6 +3,7 @@ import {
   readFileSync, renameSync, rmSync, unlinkSync, writeFileSync,
 } from "node:fs";
 import { createHash } from "node:crypto";
+import { hostname } from "node:os";
 import { dirname, isAbsolute, join, resolve } from "node:path";
 import { spawnSync } from "node:child_process";
 import { isDeepStrictEqual } from "node:util";
@@ -11,7 +12,8 @@ import {
   readClientOperation, recordClientOperationStepApplied, recordClientOperationStepIntent,
   recoverClientOperationLock, releaseClientOperationLock, resumeClientOperation,
   transitionClientOperation, writeClientOperationSnapshot, type ClientOperationLaunch,
-  type ClientOperationManifest,
+  type ClientOperationManifest, type ClientOperationRegistrationProof,
+  type ClientOperationRollbackContract,
 } from "./client-operation.js";
 import {
   assertNoLinkedPathAncestors, loadManagedClientMetadata, managedClientMetadataPath,
@@ -58,11 +60,13 @@ interface PlannedStep {
   locator: string;
   before: string;
   after: string;
+  registrationMetadata?: "source" | "target";
+  afterRegistrationMetadata?: "source" | "target";
 }
 
 export interface ClientMaintenancePlan {
   schemaVersion: 1;
-  action: "repair" | "update" | "uninstall" | "none";
+  action: "repair" | "update" | "uninstall" | "rollback" | "none";
   applied: boolean;
   operationId?: string;
   runtime: InstallableRuntime;
@@ -74,6 +78,7 @@ export interface ClientMaintenancePlan {
 
 interface ClientMaintenanceTestHooks {
   afterLock?: () => void;
+  beforeOperationBegin?: () => void;
   beforeApply?: (step: { target: PlannedStep["target"]; action: PlannedKind }) => void;
   afterApply?: (step: { target: PlannedStep["target"]; action: PlannedKind }) => void;
   afterBackendPin?: () => void;
@@ -104,6 +109,17 @@ export interface ClientMaintenanceResumeOptions {
   testHooks?: ClientMaintenanceTestHooks;
 }
 
+export interface ClientRollbackOptions {
+  sourceOperationId: string;
+  identity: string;
+  apply?: boolean;
+  recoverLock?: boolean;
+  env?: NodeJS.ProcessEnv;
+  execute?: ClientLifecycleExecutor;
+  /** Test-only fault injection for mutation-boundary regression coverage. */
+  testHooks?: ClientMaintenanceTestHooks;
+}
+
 function digest(value: string): string {
   return createHash("sha256").update(value).digest("hex");
 }
@@ -117,6 +133,13 @@ function canonical(value: unknown): string {
   if (!value || typeof value !== "object") return JSON.stringify(value);
   return `{${Object.keys(value as Record<string, unknown>).sort()
     .map((key) => `${JSON.stringify(key)}:${canonical((value as Record<string, unknown>)[key])}`).join(",")}}`;
+}
+
+function assertCurrentOperationManifest(current: ClientOperationManifest, env: NodeJS.ProcessEnv): void {
+  const persisted = readClientOperation(current.operationId, env);
+  if (!isDeepStrictEqual(persisted, current) || canonical(persisted) !== canonical(current)) {
+    throw new Error("operation manifest changed while the client lock is held");
+  }
 }
 
 function assertRuntime(runtime: string): asserts runtime is InstallableRuntime {
@@ -133,6 +156,63 @@ function assertIdentity(metadata: ManagedClientMetadata, assertion: string): voi
 
 function registrationProof(observation: ManagedRegistrationObservation): string {
   return canonical({ role: "registration", observation });
+}
+
+function exactRegistrationObservation(metadata: ManagedClientMetadata): ManagedRegistrationObservation {
+  return {
+    state: "exact",
+    target: {
+      runtime: metadata.runtime, identity: metadata.identity, instance: metadata.instance,
+      backendConfigPath: metadata.backendConfigPath,
+      launch: { command: metadata.launch.command, args: [...metadata.launch.args], scope: metadata.launch.scope },
+      locator: metadata.locator,
+    },
+    observed: {
+      state: "present", command: metadata.launch.command, args: [...metadata.launch.args],
+      env: {
+        AGENT_BRIDGE_AGENT: metadata.identity,
+        AGENT_BRIDGE_INSTANCE: metadata.instance,
+        AGENT_BRIDGE_CONFIG: metadata.backendConfigPath,
+      },
+    },
+  };
+}
+
+function rollbackContract(
+  prior: ManagedClientMetadata,
+  forward: ManagedClientMetadata,
+): ClientOperationRollbackContract {
+  const priorRegistration = exactRegistrationObservation(prior);
+  const forwardRegistration = exactRegistrationObservation(forward);
+  return {
+    schema: "agent-bridge.client-update-rollback", version: 1, identity: prior.identity,
+    priorMetadata: prior,
+    priorRegistration: priorRegistration as ClientOperationRegistrationProof,
+    forwardMetadataSha256: digest(metadataProof(forward)),
+    forwardRegistrationSha256: digest(registrationProof(forwardRegistration)),
+  };
+}
+
+function managedMetadataFromRollback(
+  contract: ClientOperationRollbackContract,
+): ManagedClientMetadata {
+  return contract.priorMetadata as ManagedClientMetadata;
+}
+
+function assertRollbackContract(
+  contract: ClientOperationRollbackContract,
+  runtime: InstallableRuntime,
+  instance: string,
+): { prior: ManagedClientMetadata } {
+  const prior = managedMetadataFromRollback(contract);
+  if (prior.runtime !== runtime || prior.instance !== instance || prior.identity !== contract.identity) {
+    throw new Error("rollback source does not match its recorded managed client");
+  }
+  const expectedPrior = exactRegistrationObservation(prior);
+  if (canonical(contract.priorRegistration) !== canonical(expectedPrior)) {
+    throw new Error("rollback source inverse registration contract is invalid");
+  }
+  return { prior };
 }
 
 function metadataProof(metadata: ManagedClientMetadata): string {
@@ -771,6 +851,112 @@ function buildUninstallPlan(
   return steps;
 }
 
+function buildRollbackPlan(
+  forward: ManagedClientMetadata,
+  prior: ManagedClientMetadata,
+): PlannedStep[] {
+  const forwardRegistration = exactRegistrationObservation(forward);
+  const priorRegistration = exactRegistrationObservation(prior);
+  if (forward.runtime === "claude-desktop") {
+    return [
+      {
+        kind: "desktop-replace", target: "registration", locator: "claude-desktop:agent-bridge",
+        before: registrationProof(forwardRegistration), after: registrationProof(priorRegistration),
+        registrationMetadata: "source", afterRegistrationMetadata: "target",
+      },
+      {
+        kind: "metadata", target: "metadata", locator: "managed-client-metadata",
+        before: metadataProof(forward), after: metadataProof(prior),
+      },
+    ];
+  }
+  const absentForward: ManagedRegistrationObservation = {
+    state: "absent", target: forwardRegistration.target, observed: { state: "absent" },
+  };
+  const absentPrior: ManagedRegistrationObservation = {
+    state: "absent", target: priorRegistration.target, observed: { state: "absent" },
+  };
+  return [
+    {
+      kind: "native-remove", target: "registration", locator: `${forward.runtime}:agent-bridge`,
+      before: registrationProof(forwardRegistration), after: registrationProof(absentForward),
+      registrationMetadata: "source", afterRegistrationMetadata: "source",
+    },
+    {
+      kind: "native-add", target: "registration", locator: `${forward.runtime}:agent-bridge`,
+      before: registrationProof(absentPrior), after: registrationProof(priorRegistration),
+      registrationMetadata: "target", afterRegistrationMetadata: "target",
+    },
+    {
+      kind: "metadata", target: "metadata", locator: "managed-client-metadata",
+      before: metadataProof(forward), after: metadataProof(prior),
+    },
+  ];
+}
+
+function rollbackExecutionStepsFromManifest(
+  manifest: ClientOperationManifest,
+  prior: ManagedClientMetadata,
+): PlannedStep[] {
+  let registrationIndex = 0;
+  return manifest.steps.map((step) => {
+    if (step.target === "metadata") {
+      return { kind: "metadata", target: "metadata", locator: step.locator, before: "", after: "" };
+    }
+    if (prior.runtime === "claude-desktop") {
+      return {
+        kind: "desktop-replace", target: "registration", locator: step.locator,
+        before: "", after: "", registrationMetadata: "source", afterRegistrationMetadata: "target",
+      };
+    }
+    const kind = registrationIndex++ === 0 ? "native-remove" : "native-add";
+    return {
+      kind, target: "registration", locator: step.locator, before: "", after: "",
+      registrationMetadata: kind === "native-remove" ? "source" : "target",
+      afterRegistrationMetadata: kind === "native-remove" ? "source" : "target",
+    };
+  });
+}
+
+function rollbackMetadataReachedAfterState(
+  manifest: ClientOperationManifest | null,
+  prior: ManagedClientMetadata,
+  env: NodeJS.ProcessEnv,
+): boolean {
+  const metadataStep = manifest?.steps.find((step) => step.target === "metadata");
+  if (!metadataStep) return false;
+  if (metadataStep.state === "observed-applied") return true;
+  if (metadataStep.state !== "intent-recorded") return false;
+  const current = loadManagedClientMetadata(manifest!.runtime, manifest!.instance, env);
+  return isDeepStrictEqual(current, prior)
+    && digest(metadataProof(current)) === metadataStep.expectedAfterSha256;
+}
+
+function rollbackRegistrationHasProgress(manifest: ClientOperationManifest | null): boolean {
+  return manifest?.steps.some((step) => step.target === "registration" && step.state !== "pending") ?? false;
+}
+
+function assertForwardRollbackMetadataState(
+  forward: ManagedClientMetadata,
+  contract: ClientOperationRollbackContract,
+): void {
+  if (digest(metadataProof(forward)) !== contract.forwardMetadataSha256) {
+    throw new Error("managed client no longer matches the forward update metadata state");
+  }
+}
+
+function assertForwardRollbackRegistrationState(
+  forward: ManagedClientMetadata,
+  contract: ClientOperationRollbackContract,
+  execute: ClientLifecycleExecutor,
+  env: NodeJS.ProcessEnv,
+): void {
+  const registration = observeManagedRegistration(forward, execute, env);
+  if (digest(registrationProof(registration)) !== contract.forwardRegistrationSha256) {
+    throw new Error("managed client no longer matches the forward update registration state");
+  }
+}
+
 function executionStepsFromManifest(
   manifest: ClientOperationManifest,
   target: ManagedClientMetadata,
@@ -805,6 +991,7 @@ function observedProof(
   target: ManagedClientMetadata,
   execute: ClientLifecycleExecutor,
   env: NodeJS.ProcessEnv,
+  phase: "before" | "after" = "before",
 ): ObservedStep {
   if (step.kind === "backend") {
     const backend = backendPolicy(metadata.backendConfigPath);
@@ -829,7 +1016,16 @@ function observedProof(
     const parent = privateDirectoryProof(dirname(metadataPath), "managed metadata directory is invalid");
     return { proof: canonical(observedMetadataAbsentProof(metadata.runtime, metadata.instance, env, parent)) };
   }
-  return { proof: registrationProof(observeManagedRegistration(target, execute, env, metadata.launch.args)) };
+  const registrationRole = phase === "after"
+    ? step.afterRegistrationMetadata ?? step.registrationMetadata
+    : step.registrationMetadata;
+  const registrationMetadata = registrationRole === "source" ? metadata : target;
+  const alternateArgs = registrationRole === "source" ? target.launch.args : metadata.launch.args;
+  return {
+    proof: registrationProof(observeManagedRegistration(
+      registrationMetadata, execute, env, alternateArgs,
+    )),
+  };
 }
 
 function applyStep(
@@ -854,9 +1050,11 @@ function applyStep(
     deleteBackend(metadata.backendConfigPath, observed.backend);
     return;
   }
-  if (step.kind === "native-remove") return nativeExecute(target, "remove", execute, env);
-  if (step.kind === "native-add") return nativeExecute(target, "add", execute, env);
-  if (step.kind === "desktop-replace") return mutateDesktopRegistration(target, operationId, stepIndex, "replace", desktopHooks);
+  const beforeRegistration = step.registrationMetadata === "source" ? metadata : target;
+  const afterRegistration = step.afterRegistrationMetadata === "source" ? metadata : target;
+  if (step.kind === "native-remove") return nativeExecute(beforeRegistration, "remove", execute, env);
+  if (step.kind === "native-add") return nativeExecute(afterRegistration, "add", execute, env);
+  if (step.kind === "desktop-replace") return mutateDesktopRegistration(afterRegistration, operationId, stepIndex, "replace", desktopHooks);
   if (step.kind === "desktop-remove") return mutateDesktopRegistration(target, operationId, stepIndex, "remove", desktopHooks);
   if (step.kind === "metadata-delete") {
     deleteManagedClientMetadata(metadata, env);
@@ -879,11 +1077,11 @@ function resumeAction(
   if (manifest.runtime !== metadata.runtime || manifest.instance !== metadata.instance) {
     throw new Error("--resume does not match this client action, runtime, or instance");
   }
-  if (manifest.version !== 3) {
+  if (manifest.version !== 3 && manifest.version !== 4) {
     throw new Error("--resume requires an identity-bound operation request");
   }
   if (action === "repair") {
-    if (!manifest.request || manifest.request.kind !== "repair" || !("identity" in manifest.request)
+    if (manifest.version !== 3 || !manifest.request || manifest.request.kind !== "repair" || !("identity" in manifest.request)
       || manifest.request.identity !== metadata.identity) {
       throw new Error("--resume does not match this client action, runtime, or instance");
     }
@@ -891,7 +1089,7 @@ function resumeAction(
     return metadata;
   }
   if (action === "uninstall") {
-    if (!manifest.request || manifest.request.kind !== "uninstall" || !("identity" in manifest.request)
+    if (manifest.version !== 3 || !manifest.request || manifest.request.kind !== "uninstall" || !("identity" in manifest.request)
       || manifest.request.identity !== metadata.identity) {
       throw new Error("--resume does not match this client action, runtime, or instance");
     }
@@ -903,6 +1101,7 @@ function resumeAction(
     throw new Error("--resume does not match this client action, runtime, or instance");
   }
   const recorded = manifest.request.launch;
+  if (manifest.version === 4) assertRollbackContract(manifest.request.rollback!, metadata.runtime, metadata.instance);
   if (metadata.runtime === "claude-desktop") {
     const resolved = recorded.args.length === 0
       ? resolveDesktopLaunchContract(recorded.command, env)
@@ -921,7 +1120,7 @@ function resumeAction(
 }
 
 function planResult(
-  action: "repair" | "update" | "uninstall" | "none", applied: boolean, metadata: ManagedClientMetadata,
+  action: "repair" | "update" | "uninstall" | "rollback" | "none", applied: boolean, metadata: ManagedClientMetadata,
   steps: PlannedStep[], env: NodeJS.ProcessEnv, operationId?: string,
 ): ClientMaintenancePlan {
   return {
@@ -966,10 +1165,14 @@ export function maintainManagedClient(options: ClientMaintenanceOptions): Client
   const begun = options.resume
     ? resumeClientOperation(options.resume, env)
     : beginClientOperation({
+      version: requestedAction === "update" ? 4 : 3,
       request: requestedAction === "repair"
         ? { kind: "repair", identity: metadata.identity }
         : requestedAction === "update"
-          ? { kind: "update", identity: metadata.identity, launch: operationLaunch(target) }
+          ? {
+              kind: "update", identity: metadata.identity, launch: operationLaunch(target),
+              rollback: rollbackContract(metadata, target),
+            }
           : { kind: "uninstall", identity: metadata.identity },
       runtime: metadata.runtime, instance: metadata.instance,
       steps: steps.map((step, index) => ({
@@ -981,6 +1184,7 @@ export function maintainManagedClient(options: ClientMaintenanceOptions): Client
   let current = begun.manifest;
   try {
     options.testHooks?.afterLock?.();
+    assertCurrentOperationManifest(current, env);
     if (metadataProof(loadManagedClientMetadata(metadata.runtime, metadata.instance, env)) !== authority) {
       throw new Error("managed metadata changed while acquiring the client lock");
     }
@@ -1011,10 +1215,19 @@ export function maintainManagedClient(options: ClientMaintenanceOptions): Client
         && metadataProof(loadManagedClientMetadata(metadata.runtime, metadata.instance, env)) !== authority) {
         throw new Error("managed metadata changed before a client mutation");
       }
-      let actual = observedProof(step, metadata, target, execute, env);
+      let actual = observedProof(step, metadata, target, execute, env, "before");
       let intentAlreadyRecorded = false;
       if (journalStep.state === "intent-recorded") {
-        const classification = classifyClientOperationRestart(current, digest(actual.proof));
+        let classification = classifyClientOperationRestart(current, digest(actual.proof));
+        if (classification.disposition === "blocked" && step.afterRegistrationMetadata
+          && step.afterRegistrationMetadata !== step.registrationMetadata) {
+          const after = observedProof(step, metadata, target, execute, env, "after");
+          const afterClassification = classifyClientOperationRestart(current, digest(after.proof));
+          if (afterClassification.disposition === "advance") {
+            actual = after;
+            classification = afterClassification;
+          }
+        }
         if (classification.disposition === "advance") {
           current = recordClientOperationStepApplied(current.operationId, current, index, actual.proof, begun.lock, env);
           continue;
@@ -1025,6 +1238,7 @@ export function maintainManagedClient(options: ClientMaintenanceOptions): Client
         const supersededByLaterStep = current.steps.slice(index + 1)
           .some((later) => later.target === journalStep.target && later.state !== "pending");
         if (supersededByLaterStep) continue;
+        actual = observedProof(step, metadata, target, execute, env, "after");
         if (digest(actual.proof) !== journalStep.expectedAfterSha256) {
           throw new Error(`completed operation step ${index} no longer matches its after-state`);
         }
@@ -1036,12 +1250,13 @@ export function maintainManagedClient(options: ClientMaintenanceOptions): Client
         current = recordClientOperationStepIntent(current.operationId, current, index, begun.lock, env);
       }
       options.testHooks?.beforeApply?.({ target: step.target, action: step.kind });
+      assertCurrentOperationManifest(current, env);
       applyStep(
         step, actual, metadata, target, execute, env, current.operationId, index,
         options.testHooks?.desktop, options.testHooks?.afterBackendPin,
       );
       options.testHooks?.afterApply?.({ target: step.target, action: step.kind });
-      actual = observedProof(step, metadata, target, execute, env);
+      actual = observedProof(step, metadata, target, execute, env, "after");
       current = recordClientOperationStepApplied(current.operationId, current, index, actual.proof, begun.lock, env);
     }
     current = completeClientOperationCleanup(current.operationId, current, begun.lock, env);
@@ -1101,15 +1316,216 @@ function resumeUninstallAfterMetadataDeletion(
   }
 }
 
-/** Resume exactly one v3 repair, update, or uninstall using recorded operation authority only. */
+function loadRollbackSource(
+  sourceOperationId: string,
+  identity: string,
+  env: NodeJS.ProcessEnv,
+): { source: ClientOperationManifest; contract: ClientOperationRollbackContract; prior: ManagedClientMetadata } {
+  const source = readClientOperation(sourceOperationId, env);
+  if (source.state !== "committed" || source.version !== 4 || source.host !== hostname()) {
+    throw new Error("rollback source must be a committed same-host v4 update");
+  }
+  if (source.completion?.operation !== "update" || !source.completion.rollback) {
+    throw new Error("rollback source does not retain an update inverse contract");
+  }
+  const contract = source.completion.rollback;
+  const { prior } = assertRollbackContract(contract, source.runtime, source.instance);
+  if (!identity || identity.trim() !== identity || identity !== contract.identity) {
+    throw new Error("--identity must exactly match the rollback source");
+  }
+  return { source, contract, prior };
+}
+
+function assertRollbackOperationAuthority(
+  manifest: ClientOperationManifest,
+  sourceOperationId: string,
+  identity: string,
+  contract: ClientOperationRollbackContract,
+): void {
+  if (manifest.version !== 4 || manifest.request?.kind !== "rollback"
+    || manifest.request.sourceOperationId !== sourceOperationId
+    || manifest.request.identity !== identity
+    || canonical(manifest.request.rollback) !== canonical(contract)) {
+    throw new Error("locked rollback operation no longer matches its committed update authority");
+  }
+}
+
+function rollbackPlanResult(
+  applied: boolean,
+  metadata: ManagedClientMetadata,
+  steps: PlannedStep[],
+  env: NodeJS.ProcessEnv,
+  operationId?: string,
+): ClientMaintenancePlan {
+  return planResult("rollback", applied, metadata, steps, env, operationId);
+}
+
+function runManagedClientRollback(
+  options: ClientRollbackOptions,
+  resumeOperationId?: string,
+): ClientMaintenancePlan {
+  const env = options.env ?? process.env;
+  const execute = options.execute ?? ((command, args, context) => spawnSync(command, args, {
+    encoding: "utf8", cwd: context?.cwd, env: context?.env,
+  }));
+  const reverse = resumeOperationId ? readClientOperation(resumeOperationId, env) : null;
+  let sourceOperationId = options.sourceOperationId;
+  let identity = options.identity;
+  if (reverse) {
+    if (reverse.version !== 4 || !reverse.request || reverse.request.kind !== "rollback") {
+      throw new Error("operation is not a resumable rollback request");
+    }
+    sourceOperationId = reverse.request.sourceOperationId;
+    identity = reverse.request.identity;
+  }
+  const { source, contract, prior } = loadRollbackSource(sourceOperationId, identity, env);
+  const reverseRequest = reverse?.request?.kind === "rollback" ? reverse.request : null;
+  if (reverseRequest && canonical(reverseRequest.rollback) !== canonical(contract)) {
+    throw new Error("rollback request no longer matches its committed source");
+  }
+  const metadataStepApplied = rollbackMetadataReachedAfterState(reverse, prior, env);
+  const forward = metadataStepApplied ? prior : loadManagedClientMetadata(source.runtime, source.instance, env);
+  const registrationHasProgress = rollbackRegistrationHasProgress(reverse);
+  if (!metadataStepApplied) {
+    assertForwardRollbackMetadataState(forward, contract);
+    if (!registrationHasProgress) assertForwardRollbackRegistrationState(forward, contract, execute, env);
+  }
+  const steps = reverse && reverse.state !== "prepared"
+    ? rollbackExecutionStepsFromManifest(reverse, prior)
+    : buildRollbackPlan(forward, prior);
+  if (!options.apply) {
+    if (options.recoverLock) throw new Error("--recover-lock requires --apply");
+    return rollbackPlanResult(false, forward, steps, env);
+  }
+  if (options.recoverLock) recoverClientOperationLock(source.runtime, source.instance, env);
+  options.testHooks?.beforeOperationBegin?.();
+  const begun = reverse
+    ? resumeClientOperation(reverse.operationId, env)
+    : beginClientOperation({
+      version: 4,
+      request: { kind: "rollback", identity, sourceOperationId: source.operationId, rollback: contract },
+      runtime: source.runtime, instance: source.instance,
+      steps: steps.map((step, index) => ({
+        target: step.target, locator: step.locator,
+        beforeArtifact: `step-${index}.before`, afterArtifact: `step-${index}.after`,
+        expectedBeforeSha256: digest(step.before), expectedAfterSha256: digest(step.after),
+      })),
+    }, env);
+  let current = begun.manifest;
+  try {
+    assertRollbackOperationAuthority(current, source.operationId, identity, contract);
+    options.testHooks?.afterLock?.();
+    assertCurrentOperationManifest(current, env);
+    const refreshed = loadRollbackSource(source.operationId, identity, env);
+    if (canonical(refreshed.contract) !== canonical(contract)) {
+      throw new Error("rollback source changed while acquiring the client lock");
+    }
+    const metadataApplied = rollbackMetadataReachedAfterState(current, prior, env);
+    const currentForward = metadataApplied ? prior : loadManagedClientMetadata(source.runtime, source.instance, env);
+    const currentRegistrationHasProgress = rollbackRegistrationHasProgress(current);
+    if (!metadataApplied) {
+      assertForwardRollbackMetadataState(currentForward, contract);
+      if (!currentRegistrationHasProgress) assertForwardRollbackRegistrationState(currentForward, contract, execute, env);
+    }
+    const recordedSteps = current.state === "prepared"
+      ? buildRollbackPlan(currentForward, prior)
+      : rollbackExecutionStepsFromManifest(current, prior);
+    if (recordedSteps.length !== current.steps.length) {
+      throw new Error("rollback request no longer matches the recorded operation plan");
+    }
+    if (current.state === "prepared") {
+      if (recordedSteps.some((step, index) => digest(step.before) !== current.steps[index]?.expectedBeforeSha256
+        || digest(step.after) !== current.steps[index]?.expectedAfterSha256)) {
+        throw new Error("rollback request no longer matches the forward update state");
+      }
+      for (let index = 0; index < recordedSteps.length; index += 1) {
+        current = writeClientOperationSnapshot(
+          current.operationId, current, `step-${index}.before`, recordedSteps[index]!.before, begun.lock, env,
+        );
+      }
+      current = transitionClientOperation(current.operationId, current, "snapshotted", begun.lock, env);
+    }
+    const forwardMetadataAuthority = contract.forwardMetadataSha256;
+    for (let index = 0; index < recordedSteps.length; index += 1) {
+      const step = recordedSteps[index]!;
+      const journalStep = current.steps[index]!;
+      if (step.kind !== "metadata" && journalStep.state !== "observed-applied"
+        && digest(metadataProof(loadManagedClientMetadata(source.runtime, source.instance, env))) !== forwardMetadataAuthority) {
+        throw new Error("managed metadata changed before rollback mutated a client registration");
+      }
+      let actual = observedProof(step, currentForward, prior, execute, env, "before");
+      let intentAlreadyRecorded = false;
+      if (journalStep.state === "intent-recorded") {
+        let classification = classifyClientOperationRestart(current, digest(actual.proof));
+        if (classification.disposition === "blocked" && step.afterRegistrationMetadata
+          && step.afterRegistrationMetadata !== step.registrationMetadata) {
+          const after = observedProof(step, currentForward, prior, execute, env, "after");
+          const afterClassification = classifyClientOperationRestart(current, digest(after.proof));
+          if (afterClassification.disposition === "advance") {
+            actual = after;
+            classification = afterClassification;
+          }
+        }
+        if (classification.disposition === "advance") {
+          current = recordClientOperationStepApplied(current.operationId, current, index, actual.proof, begun.lock, env);
+          continue;
+        }
+        if (classification.disposition !== "retryable") throw new Error(classification.reason);
+        intentAlreadyRecorded = true;
+      } else if (journalStep.state === "observed-applied") {
+        const supersededByLaterStep = current.steps.slice(index + 1)
+          .some((later) => later.target === journalStep.target && later.state !== "pending");
+        if (supersededByLaterStep) continue;
+        actual = observedProof(step, currentForward, prior, execute, env, "after");
+        if (digest(actual.proof) !== journalStep.expectedAfterSha256) {
+          throw new Error(`completed rollback step ${index} no longer matches its after-state`);
+        }
+        continue;
+      } else if (digest(actual.proof) !== journalStep.expectedBeforeSha256) {
+        throw new Error("rollback step no longer matches its before-state");
+      }
+      if (!intentAlreadyRecorded) {
+        current = recordClientOperationStepIntent(current.operationId, current, index, begun.lock, env);
+      }
+      options.testHooks?.beforeApply?.({ target: step.target, action: step.kind });
+      assertCurrentOperationManifest(current, env);
+      applyStep(
+        step, actual, currentForward, prior, execute, env, current.operationId, index,
+        options.testHooks?.desktop, options.testHooks?.afterBackendPin,
+      );
+      options.testHooks?.afterApply?.({ target: step.target, action: step.kind });
+      actual = observedProof(step, currentForward, prior, execute, env, "after");
+      current = recordClientOperationStepApplied(current.operationId, current, index, actual.proof, begun.lock, env);
+    }
+    current = completeClientOperationCleanup(current.operationId, current, begun.lock, env);
+    return rollbackPlanResult(true, prior, recordedSteps, env, current.operationId);
+  } finally {
+    releaseClientOperationLock(begun.lock);
+  }
+}
+
+/** Plan or explicitly apply one update-only reverse journal. */
+export function rollbackManagedClient(options: ClientRollbackOptions): ClientMaintenancePlan {
+  return runManagedClientRollback(options);
+}
+
+/** Resume exactly one supported managed-client operation using recorded authority only. */
 export function resumeManagedClientOperation(options: ClientMaintenanceResumeOptions): ClientMaintenancePlan {
   const env = options.env ?? process.env;
   const manifest = readClientOperation(options.operationId, env);
-  if (manifest.version !== 3 || !manifest.request || !["repair", "update", "uninstall"].includes(manifest.request.kind)
-    || !("identity" in manifest.request)) {
+  if (manifest.version === 4 && manifest.request?.kind === "rollback") {
+    return runManagedClientRollback({
+      sourceOperationId: manifest.request.sourceOperationId, identity: manifest.request.identity,
+      apply: true, recoverLock: options.recoverLock, env, execute: options.execute, testHooks: options.testHooks,
+    }, manifest.operationId);
+  }
+  if (!manifest.request || !["repair", "update", "uninstall"].includes(manifest.request.kind)
+    || !("identity" in manifest.request)
+    || (manifest.version !== 3 && manifest.version !== 4)
+    || (manifest.version === 4 && manifest.request.kind !== "update")) {
     throw new Error("operation is not a resumable identity-bound managed client request");
   }
-  const action = manifest.request.kind;
+  const action = manifest.request.kind as "repair" | "update" | "uninstall";
   const identity = manifest.request.identity;
   const metadataPath = managedClientMetadataPath(manifest.runtime, manifest.instance, env);
   if (action === "uninstall" && pathEntryIsAbsent(metadataPath)) {

@@ -318,10 +318,13 @@ is same-host only. The journal advances through prepared,
 snapshotted, in-progress, applied, cleaning, and committed. Inspection separately
 reports resumable, classification-required, blocked, or complete.
 
-New repair, update, and uninstall journals use operation format version 3. Version 2 manifests
-retain their released request interpretation and remain inspectable. A non-terminal
-version 2 record is blocked because it cannot prove the identity-bound request needed
-for these public mutations.
+Repair and uninstall journals use operation format version 3. New update and reverse
+rollback journals use v4. A v4 update request and terminal completion retain a bounded
+credential-free inverse contract: prior managed metadata, prior exact registration
+contract, and forward metadata and registration digests. Version 2 manifests retain
+their released request interpretation and remain inspectable. A non-terminal version 2
+record is blocked because it cannot prove the identity-bound request needed for these
+public mutations.
 
 Before a mutation, repair, update, and uninstall compare the full strict metadata record after
 acquiring the lock. Each non-metadata step repeats that authority check. Registration
@@ -353,6 +356,17 @@ syncs that parent after deletion. Windows reports verified deletion with unavail
 directory durability. Node pathname deletion cannot make this atomic against an
 uncooperative same-user writer, so that race remains advisory.
 
+Rollback is an explicit update-only operation. `clients rollback` locates authority
+only from a committed same-host v4 update record and requires the recorded identity as
+an assertion. It rejects a changed forward registration or metadata state before it
+creates a new reverse journal. Native rollback removes the forward registration,
+proves absence, adds the prior registration, proves it, and writes prior metadata last.
+Desktop replaces only `mcpServers.agent-bridge` and writes prior metadata last. The
+reverse journal retains its source operation UUID and inverse contract so generic
+resume needs no caller-provided backend, scope, command, runtime, or instance. A
+failed forward update is never compensated automatically. Repair has no rollback, and
+uninstall recovery requires re-enrollment.
+
 Native Windows ACL checks start uncached for each acquired or resumed mutation lock.
 While that lock remains held, later directory checks may reuse the result only for the
 same directory path, device, and inode. File checks always use the native policy.
@@ -367,17 +381,18 @@ then records POSIX directory sync or explicit Windows unavailability. An absent 
 is resumable only when intent predates the cleanup attempt. Inspection also recognizes
 one verified after artifact left by an interrupted manifest publication. Other missing
 or extra files block. Committed means verified writes and removed artifacts. Its
-manifest drops requests, steps, locators, digests, and artifact metadata while retaining
-the operation kind, step count, completion time, and cleanup durability for audit.
-Endpoint migration remains unavailable. Uninstall adds no rolled-back state. Physical
+manifest drops requests, steps, locators, digests, and artifact metadata. A v4 update
+completion retains only its inverse contract. Other terminal completions retain the
+operation kind, step count, completion time, and cleanup durability for audit. Endpoint
+migration remains unavailable. Uninstall adds no rolled-back state. Physical
 erasure remains outside the filesystem contract.
 
-`clients resume <operation-id>` accepts only the stored v3 operation and optional
-same-host stale-lock recovery. It derives the action, runtime, instance, identity, and
-update launch from the immutable request. It rejects version 2 records and cannot take
-replacement caller authority. Generic resume finishes an uninstall interrupted after
-metadata deletion, when an action-specific command cannot reload metadata to assert
-its identity.
+`clients resume <operation-id>` accepts stored v3 repair, update, and uninstall
+operations plus supported v4 update and rollback operations, with optional same-host
+stale-lock recovery. It derives authority from the immutable request. It rejects v2
+records and cannot take replacement caller authority. Generic resume finishes an
+uninstall interrupted after metadata deletion and a reverse rollback interrupted after
+any recorded boundary.
 
 ### v1 compatibility is additive
 

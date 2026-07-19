@@ -7,9 +7,9 @@ import { join } from "node:path";
 import { afterEach, describe, expect } from "vitest";
 import { adoptClient } from "../src/client-lifecycle.js";
 import {
-  repairManagedClient, resumeManagedClientOperation, uninstallManagedClient, updateManagedClient,
+  repairManagedClient, resumeManagedClientOperation, rollbackManagedClient, uninstallManagedClient, updateManagedClient,
 } from "../src/client-maintenance.js";
-import { listClientOperations, readClientOperation } from "../src/client-operation.js";
+import { createClientOperation, listClientOperations, readClientOperation } from "../src/client-operation.js";
 import { securePrivatePath } from "../src/private-path.js";
 import { privatePathIt } from "./private-path-policy.js";
 
@@ -767,4 +767,279 @@ describe("managed client repair and update", () => {
     expect(existsSync(state.backendConfigPath)).toBe(false);
     expect(existsSync(state.adopted.metadataPath)).toBe(false);
   }, 20_000);
+});
+
+describe("managed client update rollback", () => {
+  it("plans and applies a native v4 update reversal without mutating its source", () => {
+    const state = fixture();
+    const updated = updateManagedClient({
+      runtime: "codex", instance: "codex-existing", identity: "codex-work", command: "new-agent-bridge-mcp",
+      apply: true, env: { HOME: state.home }, execute: state.execute,
+    });
+    const sourceBefore = JSON.stringify(readClientOperation(updated.operationId!, { HOME: state.home }));
+    const source = readClientOperation(updated.operationId!, { HOME: state.home });
+    expect(source).toMatchObject({ version: 4, state: "committed", completion: { operation: "update" } });
+    expect(source.completion?.rollback).toMatchObject({
+      schema: "agent-bridge.client-update-rollback", identity: "codex-work",
+    });
+    expect(sourceBefore).not.toContain("credential-sentinel-must-not-leak");
+
+    const plan = rollbackManagedClient({
+      sourceOperationId: updated.operationId!, identity: "codex-work", env: { HOME: state.home }, execute: state.execute,
+    });
+    expect(plan).toMatchObject({ action: "rollback", applied: false, steps: [
+      { action: "native-remove" }, { action: "native-add" }, { action: "metadata" },
+    ] });
+    expect(state.registration.command).toBe("new-agent-bridge-mcp");
+
+    const rolledBack = rollbackManagedClient({
+      sourceOperationId: updated.operationId!, identity: "codex-work", apply: true,
+      env: { HOME: state.home }, execute: state.execute,
+    });
+    expect(rolledBack).toMatchObject({ action: "rollback", applied: true });
+    expect(state.registration.command).toBe("agent-bridge-mcp");
+    expect(readFileSync(state.adopted.metadataPath, "utf8")).toContain('"command": "agent-bridge-mcp"');
+    expect(JSON.stringify(readClientOperation(updated.operationId!, { HOME: state.home }))).toBe(sourceBefore);
+    const reverse = readClientOperation(rolledBack.operationId!, { HOME: state.home });
+    expect(reverse).toMatchObject({ version: 4, state: "committed", completion: { operation: "rollback", rollback: null } });
+    expect(JSON.stringify(reverse)).not.toContain("credential-sentinel-must-not-leak");
+    expect(() => rollbackManagedClient({
+      sourceOperationId: updated.operationId!, identity: "codex-work", env: { HOME: state.home }, execute: state.execute,
+    })).toThrow("forward update metadata state");
+  }, 30_000);
+
+  it("reverses only a v4 update with the asserted source identity", () => {
+    const state = fixture();
+    const update = updateManagedClient({
+      runtime: "codex", instance: "codex-existing", identity: "codex-work", command: "new-agent-bridge-mcp",
+      apply: true, env: { HOME: state.home }, execute: state.execute,
+    });
+    expect(() => rollbackManagedClient({
+      sourceOperationId: update.operationId!, identity: "other", env: { HOME: state.home }, execute: state.execute,
+    })).toThrow("--identity must exactly match");
+
+    state.registration.command = "drifted-agent-bridge-mcp";
+    expect(() => rollbackManagedClient({
+      sourceOperationId: update.operationId!, identity: "codex-work", env: { HOME: state.home }, execute: state.execute,
+    })).toThrow("forward update registration state");
+
+    const repairState = fixture(); repairState.registration.command = "drifted-agent-bridge-mcp";
+    const repaired = repairManagedClient({
+      runtime: "codex", instance: "codex-existing", identity: "codex-work", apply: true,
+      env: { HOME: repairState.home }, execute: repairState.execute,
+    });
+    expect(readClientOperation(repaired.operationId!, { HOME: repairState.home }).version).toBe(3);
+    expect(() => rollbackManagedClient({
+      sourceOperationId: repaired.operationId!, identity: "codex-work", env: { HOME: repairState.home }, execute: repairState.execute,
+    })).toThrow("committed same-host v4 update");
+
+    const uninstallState = fixture();
+    const uninstalled = uninstallManagedClient({
+      runtime: "codex", instance: "codex-existing", identity: "codex-work", apply: true,
+      env: { HOME: uninstallState.home }, execute: uninstallState.execute,
+    });
+    expect(readClientOperation(uninstalled.operationId!, { HOME: uninstallState.home }).version).toBe(3);
+    expect(() => rollbackManagedClient({
+      sourceOperationId: uninstalled.operationId!, identity: "codex-work", env: { HOME: uninstallState.home }, execute: uninstallState.execute,
+    })).toThrow("committed same-host v4 update");
+
+    const legacyUpdate = createClientOperation({
+      version: 3, request: {
+        kind: "update", identity: "codex-work",
+        launch: {
+          command: "agent-bridge-mcp", args: [], scope: null,
+          envKeys: ["AGENT_BRIDGE_AGENT", "AGENT_BRIDGE_CONFIG", "AGENT_BRIDGE_INSTANCE"],
+        },
+      }, runtime: "codex", instance: "codex-existing", steps: [{
+        target: "metadata", locator: "managed-client-metadata",
+        beforeArtifact: "metadata.before", afterArtifact: "metadata.after",
+        expectedBeforeSha256: "a".repeat(64), expectedAfterSha256: "b".repeat(64),
+      }],
+    }, { HOME: repairState.home });
+    const legacyPath = join(repairState.home, ".agent-bridge", "operations", legacyUpdate.operationId, "manifest.json");
+    writeFileSync(legacyPath, `${JSON.stringify({
+      ...legacyUpdate, request: null, state: "committed", revision: 1, steps: [], artifacts: [],
+      completion: {
+        operation: "update", stepCount: 1, completedAt: new Date().toISOString(), cleanupDirectoryDurability: "durable",
+      },
+    })}\n`, { mode: 0o600 });
+    expect(() => rollbackManagedClient({
+      sourceOperationId: legacyUpdate.operationId, identity: "codex-work", env: { HOME: repairState.home }, execute: repairState.execute,
+    })).toThrow("committed same-host v4 update");
+  }, 30_000);
+
+  it("rejects v4 update requests whose inverse no longer determines the forward state", () => {
+    for (const mutate of [
+      (manifest: any) => { manifest.request.identity = "other-worker"; },
+      (manifest: any) => { manifest.request.rollback.forwardRegistrationSha256 = "0".repeat(64); },
+    ]) {
+      const state = fixture();
+      expect(() => updateManagedClient({
+        runtime: "codex", instance: "codex-existing", identity: "codex-work", command: "new-agent-bridge-mcp",
+        apply: true, env: { HOME: state.home }, execute: state.execute,
+        testHooks: { beforeApply: ({ action }) => { if (action === "native-remove") throw new Error("pause update"); } },
+      })).toThrow("pause update");
+      const [pending] = listClientOperations({ HOME: state.home }).filter((entry) => entry.operation === "update");
+      const path = join(state.home, ".agent-bridge", "operations", pending!.operationId, "manifest.json");
+      const replacement = JSON.parse(readFileSync(path, "utf8"));
+      mutate(replacement);
+      writeFileSync(path, `${JSON.stringify(replacement)}\n`, { mode: 0o600 });
+      expect(() => readClientOperation(pending!.operationId, { HOME: state.home })).toThrow("operation manifest is corrupt");
+    }
+  }, 30_000);
+
+  it("rejects cross-host and malformed inverse source records before a reverse plan", () => {
+    const crossHost = fixture();
+    const update = updateManagedClient({
+      runtime: "codex", instance: "codex-existing", identity: "codex-work", command: "new-agent-bridge-mcp",
+      apply: true, env: { HOME: crossHost.home }, execute: crossHost.execute,
+    });
+    const sourcePath = join(crossHost.home, ".agent-bridge", "operations", update.operationId!, "manifest.json");
+    const source = JSON.parse(readFileSync(sourcePath, "utf8"));
+    source.host = "another-host";
+    writeFileSync(sourcePath, `${JSON.stringify(source)}\n`, { mode: 0o600 });
+    expect(() => rollbackManagedClient({
+      sourceOperationId: update.operationId!, identity: "codex-work", env: { HOME: crossHost.home }, execute: crossHost.execute,
+    })).toThrow("committed same-host v4 update");
+
+    const unsafe = fixture();
+    const unsafeUpdate = updateManagedClient({
+      runtime: "codex", instance: "codex-existing", identity: "codex-work", command: "new-agent-bridge-mcp",
+      apply: true, env: { HOME: unsafe.home }, execute: unsafe.execute,
+    });
+    const unsafePath = join(unsafe.home, ".agent-bridge", "operations", unsafeUpdate.operationId!, "manifest.json");
+    const unsafeSource = JSON.parse(readFileSync(unsafePath, "utf8"));
+    unsafeSource.completion.rollback.priorRegistration.observed.env.UNRELATED = "forbidden";
+    writeFileSync(unsafePath, `${JSON.stringify(unsafeSource)}\n`, { mode: 0o600 });
+    expect(() => rollbackManagedClient({
+      sourceOperationId: unsafeUpdate.operationId!, identity: "codex-work", env: { HOME: unsafe.home }, execute: unsafe.execute,
+    })).toThrow("operation manifest is corrupt");
+  }, 30_000);
+
+  it("rejects a replacement reverse request returned by resume before mutation", () => {
+    const state = fixture();
+    const update = updateManagedClient({
+      runtime: "codex", instance: "codex-existing", identity: "codex-work", command: "new-agent-bridge-mcp",
+      apply: true, env: { HOME: state.home }, execute: state.execute,
+    });
+    expect(() => rollbackManagedClient({
+      sourceOperationId: update.operationId!, identity: "codex-work", apply: true,
+      env: { HOME: state.home }, execute: state.execute,
+      testHooks: { afterApply: ({ action }) => { if (action === "native-remove") throw new Error("pause reverse"); } },
+    })).toThrow("pause reverse");
+    const [reverse] = listClientOperations({ HOME: state.home }).filter((entry) => entry.operation === "rollback");
+    const callsBeforeResume = state.calls.length;
+    expect(() => resumeManagedClientOperation({
+      operationId: reverse!.operationId, env: { HOME: state.home }, execute: state.execute,
+      testHooks: {
+        beforeOperationBegin: () => {
+          const path = join(state.home, ".agent-bridge", "operations", reverse!.operationId, "manifest.json");
+          const replacement = JSON.parse(readFileSync(path, "utf8"));
+          replacement.request.rollback.forwardMetadataSha256 = "0".repeat(64);
+          writeFileSync(path, `${JSON.stringify(replacement)}\n`, { mode: 0o600 });
+        },
+      },
+    })).toThrow("locked rollback operation no longer matches its committed update authority");
+    expect(state.calls).toHaveLength(callsBeforeResume);
+    expect(state.registration).toMatchObject({ present: false, command: "new-agent-bridge-mcp" });
+  }, 30_000);
+
+  it("rejects a replaced intent-recorded reverse manifest before any lifecycle call", () => {
+    const state = fixture();
+    const update = updateManagedClient({
+      runtime: "codex", instance: "codex-existing", identity: "codex-work", command: "new-agent-bridge-mcp",
+      apply: true, env: { HOME: state.home }, execute: state.execute,
+    });
+    expect(() => rollbackManagedClient({
+      sourceOperationId: update.operationId!, identity: "codex-work", apply: true,
+      env: { HOME: state.home }, execute: state.execute,
+      testHooks: { beforeApply: ({ action }) => { if (action === "native-remove") throw new Error("pause before remove"); } },
+    })).toThrow("pause before remove");
+    const [reverse] = listClientOperations({ HOME: state.home }).filter((entry) => entry.operation === "rollback");
+    const callsBeforeResume = state.calls.length;
+    expect(() => resumeManagedClientOperation({
+      operationId: reverse!.operationId, env: { HOME: state.home }, execute: state.execute,
+      testHooks: {
+        afterLock: () => {
+          const path = join(state.home, ".agent-bridge", "operations", reverse!.operationId, "manifest.json");
+          const replacement = JSON.parse(readFileSync(path, "utf8"));
+          replacement.revision += 1;
+          writeFileSync(path, `${JSON.stringify(replacement)}\n`, { mode: 0o600 });
+        },
+      },
+    })).toThrow("operation manifest changed while the client lock is held");
+    expect(state.calls).toHaveLength(callsBeforeResume);
+    expect(state.registration).toMatchObject({ present: true, command: "new-agent-bridge-mcp" });
+  }, 30_000);
+
+  it("blocks a resumed reverse when metadata changed after native removal", () => {
+    const state = fixture();
+    const update = updateManagedClient({
+      runtime: "codex", instance: "codex-existing", identity: "codex-work", command: "new-agent-bridge-mcp",
+      apply: true, env: { HOME: state.home }, execute: state.execute,
+    });
+    expect(() => rollbackManagedClient({
+      sourceOperationId: update.operationId!, identity: "codex-work", apply: true,
+      env: { HOME: state.home }, execute: state.execute,
+      testHooks: { afterApply: ({ action }) => { if (action === "native-remove") throw new Error("pause after remove"); } },
+    })).toThrow("pause after remove");
+    expect(state.registration).toMatchObject({ present: false, command: "new-agent-bridge-mcp" });
+    const metadata = JSON.parse(readFileSync(state.adopted.metadataPath, "utf8"));
+    metadata.launch.command = "altered-agent-bridge-mcp";
+    writeFileSync(state.adopted.metadataPath, `${JSON.stringify(metadata)}\n`, { mode: 0o600 });
+    const [reverse] = listClientOperations({ HOME: state.home }).filter((entry) => entry.operation === "rollback");
+    const callsBeforeResume = state.calls.length;
+    expect(() => resumeManagedClientOperation({
+      operationId: reverse!.operationId, env: { HOME: state.home }, execute: state.execute,
+    })).toThrow("forward update metadata state");
+    expect(state.calls).toHaveLength(callsBeforeResume);
+    expect(state.registration).toMatchObject({ present: false, command: "new-agent-bridge-mcp" });
+  }, 30_000);
+
+  it("resumes native reverse steps after every external write boundary", () => {
+    for (const action of ["native-remove", "native-add", "metadata"] as const) {
+      const state = fixture();
+      const update = updateManagedClient({
+        runtime: "codex", instance: "codex-existing", identity: "codex-work", command: "new-agent-bridge-mcp",
+        apply: true, env: { HOME: state.home }, execute: state.execute,
+      });
+      expect(() => rollbackManagedClient({
+        sourceOperationId: update.operationId!, identity: "codex-work", apply: true,
+        env: { HOME: state.home }, execute: state.execute,
+        testHooks: { afterApply: ({ action: observed }) => { if (observed === action) throw new Error(`pause after ${action}`); } },
+      })).toThrow(`pause after ${action}`);
+      const [reverse] = listClientOperations({ HOME: state.home }).filter((entry) => entry.operation === "rollback");
+      expect(reverse).toBeDefined();
+      expect(resumeManagedClientOperation({
+        operationId: reverse!.operationId, env: { HOME: state.home }, execute: state.execute,
+      })).toMatchObject({ action: "rollback", applied: true });
+      expect(state.registration.command).toBe("agent-bridge-mcp");
+      expect(readFileSync(state.adopted.metadataPath, "utf8")).toContain('"command": "agent-bridge-mcp"');
+    }
+  }, 60_000);
+
+  it("restores only the Desktop bridge entry and resumes its reverse boundaries", () => {
+    for (const action of ["desktop-replace", "metadata"] as const) {
+      const state = desktopFixture();
+      const configuration = JSON.parse(readFileSync(state.configPath, "utf8"));
+      configuration.preserved = { value: true };
+      configuration.mcpServers.other = { command: "/other-server", env: { TOKEN: "unrelated-sentinel" } };
+      writeFileSync(state.configPath, `${JSON.stringify(configuration)}\n`, { mode: 0o600 });
+      const update = updateManagedClient({
+        runtime: "claude-desktop", instance: "desktop-existing", identity: "desktop-work", command: state.newCommand,
+        apply: true, env: { HOME: state.home },
+      });
+      expect(() => rollbackManagedClient({
+        sourceOperationId: update.operationId!, identity: "desktop-work", apply: true, env: { HOME: state.home },
+        testHooks: { afterApply: ({ action: observed }) => { if (observed === action) throw new Error(`pause after ${action}`); } },
+      })).toThrow(`pause after ${action}`);
+      const [reverse] = listClientOperations({ HOME: state.home }).filter((entry) => entry.operation === "rollback");
+      expect(resumeManagedClientOperation({ operationId: reverse!.operationId, env: { HOME: state.home } }))
+        .toMatchObject({ action: "rollback", applied: true });
+      const restored = JSON.parse(readFileSync(state.configPath, "utf8"));
+      expect(restored.preserved).toEqual({ value: true });
+      expect(restored.mcpServers.other).toEqual({ command: "/other-server", env: { TOKEN: "unrelated-sentinel" } });
+      expect(restored.mcpServers["agent-bridge"].command).toBe(state.oldCommand);
+    }
+  }, 60_000);
 });

@@ -52,8 +52,12 @@ published and the supported clients pass a fresh end-to-end check.
   private backend path. Uninstall removes the registration, backend, and metadata in
   that order without rollback. It refuses a backend that still needs privacy repair.
   Desktop publication and deletion have a documented same-user advisory race.
-  Generic `clients resume` derives authority only from a recorded v3 request. Endpoint
-  migration remains out of scope.
+  New updates use v4 journals and retain a bounded credential-free inverse contract.
+  `clients rollback <update-operation-id> --identity <name>` is plan-first and, with
+  `--apply`, creates a separate reverse journal after it proves the recorded forward
+  state. Generic `clients resume` derives authority only from recorded v3 or supported
+  v4 requests. Repair remains monotonic, uninstall recovery is re-enrollment, and
+  endpoint migration remains out of scope.
 
 - A pinned, non-root gateway image and a Compose development stack with ordered
   migration, restricted runtime-role bootstrap, health checks, private secret files,
