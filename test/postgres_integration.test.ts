@@ -1,5 +1,5 @@
 import { createHash, randomUUID } from "node:crypto";
-import { mkdirSync, mkdtempSync, rmSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { createServer } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -4521,17 +4521,10 @@ integration("PostgreSQL BridgeStore integration", () => {
 
   it("imports a legacy shared_context database through fresh migrations", async () => {
     await withTemporaryDatabase(async (upgrade) => {
-        await upgrade.query(`CREATE TABLE public.shared_context (
-          id bigint PRIMARY KEY,
-          source text NOT NULL,
-          category text NOT NULL,
-          content text NOT NULL,
-          priority text NOT NULL DEFAULT 'info',
-          project text,
-          metadata jsonb NOT NULL DEFAULT '{}'::jsonb,
-          created_at timestamptz NOT NULL DEFAULT now(),
-          acked_by text[] NOT NULL DEFAULT '{}'
-        )`);
+        await upgrade.query(readFileSync(
+          fileURLToPath(new URL("../sql/setup.sql", import.meta.url)),
+          "utf8",
+        ));
         const preservedId = randomUUID();
         await upgrade.query(
           `INSERT INTO public.shared_context

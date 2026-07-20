@@ -63,6 +63,4 @@ end;
 $$;
 
 comment on column shared_context.atrib_receipt_id is
-  'Optional signed atrib record receipt_id (record_hash "." creator_key, base64url) ' ||
-  'emitted by an atrib-signing wrapper at insert time. ' ||
-  'Consumers use this as the informed_by anchor for cross-process causal edges.';
+  'Optional signed atrib record receipt_id (record_hash "." creator_key, base64url) emitted by an atrib-signing wrapper at insert time. Consumers use this as the informed_by anchor for cross-process causal edges.';

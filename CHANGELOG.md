@@ -8,6 +8,11 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and 
 
 ### Added
 
+- Add a read-only production PostgreSQL preflight. It rejects unsupported server
+  majors, insufficient migration authority, migration-ledger drift, derived-role
+  collisions, and incompatible legacy import tables before any schema change runs.
+  Reports omit connection URLs and database identities.
+
 - Add a manual production proof workflow for an existing Agent Bridge gateway. It
   uses separate sender, receiver, Fly machine-cycle, and verifier jobs behind the
   `agent-bridge-production-proof` environment. A versioned, phase-specific receipt
@@ -23,6 +28,12 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and 
   that checks the local contract and, when an app is supplied, reports value-safe Fly
   account and app observations. The deployment docs keep migration, restricted-runtime
   bootstrap, secret changes, deployment, and cross-machine proof behind operator gates.
+
+### Fixed
+
+- Fix the legacy Supabase setup script's column comment so PostgreSQL accepts the
+  checked-in schema without manual editing. The PostgreSQL integration suite now runs
+  that script before testing the v2 legacy import.
 
 ## [0.4.0] - 2026-07-19
 
