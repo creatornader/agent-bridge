@@ -167,21 +167,32 @@ The following actions change external state and require an operator gate. The
 repository does not perform them:
 
 1. Create or select the Fly app and PostgreSQL authority. Keep PostgreSQL private.
-2. Take and verify a native DR backup when upgrading an existing authority.
-3. Run `agent-bridge migrate` once in an isolated job with
+2. Run the read-only production database preflight before any backup or migration:
+
+   ```bash
+   AGENT_BRIDGE_DATABASE_URL="..." npm run preflight:postgres:production -- --json --require-ssl
+   ```
+
+   The command opens a read-only transaction and reports only nonsecret capability
+   and schema facts. It checks supported server majors, migration-role authority,
+   migration-ledger drift, derived-role collisions, and the legacy import shape.
+   `--require-ssl` is required for a public database endpoint. The preflight cannot
+   prove that later DDL will succeed.
+3. Take and verify a native DR backup when upgrading an existing authority.
+4. Run `agent-bridge migrate` once in an isolated job with
    `AGENT_BRIDGE_DATABASE_URL`. Drain old gateways first when the migration notes
    require it.
-4. Run [`deploy/bootstrap-runtime.sql`](../deploy/bootstrap-runtime.sql) through a
+5. Run [`deploy/bootstrap-runtime.sql`](../deploy/bootstrap-runtime.sql) through a
    separate trusted PostgreSQL session. Supply the schema-owner connection and the
    runtime password to that job only.
-5. Construct the restricted runtime URL, set only
+6. Construct the restricted runtime URL, set only
    `AGENT_BRIDGE_RUNTIME_DATABASE_URL` on the Fly app, and run the app-aware read-only
    preflight.
-6. Deploy the immutable image with `fly deploy --config deploy/fly.toml --app <app>`.
+7. Deploy the immutable image with `fly deploy --config deploy/fly.toml --app <app>`.
    Require `/readyz` before routing clients.
-7. Run authenticated capability and status probes, then publish, pull, claim, and
+8. Run authenticated capability and status probes, then publish, pull, claim, and
    settle a disposable targeted delivery.
-8. Move clients only after the gateway proof passes. Preserve every source edge store
+9. Move clients only after the gateway proof passes. Preserve every source edge store
    until its outbox is empty.
 
 App creation, database provisioning, secret writes, migration, bootstrap, deployment,
