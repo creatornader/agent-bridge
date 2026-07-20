@@ -23,6 +23,21 @@ describe("Fly production preflight", () => {
     expect(report.checks.every((entry: { ok: boolean }) => entry.ok)).toBe(true);
   });
 
+  it("rejects a configured Dockerfile that does not exist", () => {
+    const root = mkdtempSync(join(tmpdir(), "agent-bridge-fly-test-"));
+    roots.push(root);
+    const config = join(root, "fly.toml");
+    writeFileSync(config, readFileSync(configPath, "utf8").replace(
+      'dockerfile = "../Dockerfile"',
+      'dockerfile = "missing.Dockerfile"',
+    ));
+
+    const report = createPreflightReport({ config }, () => result(0));
+
+    expect(report.ok).toBe(false);
+    expect(report.checks.find((entry: { name: string }) => entry.name === "dockerfile.exists")?.ok).toBe(false);
+  });
+
   it("rejects privileged authority in the long-running config", () => {
     const root = mkdtempSync(join(tmpdir(), "agent-bridge-fly-test-"));
     roots.push(root);

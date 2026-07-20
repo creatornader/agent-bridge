@@ -31,6 +31,9 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and 
 
 ### Fixed
 
+- Resolve the Fly Dockerfile from the deployment config directory and reject missing
+  configured build files during the production preflight.
+
 - Check the client TLS socket during the production PostgreSQL preflight when a
   session pooler terminates TLS before opening its database connection.
 

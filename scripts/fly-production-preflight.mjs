@@ -64,13 +64,19 @@ function has(text, pattern) {
   return pattern.test(text);
 }
 
+function configuredDockerfile(configPath, text) {
+  const match = text.match(/^\s*dockerfile\s*=\s*"([^"]+)"\s*$/mu);
+  return match ? resolve(dirname(configPath), match[1]) : undefined;
+}
+
 function staticChecks(configPath) {
   if (!existsSync(configPath)) return [check("config.exists", false, "Fly config is missing")];
   const text = readFileSync(configPath, "utf8");
+  const dockerfile = configuredDockerfile(configPath, text);
   const names = environmentNames(text);
   const checks = [
     check("node.version", Number(process.versions.node.split(".")[0]) >= 22, `Node ${process.versions.node}`),
-    check("dockerfile.exists", existsSync(resolve(REPOSITORY_ROOT, "Dockerfile")), "repository Dockerfile"),
+    check("dockerfile.exists", dockerfile !== undefined && existsSync(dockerfile), "configured Dockerfile exists"),
     check("config.no_app_name", !has(text, /^\s*app\s*=/mu), "app name is operator supplied"),
     check("config.no_release_command", !has(text, /\[deploy\]|release_command/mu), "migrations stay in an operator job"),
     check("config.https_service", has(text, /\[http_service\][\s\S]*?internal_port\s*=\s*8787[\s\S]*?force_https\s*=\s*true/mu), "HTTPS to internal port 8787"),

@@ -2,7 +2,7 @@ kill_signal = "SIGTERM"
 kill_timeout = "30s"
 
 [build]
-  dockerfile = "Dockerfile"
+  dockerfile = "../Dockerfile"
 
 [env]
   AGENT_BRIDGE_HOST = "0.0.0.0"
