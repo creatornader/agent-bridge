@@ -724,6 +724,18 @@ describe("authenticated v2 gateway", () => {
     }
   });
 
+  it("keeps exact-message claims out of the frozen HTTP 2.0 request", async () => {
+    const base = await gateway();
+    const response = await fetch(`${base}/v2/deliveries/claim`, {
+      method: "POST",
+      headers: { authorization: "Bearer good", "content-type": "application/json" },
+      body: JSON.stringify({ messageId: "018f4a70-0000-7000-8000-000000000019" }),
+    });
+
+    expect(response.status).toBe(400);
+    expect((await response.json()).error).toMatchObject({ code: "invalid_input" });
+  });
+
   it("exposes caller-bound delivery listing and publisher controls", async () => {
     const principals = new Map([
       ["publisher-token", { workspace: "workspace-a", agent: "publisher" }],

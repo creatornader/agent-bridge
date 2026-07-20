@@ -6,6 +6,24 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and 
 
 ## [Unreleased]
 
+### Added
+
+- Add a manual production proof workflow for an existing Agent Bridge gateway. It
+  uses separate sender, receiver, Fly machine-cycle, and verifier jobs behind the
+  `agent-bridge-production-proof` environment. A versioned, phase-specific receipt
+  contract records offline queue replay, exact idempotency, cross-host claim and
+  acknowledgment, a changed Fly runtime instance ID, and fresh-edge verification without
+  storing credentials, message content, database URLs, or SQLite files.
+- Add an optional `messageId` filter to HTTP 2.1, MCP, and CLI delivery claims. It
+  atomically selects and maintains only that eligible recipient delivery. Omitting the
+  filter preserves claim-next behavior, and HTTP 2.0 rejects the new field.
+
+- Add a maintained Fly.io reference config with one always-running shared VM, HTTPS
+  ingress, `/readyz` checks, and a 30-second SIGTERM budget. Add a read-only preflight
+  that checks the local contract and, when an app is supplied, reports value-safe Fly
+  account and app observations. The deployment docs keep migration, restricted-runtime
+  bootstrap, secret changes, deployment, and cross-machine proof behind operator gates.
+
 ## [0.4.0] - 2026-07-19
 
 ### Added

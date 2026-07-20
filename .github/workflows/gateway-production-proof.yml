@@ -1,0 +1,199 @@
+name: gateway production proof
+
+on:
+  workflow_dispatch:
+    inputs:
+      gateway_origin:
+        description: Existing Agent Bridge HTTPS gateway origin
+        required: true
+        type: string
+      fly_app:
+        description: Existing Fly app with exactly one gateway machine
+        required: true
+        type: string
+      workspace:
+        description: Workspace bound to the proof credentials
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: gateway-production-proof-${{ inputs.fly_app }}-${{ inputs.workspace }}
+  cancel-in-progress: false
+
+env:
+  NODE_VERSION: "24"
+  FLYCTL_VERSION: "0.4.71"
+
+jobs:
+  sender:
+    name: offline sender
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    environment: agent-bridge-production-proof
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: npm
+      - run: npm ci
+      - run: npm run build
+      - name: Queue offline publication and synchronize its idempotency key
+        env:
+          AGENT_BRIDGE_TOKEN: ${{ secrets.PROOF_SENDER_TOKEN }}
+          AGENT_BRIDGE_PROOF_HOST_SALT: ${{ secrets.PROOF_HOST_SALT }}
+          GATEWAY_ORIGIN: ${{ inputs.gateway_origin }}
+          PROOF_WORKSPACE: ${{ inputs.workspace }}
+        run: |
+          node scripts/gateway-production-proof.mjs publisher \
+            --workspace "$PROOF_WORKSPACE" --principal proof-sender --receiver proof-receiver \
+            --instance "sender-$(< /proc/sys/kernel/random/uuid)" --gateway "$GATEWAY_ORIGIN" \
+            --edge "$RUNNER_TEMP/sender-edge.sqlite3" --cursor "$RUNNER_TEMP/sender.cursor" \
+            --receipt "$RUNNER_TEMP/publisher-receipt.json"
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: publisher-receipt
+          path: ${{ runner.temp }}/publisher-receipt.json
+          if-no-files-found: error
+
+  receiver:
+    name: remote receiver
+    needs: sender
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-24.04-arm
+    environment: agent-bridge-production-proof
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: npm
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: publisher-receipt
+          path: ${{ runner.temp }}/publisher
+      - run: npm ci
+      - run: npm run build
+      - name: Find, claim, and acknowledge the exact delivery
+        env:
+          AGENT_BRIDGE_TOKEN: ${{ secrets.PROOF_RECEIVER_TOKEN }}
+          AGENT_BRIDGE_PROOF_HOST_SALT: ${{ secrets.PROOF_HOST_SALT }}
+          GATEWAY_ORIGIN: ${{ inputs.gateway_origin }}
+          PROOF_WORKSPACE: ${{ inputs.workspace }}
+        run: |
+          node scripts/gateway-production-proof.mjs consumer \
+            --workspace "$PROOF_WORKSPACE" --principal proof-receiver \
+            --instance "receiver-$(< /proc/sys/kernel/random/uuid)" --gateway "$GATEWAY_ORIGIN" \
+            --edge "$RUNNER_TEMP/receiver-edge.sqlite3" --cursor "$RUNNER_TEMP/receiver.cursor" \
+            --publisher "$RUNNER_TEMP/publisher/publisher-receipt.json" \
+            --receipt "$RUNNER_TEMP/consumer-receipt.json"
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: consumer-receipt
+          path: ${{ runner.temp }}/consumer-receipt.json
+          if-no-files-found: error
+
+  fly-machine-cycle:
+    name: restart Fly machine instance
+    needs: receiver
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    environment: agent-bridge-production-proof
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+      - uses: superfly/flyctl-actions/setup-flyctl@fc53c09e1bc3be6f54706524e3b82c4f462f77be # v1.5.0
+        with:
+          version: ${{ env.FLYCTL_VERSION }}
+      - name: Restart the only gateway machine and require a new instance ID
+        env:
+          FLY_API_TOKEN: ${{ secrets.FLY_API_TOKEN }}
+          FLY_APP: ${{ inputs.fly_app }}
+          GATEWAY_ORIGIN: ${{ inputs.gateway_origin }}
+        run: |
+          set -euo pipefail
+          [[ "$FLY_APP" =~ ^[a-z0-9][a-z0-9-]{0,62}$ ]]
+          [[ "$FLY_APP" != *- ]]
+          gateway_origin="$(node --input-type=module -e 'import { normalizeGatewayOrigin } from "./scripts/gateway-production-proof.mjs"; process.stdout.write(normalizeGatewayOrigin(process.env.GATEWAY_ORIGIN, "GATEWAY_ORIGIN"));')"
+          machines_endpoint="https://api.machines.dev/v1/apps/$FLY_APP/machines"
+          machines_json="$(curl --fail-with-body --silent --show-error \
+            --header "Authorization: Bearer $FLY_API_TOKEN" "$machines_endpoint")"
+          jq -e 'type == "array" and length == 1 and .[0].id and .[0].instance_id' >/dev/null <<<"$machines_json"
+          machine_id="$(jq -er '.[0].id' <<<"$machines_json")"
+          before_instance_id="$(jq -er '.[0].instance_id' <<<"$machines_json")"
+          flyctl machine restart "$machine_id" --app "$FLY_APP"
+          after_instance_id=""
+          for _ in $(seq 1 60); do
+            machines_json="$(curl --fail-with-body --silent --show-error \
+              --header "Authorization: Bearer $FLY_API_TOKEN" "$machines_endpoint")"
+            jq -e 'type == "array" and length == 1 and .[0].id == $machine and .[0].state == "started" and .[0].instance_id' \
+              --arg machine "$machine_id" >/dev/null <<<"$machines_json" || { sleep 2; continue; }
+            after_instance_id="$(jq -er '.[0].instance_id' <<<"$machines_json")"
+            if [[ "$after_instance_id" == "$before_instance_id" ]]; then sleep 2; continue; fi
+            curl --fail --silent --show-error --output /dev/null "$gateway_origin/readyz" || { sleep 2; continue; }
+            break
+          done
+          test -n "$after_instance_id"
+          test "$after_instance_id" != "$before_instance_id"
+          jq -n --arg machine_id "$machine_id" --arg before_instance_id "$before_instance_id" --arg after_instance_id "$after_instance_id" \
+            --arg cycled_at "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+            '{machineId: $machine_id, beforeInstanceId: $before_instance_id, afterInstanceId: $after_instance_id, cycledAt: $cycled_at}' \
+            > "$RUNNER_TEMP/machine-cycle.json"
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: machine-cycle
+          path: ${{ runner.temp }}/machine-cycle.json
+          if-no-files-found: error
+
+  verifier:
+    name: fresh edge verifier
+    needs: fly-machine-cycle
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    environment: agent-bridge-production-proof
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: npm
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: publisher-receipt
+          path: ${{ runner.temp }}/proof/publisher-receipt
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: consumer-receipt
+          path: ${{ runner.temp }}/proof/consumer-receipt
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: machine-cycle
+          path: ${{ runner.temp }}/proof/machine-cycle
+      - run: npm ci
+      - run: npm run build
+      - name: Verify immutable read and prior settlement with a fresh edge
+        env:
+          AGENT_BRIDGE_TOKEN: ${{ secrets.PROOF_RECEIVER_TOKEN }}
+          AGENT_BRIDGE_PROOF_HOST_SALT: ${{ secrets.PROOF_HOST_SALT }}
+          GATEWAY_ORIGIN: ${{ inputs.gateway_origin }}
+          PROOF_WORKSPACE: ${{ inputs.workspace }}
+        run: |
+          node scripts/gateway-production-proof.mjs verifier \
+            --workspace "$PROOF_WORKSPACE" --principal proof-receiver \
+            --instance "verifier-$(< /proc/sys/kernel/random/uuid)" --gateway "$GATEWAY_ORIGIN" \
+            --edge "$RUNNER_TEMP/verifier-fresh-edge.sqlite3" --cursor "$RUNNER_TEMP/verifier-fresh.cursor" \
+            --publisher "$RUNNER_TEMP/proof/publisher-receipt/publisher-receipt.json" \
+            --consumer "$RUNNER_TEMP/proof/consumer-receipt/consumer-receipt.json" \
+            --cycle "$RUNNER_TEMP/proof/machine-cycle/machine-cycle.json" \
+            --receipt "$RUNNER_TEMP/verifier-receipt.json"
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: verifier-receipt
+          path: ${{ runner.temp }}/verifier-receipt.json
+          if-no-files-found: error

@@ -33,7 +33,12 @@ export interface BridgeDiagnostics {
   credentialId?: string;
   principal?: { workspace: string; agent: string };
 }
-export interface ClaimOptions { leaseMs: number; now?: Date; maxAttempts?: number; }
+export interface ClaimOptions {
+  leaseMs: number;
+  messageId?: string;
+  now?: Date;
+  maxAttempts?: number;
+}
 export interface DeliveryQuery {
   role?: "recipient" | "publisher" | "all";
   states?: DeliveryState[];

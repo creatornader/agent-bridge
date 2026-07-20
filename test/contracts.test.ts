@@ -19,6 +19,7 @@ import {
   SCOPE_ENFORCEMENT,
   SUPPORTED_PROTOCOL_VERSIONS,
   validateRequest,
+  validateRequestForProtocol,
 } from "../src/contracts/registry.js";
 import { validateMessageDraft } from "../src/bridge-domain.js";
 
@@ -70,6 +71,10 @@ describe("canonical v2 contract registry", () => {
     expect(validateRequest("publish_message", { source: "worker", type: "note", content: "ok" })).toMatchObject({ source: "worker" });
     expect(parseResponse("record_receipt", { recorded: 1, futureField: true })).toMatchObject({ futureField: true });
     expect(parseResponse("claim_delivery", { delivery: null })).toEqual({ delivery: null });
+    expect(validateRequestForProtocol("claim_delivery", { messageId: uuidv7 }, "2.1"))
+      .toEqual({ messageId: uuidv7 });
+    expect(() => validateRequestForProtocol("claim_delivery", { messageId: uuidv7 }, "2.0"))
+      .toThrowError(expect.objectContaining({ code: "invalid_input" }));
     expect(() => parseResponse("claim_delivery", { delivery: null, leaseToken: "unexpected" })).toThrow();
     expect(parseResponse("status", {
       schemaVersion: "postgres-v2", deliverySupported: true,

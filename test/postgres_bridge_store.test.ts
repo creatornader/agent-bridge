@@ -18,6 +18,25 @@ describe("PostgresBridgeStore", () => {
     expect(calls.some((call) => call.sql.includes("lease_expires_at<=now()"))).toBe(true);
   });
 
+  it("binds exact-message claim maintenance and selection to one message", async () => {
+    const calls: Array<{ sql: string; values?: unknown[] }> = [];
+    const db: PgQueryable = { query: async (sql, values) => { calls.push({ sql, values }); return { rows: [], rowCount: 0 }; } };
+    const store = new PostgresBridgeStore(db);
+    const messageId = "018f4a70-0000-7000-8000-000000000018";
+
+    await store.claimDelivery(
+      { workspace: "acme", agent: "worker", instance: "one" },
+      { leaseMs: 30_000, messageId },
+    );
+
+    const deliveryQueries = calls.filter((call) => call.sql.includes("agent_bridge.deliveries"));
+    expect(deliveryQueries).toHaveLength(4);
+    for (const call of deliveryQueries) {
+      expect(call.sql).toContain("delivery.message_id=$3");
+      expect(call.values?.[2]).toBe(messageId);
+    }
+  });
+
   it("normalizes nullable delivery event columns before contract validation", async () => {
     const db: PgQueryable = {
       query: async () => ({

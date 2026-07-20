@@ -87,6 +87,13 @@ The published npm version is the authority for whether this package line has shi
   idempotent restart, and PostgreSQL volume persistence.
 - A production deployment guide covering TLS, network exposure, secret separation,
   backups, upgrade order, and schema rollback limits.
+- A maintained Fly.io reference config and read-only production preflight. The
+  repository contract keeps schema-owner and operator authority out of the gateway,
+  but creating an app, provisioning PostgreSQL, setting secrets, migrating, and
+  deploying still require an operator gate.
+- A manual, approval-protected production proof harness for an existing Fly gateway.
+  It separates sender, receiver, machine restart, and fresh-edge verification,
+  and publishes versioned receipts that exclude credentials and message content.
 
 ### Post-release validation and adoption
 
@@ -97,6 +104,9 @@ The published npm version is the authority for whether this package line has shi
   check covered startup, private mailbox sends, caller-scoped history, receipts, and
   client restart through the legacy compatibility backend. It did not prove
   gateway-only behavior.
+- Run the manual Fly proof against an operator-owned app and retain its sender,
+  receiver, machine-cycle, and verifier receipts. The repository harness is ready,
+  but the external proof remains incomplete until an approved workflow run succeeds.
 - Replace remaining direct legacy table pollers with the v2 cursor protocol.
 - Confirm the README, npm metadata, GitHub metadata, release notes, and package contents
   match the released artifact.
