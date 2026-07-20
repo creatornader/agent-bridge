@@ -82,7 +82,9 @@ The command checks the PostgreSQL major, database and role authority, existing
 migration ledger, derived-role collisions, and the legacy `shared_context` import
 shape inside a read-only transaction. It does not print the connection URL or apply
 DDL. `--require-ssl` rejects an unencrypted public database connection. Passing the
-preflight does not replace a backup or authorize migration.
+preflight does not replace a backup or authorize migration. When a session pooler
+terminates TLS, the check inspects the client socket instead of the pooler's separate
+database connection.
 
 After an operator supplies an existing app, `npm run preflight:fly -- --app <app>
 --json` adds read-only account, app, machine, config, and secret-name observations.

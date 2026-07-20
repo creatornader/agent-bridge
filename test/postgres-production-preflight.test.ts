@@ -131,4 +131,20 @@ describe("PostgreSQL production preflight", () => {
     expect(required.ok).toBe(false);
     expect(required.checks.find((entry) => entry.name === "connection.ssl")?.ok).toBe(false);
   });
+
+  it("accepts a TLS client connection through a pooler", async () => {
+    const report = await runPostgresProductionPreflight(
+      new FakeDatabase(authority({ ssl: false })),
+      migrationsDirectory,
+      { requireSsl: true, clientTransportSsl: true },
+    );
+
+    expect(report.ok).toBe(true);
+    expect(report.observations.ssl).toBe(true);
+    expect(report.checks.find((entry) => entry.name === "connection.ssl")).toEqual({
+      name: "connection.ssl",
+      ok: true,
+      detail: "client transport uses TLS",
+    });
+  });
 });
