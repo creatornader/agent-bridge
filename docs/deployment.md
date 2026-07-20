@@ -177,7 +177,8 @@ repository does not perform them:
    and schema facts. It checks supported server majors, migration-role authority,
    migration-ledger drift, derived-role collisions, and the legacy import shape.
    `--require-ssl` is required for a public database endpoint. The preflight cannot
-   prove that later DDL will succeed.
+   prove that later DDL will succeed. For a session pooler, it checks the client TLS
+   socket because PostgreSQL reports the pooler's separate database connection.
 3. Take and verify a native DR backup when upgrading an existing authority.
 4. Run `agent-bridge migrate` once in an isolated job with
    `AGENT_BRIDGE_DATABASE_URL`. Drain old gateways first when the migration notes

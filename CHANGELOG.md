@@ -31,6 +31,9 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and 
 
 ### Fixed
 
+- Check the client TLS socket during the production PostgreSQL preflight when a
+  session pooler terminates TLS before opening its database connection.
+
 - Fix the legacy Supabase setup script's column comment so PostgreSQL accepts the
   checked-in schema without manual editing. The PostgreSQL integration suite now runs
   that script before testing the v2 legacy import.

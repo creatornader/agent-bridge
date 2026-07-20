@@ -1,4 +1,5 @@
 import { fileURLToPath } from "node:url";
+import { TLSSocket } from "node:tls";
 import pg from "pg";
 import { loadMigrationPlan, type AppliedMigration } from "./migrations.js";
 
@@ -132,7 +133,7 @@ async function legacyChecks(
 export async function runPostgresProductionPreflight(
   db: ProductionPreflightDatabase,
   migrationsDirectory: string,
-  options: { requireSsl?: boolean } = {},
+  options: { requireSsl?: boolean; clientTransportSsl?: boolean } = {},
 ): Promise<PostgresProductionPreflightReport> {
   const expected = await loadMigrationPlan(migrationsDirectory);
   await db.query("BEGIN TRANSACTION READ ONLY");
@@ -159,6 +160,7 @@ export async function runPostgresProductionPreflight(
     if (!row) throw new Error("current PostgreSQL role could not be inspected");
 
     const serverMajor = Math.floor(Number(row.serverVersionNum) / 10_000);
+    const ssl = row.ssl || options.clientTransportSsl === true;
     const checks: Check[] = [
       check("postgres.version", SUPPORTED_MAJORS.has(serverMajor), "PostgreSQL major is supported"),
       check("postgres.primary", !row.inRecovery, "connection targets a writable primary"),
@@ -166,7 +168,15 @@ export async function runPostgresProductionPreflight(
       check("authority.database_create", row.canCreateDatabaseObject, "migration role can create database objects"),
       check("authority.roles", row.isSuperuser || row.canCreateRole, "migration role can administer restricted roles"),
       ...(options.requireSsl
-        ? [check("connection.ssl", row.ssl, "connection uses TLS")]
+        ? [check(
+          "connection.ssl",
+          ssl,
+          row.ssl
+            ? "PostgreSQL backend reports TLS"
+            : options.clientTransportSsl
+              ? "client transport uses TLS"
+              : "connection does not use TLS",
+        )]
         : []),
     ];
 
@@ -239,7 +249,7 @@ export async function runPostgresProductionPreflight(
         requiredMigrationCount: expected.length,
         legacyTable: Boolean(row.legacyTable),
         ...(legacyRows === undefined ? {} : { legacyRows }),
-        ssl: row.ssl,
+        ssl,
       },
     };
   } catch (error) {
@@ -279,10 +289,15 @@ async function main(): Promise<void> {
   });
   try {
     await client.connect();
+    const clientTransportSsl = client.connection.stream instanceof TLSSocket &&
+      client.connection.stream.encrypted;
     const migrationsDirectory = fileURLToPath(new URL("../sql/migrations", import.meta.url));
     const report = await runPostgresProductionPreflight({
       query: (sql) => client.query(sql),
-    }, migrationsDirectory, { requireSsl: options.requireSsl });
+    }, migrationsDirectory, {
+      requireSsl: options.requireSsl,
+      clientTransportSsl,
+    });
     if (options.json) process.stdout.write(`${JSON.stringify(report)}\n`);
     else {
       for (const entry of report.checks) {
