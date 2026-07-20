@@ -63,6 +63,30 @@ a production TLS deployment. Read [the deployment guide](docs/deployment.md) bef
 exposing a gateway, changing network bindings, upgrading the schema, or relying on the
 named volume for persistent data.
 
+The repository also maintains a provider-neutral Fly.io reference at
+[`deploy/fly.toml`](deploy/fly.toml). It deliberately omits an app name and release
+command. Check the local contract before creating or changing any Fly resource:
+
+```bash
+npm run preflight:fly -- --json
+```
+
+After an operator supplies an existing app, `npm run preflight:fly -- --app <app>
+--json` adds read-only account, app, machine, config, and secret-name observations.
+The command does not deploy, migrate, scale, restart, or print environment-variable
+values. The [Fly production procedure](docs/deployment.md#flyio-reference-hosting)
+keeps database migration and runtime-role bootstrap outside the gateway process.
+
+The manual `gateway production proof` workflow tests an existing gateway after its
+deployment gate has passed. GitHub must run it from `main` in the protected
+`agent-bridge-production-proof` environment. Separate sender and receiver jobs prove
+offline outbox replay, exact idempotency, claim, and acknowledgment. The workflow then
+restarts the single Fly machine, requires a new runtime instance ID, and verifies the
+message and settled delivery with a fresh receiver instance and a new SQLite edge file.
+Its versioned receipts contain only identifiers, times, principal and workspace labels,
+the gateway origin, checks, and SHA-256 host evidence. They omit credentials, database
+URLs, message content, and SQLite files.
+
 ## What v2 provides
 
 - Immutable messages with UUIDv7 IDs and opaque server cursors.
@@ -858,6 +882,7 @@ agent-bridge get --since 24h --unacked-by codex
 agent-bridge history --thread-id release-1
 agent-bridge acknowledge --ids <message-uuid>
 agent-bridge claim --lease-ms 30000
+agent-bridge claim --message-id <message-uuid> --lease-ms 30000
 agent-bridge send --target worker --delivery-policy '{"mode":"leased","maxAttempts":3,"retryBaseDelayMs":1000,"retryMaxDelayMs":60000,"retryJitterRatio":0.2}' "work"
 agent-bridge deliveries --state dead
 agent-bridge delivery-events --delivery-id <uuid>
@@ -881,6 +906,12 @@ and `dr` commands.
 History defaults to mailbox `inbox`: broadcasts plus messages targeted to the configured principal, exactly as prior releases did. `sent` selects messages whose source is that principal, and `all` is the union. `--receipt-state any|unread|read` is caller-relative and valid only with `inbox`. The deprecated `--unacked-by` option remains an identity assertion. The CLI rejects a mismatch before opening storage or contacting a gateway. Server surfaces reject it before querying message storage. Cursors bind workspace, principal, mailbox, and normalized filters. Version 1 cursors are temporarily accepted, while all new cursors are version 2.
 
 Publishers set `deliveryPolicy` on the message. Leased policy uses `maxAttempts`, `retryBaseDelayMs`, `retryMaxDelayMs`, `retryJitterRatio`, and optional `notBefore`. Consumers cannot override those values. Consumer-side `maxAttempts` on claim and `retryPolicy` on nack remain validated but ignored for one compatibility release. New code should omit both fields.
+
+Claims normally select the next due delivery by priority. HTTP 2.1, MCP, and CLI
+callers may supply `messageId` or `--message-id` to atomically select only that due,
+recipient-visible delivery. The filter also scopes lease-expiry and exhaustion
+maintenance performed by that claim. Released HTTP 2.0 request shapes remain frozen
+and reject the field.
 
 The legacy Supabase adapter applies mailbox and receipt rules cooperatively. A holder of the legacy publishable key can bypass the adapter through PostgREST or its receipt RPC. Use the authenticated v2 gateway when the authorization boundary must be enforced.
 

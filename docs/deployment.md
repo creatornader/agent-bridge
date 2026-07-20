@@ -127,6 +127,111 @@ schedule and after any suspected exposure.
 The runtime database password must contain at least 32 characters. The bootstrap job
 fails before role creation or alteration when the mounted value is shorter.
 
+## Fly.io reference hosting
+
+[`deploy/fly.toml`](../deploy/fly.toml) is the maintained Fly gateway contract. It has
+no app name, region, or release command. The operator chooses the account, app, region,
+PostgreSQL service, and public hostname. Fly terminates HTTPS and forwards to port
+8787. The service keeps at least one `shared-cpu-1x` machine with 512 MB running, checks
+`GET /readyz`, and gives the Node process 30 seconds after SIGTERM to close listeners
+and database pools.
+
+Run the repository check before any Fly action:
+
+```bash
+npm run preflight:fly -- --json
+```
+
+The local check verifies Node, the Dockerfile, and the static Fly contract. If the app
+already exists, add its name:
+
+```bash
+npm run preflight:fly -- --app <app> --json
+```
+
+With `--app`, the command invokes only read-only Fly commands. It observes the active
+account, app status, effective config, machines, and secret names. Its JSON includes
+names and check results but never environment-variable values. A passing local check
+does not prove that an external resource exists or that deployment is safe.
+
+The long-running Fly machine may receive only the restricted
+`AGENT_BRIDGE_RUNTIME_DATABASE_URL` database authority. Do not give it
+`AGENT_BRIDGE_DATABASE_URL`, `AGENT_BRIDGE_OPERATOR_DATABASE_URL`,
+`AGENT_BRIDGE_RUNTIME_PASSWORD`, a client bearer token, or a Supabase client key. The
+preflight rejects those names. Keep schema-owner, control-operator, archive, and DR
+authority in separate operator jobs.
+
+### Operator order and gates
+
+The following actions change external state and require an operator gate. The
+repository does not perform them:
+
+1. Create or select the Fly app and PostgreSQL authority. Keep PostgreSQL private.
+2. Take and verify a native DR backup when upgrading an existing authority.
+3. Run `agent-bridge migrate` once in an isolated job with
+   `AGENT_BRIDGE_DATABASE_URL`. Drain old gateways first when the migration notes
+   require it.
+4. Run [`deploy/bootstrap-runtime.sql`](../deploy/bootstrap-runtime.sql) through a
+   separate trusted PostgreSQL session. Supply the schema-owner connection and the
+   runtime password to that job only.
+5. Construct the restricted runtime URL, set only
+   `AGENT_BRIDGE_RUNTIME_DATABASE_URL` on the Fly app, and run the app-aware read-only
+   preflight.
+6. Deploy the immutable image with `fly deploy --config deploy/fly.toml --app <app>`.
+   Require `/readyz` before routing clients.
+7. Run authenticated capability and status probes, then publish, pull, claim, and
+   settle a disposable targeted delivery.
+8. Move clients only after the gateway proof passes. Preserve every source edge store
+   until its outbox is empty.
+
+App creation, database provisioning, secret writes, migration, bootstrap, deployment,
+traffic changes, and client cutover are all gated external actions. The preflight is
+read-only and cannot authorize any of them.
+
+### Fly rollback boundary
+
+Before migration, stop a failed deployment and keep the prior image and authority. A
+failed image rollout after a compatible migration can return traffic to the prior
+image only if that image accepts the current schema. Never assume that an older image
+can run against newer migrations.
+
+After clients publish through the new gateway, preserve both authorities and every
+edge database. Stop the cutover, drain queued outboxes, and reconcile authoritative
+messages before choosing one authority. If schema or data recovery is required,
+restore the verified native DR bundle into a fresh target and switch authority once.
+Do not run the source and restored database as active authorities at the same time.
+
+The manual `gateway production proof` GitHub Actions workflow runs this acceptance
+proof against an existing HTTPS gateway. GitHub restricts it to `main`, and every job
+uses the approval-protected `agent-bridge-production-proof` environment. Configure
+`PROOF_SENDER_TOKEN`, `PROOF_RECEIVER_TOKEN`, `PROOF_HOST_SALT`, and `FLY_API_TOKEN` as
+environment secrets. The sender and receiver credentials must bind the requested
+workspace to the dedicated `proof-sender` and `proof-receiver` principals. The
+sender credential needs `messages:write` and `messages:read`. The receiver needs
+`messages:read`, `deliveries:claim`, `deliveries:settle`, and `deliveries:read`.
+
+Run the workflow only when the Fly app has exactly one gateway machine. The cycle job
+restarts that machine and queries the Fly Machines API before and after. It fails
+unless the machine ID stays fixed, the runtime `instance_id` changes, the machine
+returns to `started`, and `/readyz` succeeds. This changes production compute and
+requires environment approval. It does not migrate the database or change secrets.
+
+The sender first uses an unreachable loopback origin to force a leased publication
+into its private SQLite outbox. It then synchronizes that row to the supplied gateway
+and repeats the publication with the same idempotency key. A separate host finds the
+exact message through `proof-receiver`, claims its delivery, and acknowledges it.
+After the Fly machine cycle, the verifier uses a fresh instance key, edge database,
+and cursor. It reads the immutable message and confirms that the prior delivery is
+still `acked`.
+
+Each phase writes an `agent-bridge-production-proof-v1` receipt. The runner rejects
+unknown fields at the phase boundary and checks every receipt before use. Receipts may
+record IDs, timestamps, principal and workspace labels, the gateway origin, boolean
+checks, and salted SHA-256 host evidence. They never record bearer values, database
+URLs, environment values, message content, lease tokens, cursor files, or edge
+databases. Download all four workflow artifacts for the operator record. A passing
+repository test still does not replace a completed external workflow run.
+
 ### Persistent data and backup
 
 A database volume or managed PostgreSQL disk keeps runtime state. It does not protect

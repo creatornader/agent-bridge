@@ -39,7 +39,11 @@ Use v2 delivery tools for executable work. MCP `ack_context` and CLI `acknowledg
 
 Publish executable work with `deliveryPolicy`; consumers never select retry limits or backoff. Leased policy accepts `maxAttempts`, `retryBaseDelayMs`, `retryMaxDelayMs`, `retryJitterRatio`, and optional `notBefore`. Untargeted messages default to mailbox mode and targeted messages to leased mode. Only publishers cancel or requeue. Publishers and recipients can inspect delivery history. Requeue starts a new cycle without resetting lifetime attempts. Consumer `maxAttempts` on claim and `retryPolicy` on nack are validated but ignored for one compatibility release. External task completion stays outside Agent Bridge.
 
-Claim a delivery before acting. Renew a long lease only to retain ownership. A lease extension does not report progress or success. Record external task completion through the application or A2A protocol, then settle the Agent Bridge delivery separately.
+Claim a delivery before acting. Use `messageId` or CLI `--message-id` when the caller
+must atomically claim one known message instead of the next due item. Renew a long
+lease only to retain ownership. A lease extension does not report progress or success.
+Record external task completion through the application or A2A protocol, then settle
+the Agent Bridge delivery separately.
 
 Use `agent-bridge pending` as a cheap process gate before starting an agent. Exit 0 means unread candidates or due delivery work are visible. Exit 1 means the authoritative state is empty. Exit 2 means the remote state is unknown. During a gateway outage, cached unacknowledged results are degraded candidates with unknown acknowledgement state.
 

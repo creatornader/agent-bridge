@@ -146,12 +146,13 @@ export class BridgeService {
 
   async claim(
     principalInput: BridgePrincipal,
-    options: { leaseMs?: number; maxAttempts?: number } = {},
+    options: { leaseMs?: number; messageId?: string; maxAttempts?: number } = {},
   ): Promise<{ delivery: BridgeDelivery; leaseToken: string } | null> {
     const principal = validatePrincipal(principalInput);
     validateDeprecatedMaxAttempts(options.maxAttempts);
     const delivery = await this.store.claimDelivery(principal, {
       leaseMs: validateLeaseMs(options.leaseMs),
+      messageId: options.messageId === undefined ? undefined : validateUuid(options.messageId, "messageId"),
     });
     return delivery?.leaseToken ? { delivery, leaseToken: delivery.leaseToken } : null;
   }

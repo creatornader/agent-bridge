@@ -489,7 +489,7 @@ export function createGateway(options: GatewayOptions) {
       }
       if (req.method === "POST" && url.pathname === "/v2/deliveries/claim") {
         await authorize("claim_delivery");
-        const input = validateRequest("claim_delivery", await requestBody());
+        const input = validateRequestForProtocol("claim_delivery", await requestBody(), selectedProtocol(response));
         active(abort.signal);
         await authority?.beginDomainWork(); mutationStarted = true;
         sendOperation(response, 200, "claim_delivery", await service.claim(principal, input) ?? { delivery: null }, requestId); return;

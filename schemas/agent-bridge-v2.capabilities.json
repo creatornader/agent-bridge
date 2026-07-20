@@ -747,7 +747,7 @@
     },
     {
       "id": "claim_delivery",
-      "summary": "Atomically claim the next targeted delivery.",
+      "summary": "Atomically claim the next targeted delivery, or one eligible message when requested.",
       "mcp": {
         "name": "claim"
       },
@@ -759,6 +759,7 @@
         "command": "claim",
         "options": [
           "lease-ms",
+          "message-id",
           "max-attempts"
         ],
         "outputSchema": {

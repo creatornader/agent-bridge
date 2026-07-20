@@ -4776,7 +4776,7 @@
     "/v2/deliveries/claim": {
       "post": {
         "operationId": "claim_delivery",
-        "summary": "Atomically claim the next targeted delivery.",
+        "summary": "Atomically claim the next targeted delivery, or one eligible message when requested.",
         "security": [
           {
             "bearerAuth": []
@@ -4809,6 +4809,10 @@
                 "properties": {
                   "leaseMs": {
                     "type": "number"
+                  },
+                  "messageId": {
+                    "type": "string",
+                    "pattern": "^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}$"
                   },
                   "maxAttempts": {
                     "type": "number"

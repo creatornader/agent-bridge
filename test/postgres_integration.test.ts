@@ -201,6 +201,14 @@ function databaseErrorDiagnostic(error: unknown): string {
 
 integration("PostgreSQL BridgeStore integration", () => {
   beforeAll(async () => {
+    const existing = await pool!.query<{ database_name: string; bridge_schema: string | null }>(
+      "SELECT current_database() AS database_name, to_regnamespace('agent_bridge')::text AS bridge_schema",
+    );
+    if (existing.rows[0]?.bridge_schema) {
+      throw new Error(
+        `PostgreSQL integration tests require a fresh database; ${existing.rows[0].database_name} already contains the agent_bridge schema. Use npm run test:postgres:preflight.`,
+      );
+    }
     await runMigrations(pool!, fileURLToPath(new URL("../sql/migrations", import.meta.url)));
   });
 

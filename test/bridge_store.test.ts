@@ -253,6 +253,41 @@ function bridgeStoreContract(name: string, makeStore: () => SQLiteBridgeStore) {
       expect(recovered?.attempt).toBe(2);
     });
 
+    it("claims one requested message without advancing unrelated delivery state", async () => {
+      const store = makeStore();
+      const service = new BridgeService(store);
+      const sender = { workspace: "acme", agent: "codex" };
+      const worker = { workspace: "acme", agent: "worker", instance: "exact" };
+      const first = await service.publish(sender, {
+        id: "018f4a70-0000-7000-8000-000000000016",
+        type: "agent-bridge.work",
+        content: "first",
+        targets: ["worker"],
+      });
+      const second = await service.publish(sender, {
+        id: "018f4a70-0000-7000-8000-000000000017",
+        type: "agent-bridge.work",
+        content: "second",
+        targets: ["worker"],
+      });
+      const claimedAt = new Date();
+      const firstClaim = await store.claimDelivery(worker, {
+        leaseMs: 1_000,
+        messageId: first.message.id,
+        now: claimedAt,
+      });
+      const secondClaim = await store.claimDelivery(worker, {
+        leaseMs: 1_000,
+        messageId: second.message.id,
+        now: new Date(claimedAt.getTime() + 1_001),
+      });
+
+      expect(firstClaim?.messageId).toBe(first.message.id);
+      expect(secondClaim?.messageId).toBe(second.message.id);
+      expect((await store.listDeliveries!(worker, { messageId: first.message.id })).deliveries[0]?.state)
+        .toBe("claimed");
+    });
+
     it("keeps read receipts and delivery settlement independent", async () => {
       const service = new BridgeService(makeStore());
       const sender = { workspace: "acme", agent: "codex" };

@@ -646,6 +646,7 @@ export function createAgentBridgeServer(
         const input = validateRequest("claim_delivery", args ?? {});
         const result = await service.claim(principal, {
           leaseMs: input.leaseMs as number | undefined,
+          messageId: input.messageId as string | undefined,
           maxAttempts: input.maxAttempts as number | undefined,
         });
         return canonicalResult("claim_delivery", result ?? { delivery: null });

@@ -361,10 +361,11 @@ export class PostgresBridgeStore implements BridgeStore {
              last_actor='agent-bridge', last_action='message_expired'
          FROM agent_bridge.messages message
          WHERE delivery.workspace=$1 AND delivery.recipient=$2
+           AND ($3::uuid IS NULL OR delivery.message_id=$3)
            AND delivery.state IN ('pending','retrying','claimed')
            AND message.workspace=delivery.workspace AND message.id=delivery.message_id
            AND message.expires_at IS NOT NULL AND message.expires_at<=now()`,
-        [principal.workspace, principal.agent],
+        [principal.workspace, principal.agent, options.messageId ?? null],
       );
       await db.query(
         `UPDATE agent_bridge.deliveries delivery
@@ -373,11 +374,12 @@ export class PostgresBridgeStore implements BridgeStore {
              last_actor='agent-bridge', last_action='attempts_exhausted'
          FROM agent_bridge.messages message
          WHERE delivery.workspace=$1 AND delivery.recipient=$2
+           AND ($3::uuid IS NULL OR delivery.message_id=$3)
            AND message.workspace=delivery.workspace AND message.id=delivery.message_id
            AND delivery.cycle_attempt>=message.delivery_max_attempts
            AND (delivery.state IN ('pending','retrying')
              OR (delivery.state='claimed' AND delivery.lease_expires_at<=now()))`,
-        [principal.workspace, principal.agent],
+        [principal.workspace, principal.agent, options.messageId ?? null],
       );
       await db.query(
         `UPDATE agent_bridge.deliveries delivery
@@ -386,17 +388,18 @@ export class PostgresBridgeStore implements BridgeStore {
              last_error='lease expired', last_actor='agent-bridge', last_action='lease_expired'
          FROM agent_bridge.messages message
          WHERE delivery.workspace=$1 AND delivery.recipient=$2
+           AND ($3::uuid IS NULL OR delivery.message_id=$3)
            AND message.workspace=delivery.workspace AND message.id=delivery.message_id
            AND delivery.state='claimed' AND delivery.lease_expires_at<=now()
            AND delivery.cycle_attempt<message.delivery_max_attempts`,
-        [principal.workspace, principal.agent],
+        [principal.workspace, principal.agent, options.messageId ?? null],
       );
       const candidate = await db.query<Row>(
         `SELECT delivery.id
          FROM agent_bridge.deliveries delivery
          JOIN agent_bridge.messages message
            ON message.workspace=delivery.workspace AND message.id=delivery.message_id
-         WHERE delivery.workspace=$1 AND delivery.recipient=$2
+         WHERE delivery.workspace=$1 AND delivery.recipient=$2 AND ($3::uuid IS NULL OR delivery.message_id=$3)
            AND delivery.state IN ('pending','retrying')
            AND delivery.available_at<=now()
            AND delivery.cycle_attempt<message.delivery_max_attempts
@@ -404,7 +407,7 @@ export class PostgresBridgeStore implements BridgeStore {
          ORDER BY delivery.priority_rank, delivery.available_at, delivery.created_at, delivery.id
          FOR UPDATE OF delivery SKIP LOCKED
          LIMIT 1`,
-        [principal.workspace, principal.agent],
+        [principal.workspace, principal.agent, options.messageId ?? null],
       );
       if (!candidate.rows[0]) return null;
       const token = randomUUID();

@@ -43,7 +43,7 @@ services can call the CLI or HTTPS API or embed the Node library without a host 
 - `agent-bridge doctor`: active named checks; exits 0 ok, 2 degraded, 1 failed. Blocked outbox rows cannot be healthy.
 - agent-bridge pending
 - agent-bridge send, inbox, history, acknowledge
-- agent-bridge claim, extend, ack, nack, deliveries, delivery-events, cancel, requeue
+- agent-bridge claim [--message-id <uuid>], extend, ack, nack, deliveries, delivery-events, cancel, requeue
 - agent-bridge sync, watch, join, presence
 - agent-bridge clients install <runtime> --identity <principal>
 - agent-bridge clients inspect <runtime> --identity <principal> --instance <stable-key> --backend-config <absolute path>
@@ -131,6 +131,7 @@ one logical authority across restore but does not fence a live clone.
 
 Compatibility: post_context, get_context, ack_context.
 Reliable messaging: send, history, claim, extend, acknowledge, negative_acknowledge, heartbeat, presence, sync.
+Claim selects the next due delivery unless HTTP 2.1, MCP, or CLI supplies one messageId. The exact form atomically selects and maintains only that eligible recipient delivery. HTTP 2.0 rejects the additive field.
 Publisher delivery intent: `deliveryPolicy` mode `mailbox|leased` with `maxAttempts`, `retryBaseDelayMs`, `retryMaxDelayMs`, `retryJitterRatio`, and optional `notBefore`. MCP delivery controls: `list_deliveries`, `list_delivery_events`, `cancel_delivery`, `requeue_delivery`. Consumer `maxAttempts` and `retryPolicy` are validated but ignored for one compatibility release.
 
 Gateway MCP clients sync automatically and expose manual sync for bounded outbox replay and inbox cache refresh. Offline unacknowledged results are degraded candidates with unknown acknowledgement state, not proof that messages are unread or that no remote work exists.
