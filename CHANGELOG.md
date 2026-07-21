@@ -41,6 +41,8 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and 
 - Preserve only Agent Bridge roles and relevant default privileges in PostgreSQL native
   DR backups when a managed provider gives the schema owner privileges in unrelated
   schemas.
+- Treat zero-valued Windows file IDs as unavailable during endpoint migration. Distinct
+  single-link edge files remain valid, while ambiguous hard-link cases still fail closed.
 
 ## [0.5.2] - 2026-07-20
 
