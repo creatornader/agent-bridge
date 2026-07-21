@@ -88,11 +88,11 @@ function validateChecks(value) {
 }
 
 function validateMachineCycle(value) {
-  exactKeys(value, new Set(["machineId", "beforeInstanceId", "afterInstanceId", "cycledAt"]), "machineCycle");
+  exactKeys(value, new Set(["machineId", "beforeStartEventTimestamp", "afterStartEventTimestamp", "cycledAt"]), "machineCycle");
   string(value.machineId, "machineCycle.machineId");
-  string(value.beforeInstanceId, "machineCycle.beforeInstanceId");
-  string(value.afterInstanceId, "machineCycle.afterInstanceId");
-  if (value.beforeInstanceId === value.afterInstanceId) fail("machine cycle retained the prior instance ID");
+  if (!Number.isSafeInteger(value.beforeStartEventTimestamp)) fail("machineCycle.beforeStartEventTimestamp must be a safe integer");
+  if (!Number.isSafeInteger(value.afterStartEventTimestamp)) fail("machineCycle.afterStartEventTimestamp must be a safe integer");
+  if (value.afterStartEventTimestamp <= value.beforeStartEventTimestamp) fail("machine cycle did not record a later successful start event");
   timestamp(value.cycledAt, "machineCycle.cycledAt");
 }
 

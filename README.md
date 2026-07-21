@@ -105,8 +105,9 @@ The manual `gateway production proof` workflow tests an existing gateway after i
 deployment gate has passed. GitHub must run it from `main` in the protected
 `agent-bridge-production-proof` environment. Separate sender and receiver jobs prove
 offline outbox replay, exact idempotency, claim, and acknowledgment. The workflow then
-restarts the single Fly machine, requires a new runtime instance ID, and verifies the
-message and settled delivery with a fresh receiver instance and a new SQLite edge file.
+restarts the single Fly machine, requires a later successful machine start event, and
+verifies the message and settled delivery with a fresh receiver instance and a new
+SQLite edge file.
 Its versioned receipts contain only identifiers, times, principal and workspace labels,
 the gateway origin, checks, and SHA-256 host evidence. They omit credentials, database
 URLs, message content, and SQLite files.

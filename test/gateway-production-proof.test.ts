@@ -107,7 +107,7 @@ describe("gateway production proof", () => {
       deliveryId: "delivery-3", claimedAt: new Date().toISOString(), acknowledgedAt: new Date().toISOString(),
     }));
     writeFileSync(cyclePath, JSON.stringify({
-      machineId: "machine-one", beforeInstanceId: "instance-old", afterInstanceId: "instance-new",
+      machineId: "machine-one", beforeStartEventTimestamp: 1_000, afterStartEventTimestamp: 2_000,
       cycledAt: new Date().toISOString(),
     }));
     execute
@@ -118,7 +118,7 @@ describe("gateway production proof", () => {
     const receipt = proof.runVerifier(verifier, env, execute);
 
     expect(receipt.machineCycle).toMatchObject({
-      machineId: "machine-one", beforeInstanceId: "instance-old", afterInstanceId: "instance-new",
+      machineId: "machine-one", beforeStartEventTimestamp: 1_000, afterStartEventTimestamp: 2_000,
     });
     expect(receipt.checks).toContainEqual({ name: "settlement.recorded", ok: true });
     expect(execute.mock.calls[0][1].AGENT_BRIDGE_EDGE_DB).toBe(verifier.edge);
@@ -139,7 +139,8 @@ describe("gateway production proof", () => {
     expect(workflow).toContain("workflow_dispatch:");
     expect(workflow.match(/environment: agent-bridge-production-proof/gu)).toHaveLength(4);
     expect(workflow).toContain("FLYCTL_VERSION: \"0.4.71\"");
-    expect(workflow).toContain(".instance_id");
+    expect(workflow).toContain('.type == "start"');
+    expect(workflow).toContain(".timestamp");
     expect(workflow.match(/install -d -m 700 "\$RUNNER_TEMP\/agent-bridge-proof"/gu)).toHaveLength(4);
     expect(workflow).not.toMatch(/--(?:edge|cursor) "\$RUNNER_TEMP\/(?!agent-bridge-proof\/)/u);
     expect(workflow).not.toContain("machine clone");
@@ -185,7 +186,7 @@ describe("gateway production proof", () => {
       claimedAt: new Date().toISOString(), acknowledgedAt: new Date().toISOString(),
     }));
     writeFileSync(cyclePath, JSON.stringify({
-      machineId: "machine-one", beforeInstanceId: "instance-old", afterInstanceId: "instance-new",
+      machineId: "machine-one", beforeStartEventTimestamp: 1_000, afterStartEventTimestamp: 2_000,
       cycledAt: new Date().toISOString(),
     }));
 

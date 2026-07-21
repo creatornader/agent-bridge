@@ -118,7 +118,7 @@ jobs:
       - uses: superfly/flyctl-actions/setup-flyctl@fc53c09e1bc3be6f54706524e3b82c4f462f77be # v1.5.0
         with:
           version: ${{ env.FLYCTL_VERSION }}
-      - name: Restart the only gateway machine and require a new instance ID
+      - name: Restart the only gateway machine and require a later start event
         env:
           FLY_API_TOKEN: ${{ secrets.FLY_API_TOKEN }}
           FLY_APP: ${{ inputs.fly_app }}
@@ -131,26 +131,27 @@ jobs:
           machines_endpoint="https://api.machines.dev/v1/apps/$FLY_APP/machines"
           machines_json="$(curl --fail-with-body --silent --show-error \
             --header "Authorization: Bearer $FLY_API_TOKEN" "$machines_endpoint")"
-          jq -e 'type == "array" and length == 1 and .[0].id and .[0].instance_id' >/dev/null <<<"$machines_json"
+          jq -e 'type == "array" and length == 1 and .[0].id and (.[] | .events | type == "array")' >/dev/null <<<"$machines_json"
           machine_id="$(jq -er '.[0].id' <<<"$machines_json")"
-          before_instance_id="$(jq -er '.[0].instance_id' <<<"$machines_json")"
+          before_start_event_timestamp="$(jq -er '[.[0].events[] | select(.type == "start" and .status == "started") | .timestamp] | max // empty' <<<"$machines_json")"
           flyctl machine restart "$machine_id" --app "$FLY_APP"
-          after_instance_id=""
+          after_start_event_timestamp=""
           for _ in $(seq 1 60); do
             machines_json="$(curl --fail-with-body --silent --show-error \
               --header "Authorization: Bearer $FLY_API_TOKEN" "$machines_endpoint")"
-            jq -e 'type == "array" and length == 1 and .[0].id == $machine and .[0].state == "started" and .[0].instance_id' \
+            jq -e 'type == "array" and length == 1 and .[0].id == $machine and .[0].state == "started" and (.[] | .events | type == "array")' \
               --arg machine "$machine_id" >/dev/null <<<"$machines_json" || { sleep 2; continue; }
-            after_instance_id="$(jq -er '.[0].instance_id' <<<"$machines_json")"
-            if [[ "$after_instance_id" == "$before_instance_id" ]]; then sleep 2; continue; fi
+            after_start_event_timestamp="$(jq -er '[.[0].events[] | select(.type == "start" and .status == "started") | .timestamp] | max // empty' <<<"$machines_json")"
+            if (( after_start_event_timestamp <= before_start_event_timestamp )); then sleep 2; continue; fi
             curl --fail --silent --show-error --output /dev/null "$gateway_origin/readyz" || { sleep 2; continue; }
             break
           done
-          test -n "$after_instance_id"
-          test "$after_instance_id" != "$before_instance_id"
-          jq -n --arg machine_id "$machine_id" --arg before_instance_id "$before_instance_id" --arg after_instance_id "$after_instance_id" \
+          test -n "$after_start_event_timestamp"
+          test "$after_start_event_timestamp" -gt "$before_start_event_timestamp"
+          jq -n --arg machine_id "$machine_id" --argjson before_start_event_timestamp "$before_start_event_timestamp" \
+            --argjson after_start_event_timestamp "$after_start_event_timestamp" \
             --arg cycled_at "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
-            '{machineId: $machine_id, beforeInstanceId: $before_instance_id, afterInstanceId: $after_instance_id, cycledAt: $cycled_at}' \
+            '{machineId: $machine_id, beforeStartEventTimestamp: $before_start_event_timestamp, afterStartEventTimestamp: $after_start_event_timestamp, cycledAt: $cycled_at}' \
             > "$RUNNER_TEMP/agent-bridge-proof/machine-cycle.json"
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
