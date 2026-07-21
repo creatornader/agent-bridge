@@ -43,6 +43,8 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and 
   schemas.
 - Treat zero-valued Windows file IDs as unavailable during endpoint migration. Distinct
   single-link edge files remain valid, while ambiguous hard-link cases still fail closed.
+- Give PostgreSQL integration tests enough time to create temporary databases and apply
+  migrations before Vitest advances to later tests and overlaps their cleanup.
 
 ## [0.5.2] - 2026-07-20
 
