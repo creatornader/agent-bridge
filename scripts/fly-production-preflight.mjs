@@ -119,6 +119,12 @@ function flyJson(args, execute) {
   }
 }
 
+function optionalFlyText(args, execute) {
+  const result = execute(args);
+  if (result.error?.code === "ENOENT") throw new Error("flyctl is required when --app is supplied");
+  return result.status === 0 ? result.stdout : undefined;
+}
+
 function secretNames(value) {
   const rows = Array.isArray(value) ? value : value?.secrets ?? [];
   return rows.map((row) => row.Name ?? row.name).filter((name) => typeof name === "string");
@@ -128,28 +134,20 @@ function machineRows(value) {
   return Array.isArray(value) ? value : value?.machines ?? [];
 }
 
-function remoteEnvironmentNames(value) {
-  const environment = value?.env ?? value?.Env ?? value?.config?.env ?? value?.Config?.Env ?? {};
-  return environment && typeof environment === "object" && !Array.isArray(environment)
-    ? Object.keys(environment)
-    : [];
-}
-
 function remoteChecks(app, execute) {
   const account = flyJson(["auth", "whoami", "--json"], execute);
   const status = flyJson(["status", "--app", app, "--json"], execute);
-  const config = flyJson(["config", "show", "--app", app, "--json"], execute);
+  const config = optionalFlyText(["config", "show", "--app", app, "--toml"], execute);
   const machines = machineRows(flyJson(["machine", "list", "--app", app, "--json"], execute));
   const secretNameList = secretNames(flyJson(["secrets", "list", "--app", app, "--json"], execute));
-  const configuredNameList = remoteEnvironmentNames(config);
+  const configuredNameList = config === undefined ? [] : environmentNames(config);
   const names = [...new Set([...configuredNameList, ...secretNameList])];
   const observedName = status.Name ?? status.name ?? status.App?.Name ?? status.app?.name;
-  const remoteText = JSON.stringify(config);
   return {
     checks: [
       check("fly.account", Boolean(account.email ?? account.Email ?? account.name ?? account.Name), "authenticated Fly account observed"),
       check("fly.app", observedName === app, "requested app observed"),
-      check("fly.remote_config", /8787/u.test(remoteText) && /readyz/u.test(remoteText), "remote config exposes the maintained service and readiness path"),
+      check("fly.remote_config", config !== undefined && /8787/u.test(config) && /readyz/u.test(config), "remote config exposes the maintained service and readiness path"),
       check("fly.runtime_secret", REQUIRED_RUNTIME_NAMES.every((name) => secretNameList.includes(name)), "restricted runtime database authority is configured as a secret"),
       check("fly.forbidden_secrets", FORBIDDEN_NAMES.every((name) => !names.includes(name)) && !names.some((name) => /(?:BEARER|TOKEN)/u.test(name)), "privileged and client credential names are absent"),
       check("fly.running_machine", machines.some((machine) => ["started", "running"].includes(String(machine.state ?? machine.State).toLowerCase())), "at least one machine is running"),

@@ -1,7 +1,7 @@
 import { fileURLToPath } from "node:url";
 import { TLSSocket } from "node:tls";
 import pg from "pg";
-import { loadMigrationPlan, type AppliedMigration } from "./migrations.js";
+import { loadMigrationPlan, migrationRecordMatches, type AppliedMigration } from "./migrations.js";
 
 const SUPPORTED_MAJORS = new Set([15, 16, 17, 18]);
 const LEGACY_COLUMNS = new Map([
@@ -35,6 +35,7 @@ interface AuthorityRow extends Record<string, unknown> {
   inherits: boolean;
   isSuperuser: boolean;
   canCreateRole: boolean;
+  bypassesRls: boolean;
   canCreateDatabaseObject: boolean;
   bridgeSchema: string | null;
   migrationTable: string | null;
@@ -72,11 +73,9 @@ function migrationPrefix(
   applied: AppliedMigration[],
   expected: ReadonlyArray<AppliedMigration>,
 ): boolean {
-  return applied.length <= expected.length && applied.every((entry, index) => {
-    const required = expected[index];
-    return required !== undefined && entry.version === required.version &&
-      entry.name === required.name && entry.checksum === required.checksum;
-  });
+  return applied.length <= expected.length && applied.every((entry, index) =>
+    expected[index] !== undefined && migrationRecordMatches(entry, expected[index])
+  );
 }
 
 async function legacyChecks(
@@ -148,6 +147,7 @@ export async function runPostgresProductionPreflight(
         role.rolinherit AS inherits,
         role.rolsuper AS "isSuperuser",
         role.rolcreaterole AS "canCreateRole",
+        role.rolbypassrls AS "bypassesRls",
         has_database_privilege(current_user,current_database(),'CREATE') AS "canCreateDatabaseObject",
         to_regnamespace('agent_bridge')::text AS "bridgeSchema",
         to_regclass('agent_bridge.schema_migrations')::text AS "migrationTable",
@@ -167,6 +167,11 @@ export async function runPostgresProductionPreflight(
       check("authority.login", row.canLogin && row.inherits, "migration role can log in and inherits grants"),
       check("authority.database_create", row.canCreateDatabaseObject, "migration role can create database objects"),
       check("authority.roles", row.isSuperuser || row.canCreateRole, "migration role can administer restricted roles"),
+      check(
+        "authority.native_dr",
+        row.isSuperuser || row.bypassesRls,
+        "native DR source role can bypass row-level security",
+      ),
       ...(options.requireSsl
         ? [check(
           "connection.ssl",
@@ -220,7 +225,8 @@ export async function runPostgresProductionPreflight(
           ('agent_bridge_control_owner_' || substr(md5(current_database()),1,16)),
           ('agent_bridge_control_operator_' || substr(md5(current_database()),1,16)),
           ('agent_bridge_control_auditor_' || substr(md5(current_database()),1,16)),
-          ('agent_bridge_archive_operator_' || substr(md5(current_database()),1,16))
+          ('agent_bridge_archive_operator_' || substr(md5(current_database()),1,16)),
+          ('agent_bridge_backup_reader_' || substr(md5(current_database()),1,16))
         )
         SELECT count(*)::text AS count FROM names JOIN pg_catalog.pg_roles role
           ON role.rolname=names.role_name`);

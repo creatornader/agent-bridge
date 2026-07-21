@@ -2,115 +2,27 @@ begin;
 
 select pg_advisory_xact_lock(1646705660);
 
--- Native DR fence contract: backup holds pg_advisory_lock(1646705664).
--- Migration and Agent Bridge membership mutations hold the shared transaction form.
-select pg_advisory_xact_lock_shared(1646705664);
-
-do $identifier_preflight$
-declare
-  rejected_role text;
+do $readiness$
 begin
-  with names as (select
-    namespace.nspowner schema_owner,
-    ('agent_bridge_control_owner_'||substr(md5(current_database()),1,16))::name control_owner
-    from pg_catalog.pg_namespace namespace where namespace.nspname='agent_bridge'
-  ), derived_roles(oid) as (
-    select role.oid from pg_catalog.pg_roles role where role.rolname in (
-      'agent_bridge_runtime_'||substr(md5(current_database()),1,16),
-      'agent_bridge_data_owner_'||substr(md5(current_database()),1,16),
-      'agent_bridge_context_reader_'||substr(md5(current_database()),1,16),
-      'agent_bridge_event_writer_'||substr(md5(current_database()),1,16),
-      'agent_bridge_control_owner_'||substr(md5(current_database()),1,16),
-      'agent_bridge_control_operator_'||substr(md5(current_database()),1,16),
-      'agent_bridge_control_auditor_'||substr(md5(current_database()),1,16),
-      'agent_bridge_archive_operator_'||substr(md5(current_database()),1,16)
-    )
-  ), object_roles(oid) as (
-    select schema_owner from names
-    union select relation.relowner from pg_catalog.pg_class relation
-      join pg_catalog.pg_namespace namespace on namespace.oid=relation.relnamespace
-      where namespace.nspname='agent_bridge'
-    union select procedure.proowner from pg_catalog.pg_proc procedure
-      join pg_catalog.pg_namespace namespace on namespace.oid=procedure.pronamespace
-      where namespace.nspname='agent_bridge'
-    union select type_record.typowner from pg_catalog.pg_type type_record
-      join pg_catalog.pg_namespace namespace on namespace.oid=type_record.typnamespace
-      where namespace.nspname='agent_bridge'
-    union select privilege.grantor from pg_catalog.pg_namespace namespace
-      cross join lateral pg_catalog.aclexplode(namespace.nspacl) privilege
-      where namespace.nspname='agent_bridge'
-    union select privilege.grantee from pg_catalog.pg_namespace namespace
-      cross join lateral pg_catalog.aclexplode(namespace.nspacl) privilege
-      where namespace.nspname='agent_bridge' and privilege.grantee<>0
-    union select privilege.grantor from pg_catalog.pg_class relation
-      join pg_catalog.pg_namespace namespace on namespace.oid=relation.relnamespace
-      cross join lateral pg_catalog.aclexplode(relation.relacl) privilege
-      where namespace.nspname='agent_bridge'
-    union select privilege.grantee from pg_catalog.pg_class relation
-      join pg_catalog.pg_namespace namespace on namespace.oid=relation.relnamespace
-      cross join lateral pg_catalog.aclexplode(relation.relacl) privilege
-      where namespace.nspname='agent_bridge' and privilege.grantee<>0
-    union select privilege.grantor from pg_catalog.pg_attribute attribute
-      join pg_catalog.pg_class relation on relation.oid=attribute.attrelid
-      join pg_catalog.pg_namespace namespace on namespace.oid=relation.relnamespace
-      cross join lateral pg_catalog.aclexplode(attribute.attacl) privilege
-      where namespace.nspname='agent_bridge' and attribute.attnum>0
-        and not attribute.attisdropped and attribute.attacl is not null
-    union select privilege.grantee from pg_catalog.pg_attribute attribute
-      join pg_catalog.pg_class relation on relation.oid=attribute.attrelid
-      join pg_catalog.pg_namespace namespace on namespace.oid=relation.relnamespace
-      cross join lateral pg_catalog.aclexplode(attribute.attacl) privilege
-      where namespace.nspname='agent_bridge' and attribute.attnum>0
-        and not attribute.attisdropped and attribute.attacl is not null
-        and privilege.grantee<>0
-    union select privilege.grantor from pg_catalog.pg_proc procedure
-      join pg_catalog.pg_namespace namespace on namespace.oid=procedure.pronamespace
-      cross join lateral pg_catalog.aclexplode(procedure.proacl) privilege
-      where namespace.nspname='agent_bridge'
-    union select privilege.grantee from pg_catalog.pg_proc procedure
-      join pg_catalog.pg_namespace namespace on namespace.oid=procedure.pronamespace
-      cross join lateral pg_catalog.aclexplode(procedure.proacl) privilege
-      where namespace.nspname='agent_bridge' and privilege.grantee<>0
-    union select default_acl.defaclrole from pg_catalog.pg_default_acl default_acl
-      left join pg_catalog.pg_namespace namespace on namespace.oid=default_acl.defaclnamespace
-      cross join names where namespace.nspname='agent_bridge'
-        or default_acl.defaclrole in (names.schema_owner,
-          (select oid from pg_catalog.pg_roles where rolname=names.control_owner))
-    union select privilege.grantor from pg_catalog.pg_default_acl default_acl
-      left join pg_catalog.pg_namespace namespace on namespace.oid=default_acl.defaclnamespace
-      cross join lateral pg_catalog.aclexplode(default_acl.defaclacl) privilege
-      cross join names where namespace.nspname='agent_bridge'
-        or default_acl.defaclrole in (names.schema_owner,
-          (select oid from pg_catalog.pg_roles where rolname=names.control_owner))
-    union select privilege.grantee from pg_catalog.pg_default_acl default_acl
-      left join pg_catalog.pg_namespace namespace on namespace.oid=default_acl.defaclnamespace
-      cross join lateral pg_catalog.aclexplode(default_acl.defaclacl) privilege
-      cross join names where privilege.grantee<>0 and (
-        namespace.nspname='agent_bridge'
-        or default_acl.defaclrole in (names.schema_owner,
-          (select oid from pg_catalog.pg_roles where rolname=names.control_owner))
-      )
-  ), base_roles(oid) as (
-    select oid from derived_roles union select oid from object_roles
-  ), relevant_roles(oid) as (
-    select oid from base_roles
-    union select membership.roleid from pg_catalog.pg_auth_members membership
-      where membership.member in (select oid from base_roles)
-    union select membership.member from pg_catalog.pg_auth_members membership
-      where membership.roleid in (select oid from base_roles)
-  )
-  select role.rolname into rejected_role from relevant_roles relevant
-  join pg_catalog.pg_roles role on role.oid=relevant.oid
-  where role.rolname='PUBLIC' or position(':' in role.rolname)>0
-    or position(chr(30) in role.rolname)>0 or position(chr(31) in role.rolname)>0
-  order by role.rolname limit 1;
-
-  if rejected_role is not null then
-    raise exception 'native DR attestation cannot encode a reserved Agent Bridge role name'
-      using detail='rejected role: '||quote_literal(rejected_role);
+  if not agent_bridge.security_schema_ready() then
+    raise exception 'managed authority compatibility security readiness validation failed';
+  elsif not agent_bridge.owner_control_plane_ready() then
+    raise exception 'managed authority compatibility owner readiness validation failed';
+  elsif not agent_bridge.gateway_authority_ready() then
+    raise exception 'managed authority compatibility gateway readiness validation failed';
+  elsif not agent_bridge.endpoint_migration_challenge_ready() then
+    raise exception 'managed authority compatibility endpoint readiness validation failed';
+  elsif not agent_bridge.portable_archive_ready() then
+    raise exception 'managed authority compatibility archive readiness validation failed';
   end if;
 end
-$identifier_preflight$;
+$readiness$;
+
+alter table agent_bridge.portable_archive_attestations
+  drop constraint portable_archive_attestation_name;
+alter table agent_bridge.portable_archive_attestations
+  add constraint portable_archive_attestation_name
+  check(name ~ '^portable-archive-v[0-9]+$');
 
 create or replace function agent_bridge.assert_control_actor(requested_capability text)
 returns void language plpgsql security definer set search_path = '' as $$
@@ -214,160 +126,6 @@ begin
 end
 $$;
 
-create or replace function agent_bridge.register_control_member(
-  requested_request_id uuid, requested_member_role name, requested_control_role text
-) returns table(replayed boolean)
-language plpgsql security definer set search_path = '' as $$
-declare
-  suffix text := substr(md5(current_database()),1,16);
-  target_role name;
-  prior agent_bridge.control_membership_events%rowtype;
-  member_record pg_catalog.pg_roles%rowtype;
-begin
-  if requested_request_id is null or requested_member_role is null
-    or requested_control_role is null
-    or requested_control_role not in ('operator','auditor') then
-    raise exception 'invalid control membership registration';
-  end if;
-  perform pg_catalog.pg_advisory_xact_lock_shared(1646705664);
-  target_role := ('agent_bridge_control_'||requested_control_role||'_'||suffix)::name;
-  perform pg_catalog.pg_advisory_xact_lock(pg_catalog.hashtextextended(
-    'control-membership'||chr(31)||requested_member_role||chr(31)||'global',
-    1646705661
-  ));
-  perform pg_catalog.pg_advisory_xact_lock(pg_catalog.hashtextextended(
-    'control-membership'||chr(31)||requested_member_role||chr(31)||requested_control_role,
-    1646705661
-  ));
-  perform pg_catalog.pg_advisory_xact_lock(
-    pg_catalog.hashtextextended(requested_request_id::text,1646705660)
-  );
-  select * into prior from agent_bridge.control_membership_events
-    where request_id=requested_request_id;
-  if found then
-    if prior.action<>'register' or prior.member_role<>requested_member_role
-      or prior.control_role<>requested_control_role then
-      raise exception 'request id was already used with different content';
-    end if;
-    return query select true;
-    return;
-  end if;
-  select * into member_record from pg_catalog.pg_roles where rolname=requested_member_role;
-  if not found or not member_record.rolcanlogin or member_record.rolsuper
-    or member_record.rolcreaterole or member_record.rolcreatedb
-    or member_record.rolreplication or member_record.rolbypassrls
-    or requested_member_role in (
-      current_user::name,
-      ('agent_bridge_control_owner_'||suffix)::name,
-      ('agent_bridge_control_operator_'||suffix)::name,
-      ('agent_bridge_control_auditor_'||suffix)::name
-    ) then
-    raise exception 'control membership target is not an eligible login';
-  end if;
-  if exists (
-    select 1 from pg_catalog.pg_roles inherited
-    where inherited.rolname<>requested_member_role
-      and pg_catalog.pg_has_role(requested_member_role,inherited.rolname,'MEMBER')
-      and inherited.rolname<>target_role
-      and not exists (
-        select 1 from (
-          select distinct on (event.control_role)
-            event.control_role,event.action
-          from agent_bridge.control_membership_events event
-          where event.member_role=requested_member_role
-          order by event.control_role,event.sequence desc
-        ) latest
-        where latest.action='register'
-          and inherited.rolname=(
-            'agent_bridge_control_'||latest.control_role||'_'||suffix
-          )::name
-      )
-  ) or exists (
-    select 1 from pg_catalog.pg_roles candidate
-    where candidate.rolname not in (requested_member_role,current_user)
-      and not candidate.rolsuper
-      and pg_catalog.pg_has_role(candidate.rolname,requested_member_role,'MEMBER')
-  ) then
-    raise exception 'control membership target has an unsafe membership graph';
-  end if;
-  if exists (
-    select 1 from pg_catalog.pg_auth_members membership
-    join pg_catalog.pg_roles granted on granted.oid=membership.roleid
-    join pg_catalog.pg_roles member on member.oid=membership.member
-    where granted.rolname=target_role and member.rolname=requested_member_role
-      and (
-        membership.admin_option
-        or not coalesce((to_jsonb(membership)->>'inherit_option')::boolean,true)
-        or not coalesce((to_jsonb(membership)->>'set_option')::boolean,true)
-      )
-  ) then
-    raise exception 'control membership target has an unsafe direct grant';
-  end if;
-  execute format('grant %I to %I',target_role,requested_member_role);
-  insert into agent_bridge.control_membership_events(
-    request_id,action,member_role,control_role,actor
-  ) values (
-    requested_request_id,'register',requested_member_role,requested_control_role,session_user
-  );
-  return query select false;
-end
-$$;
-
-create or replace function agent_bridge.revoke_control_member(
-  requested_request_id uuid, requested_member_role name, requested_control_role text
-) returns table(replayed boolean)
-language plpgsql security definer set search_path = '' as $$
-declare
-  suffix text := substr(md5(current_database()),1,16);
-  target_role name;
-  prior agent_bridge.control_membership_events%rowtype;
-begin
-  if requested_request_id is null or requested_member_role is null
-    or requested_control_role is null
-    or requested_control_role not in ('operator','auditor')
-    or requested_member_role in (
-      current_user::name,
-      ('agent_bridge_control_owner_'||suffix)::name,
-      ('agent_bridge_control_operator_'||suffix)::name,
-      ('agent_bridge_control_auditor_'||suffix)::name
-    ) then
-    raise exception 'invalid control membership revocation';
-  end if;
-  perform pg_catalog.pg_advisory_xact_lock_shared(1646705664);
-  target_role := ('agent_bridge_control_'||requested_control_role||'_'||suffix)::name;
-  perform pg_catalog.pg_advisory_xact_lock(pg_catalog.hashtextextended(
-    'control-membership'||chr(31)||requested_member_role||chr(31)||'global',
-    1646705661
-  ));
-  perform pg_catalog.pg_advisory_xact_lock(pg_catalog.hashtextextended(
-    'control-membership'||chr(31)||requested_member_role||chr(31)||requested_control_role,
-    1646705661
-  ));
-  perform pg_catalog.pg_advisory_xact_lock(
-    pg_catalog.hashtextextended(requested_request_id::text,1646705660)
-  );
-  select * into prior from agent_bridge.control_membership_events
-    where request_id=requested_request_id;
-  if found then
-    if prior.action<>'revoke' or prior.member_role<>requested_member_role
-      or prior.control_role<>requested_control_role then
-      raise exception 'request id was already used with different content';
-    end if;
-    return query select true;
-    return;
-  end if;
-  if exists(select 1 from pg_catalog.pg_roles where rolname=requested_member_role) then
-    execute format('revoke %I from %I',target_role,requested_member_role);
-  end if;
-  insert into agent_bridge.control_membership_events(
-    request_id,action,member_role,control_role,actor
-  ) values (
-    requested_request_id,'revoke',requested_member_role,requested_control_role,session_user
-  );
-  return query select false;
-end
-$$;
-
 create or replace function agent_bridge.assert_archive_actor()
 returns void language plpgsql security definer set search_path = '' as $$
 declare
@@ -443,129 +201,18 @@ begin
 end
 $$;
 
-create or replace function agent_bridge.register_archive_member(
-  requested_request_id uuid, requested_member_role name
-) returns table(replayed boolean)
-language plpgsql security definer set search_path = '' as $$
+do $ownership$
 declare
-  suffix text := substr(md5(current_database()),1,16);
-  archive_role name := ('agent_bridge_archive_operator_'||suffix)::name;
-  prior agent_bridge.archive_membership_events%rowtype;
-  member_record pg_catalog.pg_roles%rowtype;
+  owner_role text := 'agent_bridge_control_owner_'||substr(md5(current_database()),1,16);
 begin
-  perform pg_catalog.pg_advisory_xact_lock_shared(1646705664);
-  if not agent_bridge.portable_archive_ready() then
-    raise exception 'portable archive readiness validation failed';
-  end if;
-  if requested_request_id is null or requested_member_role is null
-    or requested_member_role in (current_user::name,archive_role) then
-    raise exception 'invalid archive membership registration';
-  end if;
-  perform pg_catalog.pg_advisory_xact_lock(pg_catalog.hashtextextended(
-    'archive-membership'||chr(31)||requested_member_role||chr(31)||'global',1646705662
-  ));
-  perform pg_catalog.pg_advisory_xact_lock(pg_catalog.hashtextextended(
-    'archive-membership'||chr(31)||requested_member_role||chr(31)||'operator',1646705662
-  ));
-  perform pg_catalog.pg_advisory_xact_lock(
-    pg_catalog.hashtextextended(requested_request_id::text,1646705660)
+  execute format('grant create on schema agent_bridge to %I',owner_role);
+  execute format(
+    'grant insert on agent_bridge.owner_control_attestations to %I',
+    owner_role
   );
-  select * into prior from agent_bridge.archive_membership_events
-  where request_id=requested_request_id;
-  if found then
-    if prior.action<>'register' or prior.member_role<>requested_member_role then
-      raise exception 'request id was already used with different content';
-    end if;
-    return query select true;
-    return;
-  end if;
-  select * into member_record from pg_catalog.pg_roles where rolname=requested_member_role;
-  if not found or not member_record.rolcanlogin or member_record.rolsuper
-    or member_record.rolcreaterole or member_record.rolcreatedb
-    or member_record.rolreplication or member_record.rolbypassrls then
-    raise exception 'archive membership target is not an eligible login';
-  end if;
-  if exists (
-    select 1 from pg_catalog.pg_roles inherited
-    where inherited.rolname<>requested_member_role
-      and pg_catalog.pg_has_role(requested_member_role,inherited.rolname,'MEMBER')
-      and inherited.rolname<>archive_role
-  ) or exists (
-    select 1 from pg_catalog.pg_roles candidate
-    where candidate.rolname not in (requested_member_role,current_user)
-      and not candidate.rolsuper
-      and pg_catalog.pg_has_role(candidate.rolname,requested_member_role,'MEMBER')
-  ) then
-    raise exception 'archive membership target has an unsafe membership graph';
-  end if;
-  if exists (
-    select 1 from pg_catalog.pg_auth_members membership
-    join pg_catalog.pg_roles granted on granted.oid=membership.roleid
-    join pg_catalog.pg_roles member on member.oid=membership.member
-    where granted.rolname=archive_role and member.rolname=requested_member_role and (
-      membership.admin_option
-      or not coalesce((to_jsonb(membership)->>'inherit_option')::boolean,true)
-      or not coalesce((to_jsonb(membership)->>'set_option')::boolean,true)
-    )
-  ) then
-    raise exception 'archive membership target has an unsafe direct grant';
-  end if;
-  execute format('grant %I to %I',archive_role,requested_member_role);
-  insert into agent_bridge.archive_membership_events(request_id,action,member_role,actor)
-  values(requested_request_id,'register',requested_member_role,session_user);
-  return query select false;
+  perform set_config('role',owner_role,false);
 end
-$$;
-
-create or replace function agent_bridge.revoke_archive_member(
-  requested_request_id uuid, requested_member_role name
-) returns table(replayed boolean)
-language plpgsql security definer set search_path = '' as $$
-declare
-  suffix text := substr(md5(current_database()),1,16);
-  archive_role name := ('agent_bridge_archive_operator_'||suffix)::name;
-  prior agent_bridge.archive_membership_events%rowtype;
-begin
-  perform pg_catalog.pg_advisory_xact_lock_shared(1646705664);
-  if not agent_bridge.portable_archive_ready() then
-    raise exception 'portable archive readiness validation failed';
-  end if;
-  if requested_request_id is null or requested_member_role is null
-    or requested_member_role in (current_user::name,archive_role) then
-    raise exception 'invalid archive membership revocation';
-  end if;
-  perform pg_catalog.pg_advisory_xact_lock(pg_catalog.hashtextextended(
-    'archive-membership'||chr(31)||requested_member_role||chr(31)||'global',1646705662
-  ));
-  perform pg_catalog.pg_advisory_xact_lock(pg_catalog.hashtextextended(
-    'archive-membership'||chr(31)||requested_member_role||chr(31)||'operator',1646705662
-  ));
-  perform pg_catalog.pg_advisory_xact_lock(
-    pg_catalog.hashtextextended(requested_request_id::text,1646705660)
-  );
-  select * into prior from agent_bridge.archive_membership_events
-  where request_id=requested_request_id;
-  if found then
-    if prior.action<>'revoke' or prior.member_role<>requested_member_role then
-      raise exception 'request id was already used with different content';
-    end if;
-    return query select true;
-    return;
-  end if;
-  if exists(select 1 from pg_catalog.pg_roles where rolname=requested_member_role) then
-    execute format('revoke %I from %I',archive_role,requested_member_role);
-  end if;
-  insert into agent_bridge.archive_membership_events(request_id,action,member_role,actor)
-  values(requested_request_id,'revoke',requested_member_role,session_user);
-  return query select false;
-end
-$$;
-
-alter table agent_bridge.portable_archive_attestations
-  drop constraint portable_archive_attestation_name;
-alter table agent_bridge.portable_archive_attestations
-  add constraint portable_archive_attestation_name
-  check(name ~ '^portable-archive-v[0-9]+$');
+$ownership$;
 
 create or replace function agent_bridge.owner_control_attestation_definition()
 returns text language sql stable set search_path = '' as $$
@@ -686,6 +333,16 @@ returns text language sql stable set search_path = '' as $$
     order by kind,identity,definition) from catalog_objects
 $$;
 
+reset role;
+
+do $ownership$
+declare
+  owner_role text := 'agent_bridge_control_owner_'||substr(md5(current_database()),1,16);
+begin
+  execute format('revoke create on schema agent_bridge from %I',owner_role);
+end
+$ownership$;
+
 create or replace function agent_bridge.portable_archive_attestation_definition()
 returns text language sql stable set search_path = '' as $$
   with names as (select
@@ -783,22 +440,6 @@ returns text language sql stable set search_path = '' as $$
     order by kind,identity,definition) from catalog_objects
 $$;
 
-revoke execute on function agent_bridge.owner_control_attestation_definition() from public;
-revoke execute on function agent_bridge.portable_archive_attestation_definition() from public;
-
-do $ownership$
-declare
-  owner_role text := 'agent_bridge_control_owner_'||substr(md5(current_database()),1,16);
-begin
-  execute format('grant create on schema agent_bridge to %I',owner_role);
-  execute format(
-    'alter function agent_bridge.owner_control_attestation_definition() owner to %I',
-    owner_role
-  );
-  execute format('revoke create on schema agent_bridge from %I',owner_role);
-end
-$ownership$;
-
 create or replace function agent_bridge.portable_archive_ready()
 returns boolean language sql stable security definer set search_path = '' as $$
   with names as (select
@@ -848,7 +489,7 @@ returns boolean language sql stable security definer set search_path = '' as $$
     and (select count(*)=1 and bool_and(
       attestation.catalog_definition=agent_bridge.portable_archive_attestation_definition()
     ) from agent_bridge.portable_archive_attestations attestation
-      where attestation.name='portable-archive-v3')
+      where attestation.name='portable-archive-v4')
     and not exists(
       (select granted_role,member_role,admin_option,inherit_option,set_option from actual_memberships
        except select granted_role,member_role,admin_option,inherit_option,set_option from expected_memberships)
@@ -937,11 +578,9 @@ returns boolean language sql stable security definer set search_path = '' as $$
     ('agent_bridge_control_owner_'||substr(md5(current_database()),1,16))::name owner_role,
     ('agent_bridge_control_operator_'||substr(md5(current_database()),1,16))::name operator_role,
     ('agent_bridge_control_auditor_'||substr(md5(current_database()),1,16))::name auditor_role,
-    (select pg_catalog.pg_get_userbyid(nspowner)::name from pg_catalog.pg_namespace
-      where nspname='agent_bridge') schema_owner
+    (select pg_catalog.pg_get_userbyid(nspowner)::name from pg_catalog.pg_namespace where nspname='agent_bridge') schema_owner
   ), latest_registry as (
-    select distinct on (event.member_role,event.control_role)
-      event.member_role,event.control_role,event.action
+    select distinct on (event.member_role,event.control_role) event.member_role,event.control_role,event.action
     from agent_bridge.control_membership_events event
     order by event.member_role,event.control_role,event.sequence desc
   ), active_registry as (
@@ -951,10 +590,8 @@ returns boolean language sql stable security definer set search_path = '' as $$
       true admin_option,true inherit_option,true set_option from names
     union all select names.operator_role,names.schema_owner,true,true,true from names
     union all select names.auditor_role,names.schema_owner,true,true,true from names
-    union all
-    select case registry.control_role when 'operator' then names.operator_role
-      else names.auditor_role end,registry.member_role,false,true,true
-    from active_registry registry cross join names
+    union all select case registry.control_role when 'operator' then names.operator_role else names.auditor_role end,
+      registry.member_role,false,true,true from active_registry registry cross join names
   ), raw_memberships as (
     select granted.rolname::name granted_role,member.rolname::name member_role,
       membership.admin_option,
@@ -964,9 +601,7 @@ returns boolean language sql stable security definer set search_path = '' as $$
     from pg_catalog.pg_auth_members membership
     join pg_catalog.pg_roles granted on granted.oid=membership.roleid
     join pg_catalog.pg_roles member on member.oid=membership.member
-    where granted.rolname in (
-      (select owner_role from names),(select operator_role from names),(select auditor_role from names)
-    )
+    where granted.rolname in ((select owner_role from names),(select operator_role from names),(select auditor_role from names))
   ), actual_memberships as (
     select membership.granted_role,membership.member_role,
       bool_or(membership.admin_option) admin_option,
@@ -984,89 +619,80 @@ returns boolean language sql stable security definer set search_path = '' as $$
     group by membership.granted_role,membership.member_role
   ), authority_closure as (
     select control_role.granted_role,candidate.rolname::name member_role
-    from names
-    cross join lateral (values
-      (names.owner_role),(names.operator_role),(names.auditor_role)
-    ) control_role(granted_role)
+    from names cross join lateral(values(names.owner_role),(names.operator_role),(names.auditor_role)) control_role(granted_role)
     cross join pg_catalog.pg_roles candidate
-    where candidate.rolname not in (names.owner_role,names.operator_role,names.auditor_role)
-      and (not candidate.rolsuper or candidate.rolname=names.schema_owner)
+    where candidate.rolname not in(names.owner_role,names.operator_role,names.auditor_role)
+      and(not candidate.rolsuper or candidate.rolname=names.schema_owner)
       and pg_catalog.pg_has_role(candidate.rolname,control_role.granted_role,'MEMBER')
-  )
-  select
+  ) select
     current_setting('server_version_num')::integer/10000=any(array[15,16,17,18])
-    and (select count(*)=1 and bool_and(
-      attestation.catalog_definition=agent_bridge.owner_control_attestation_definition()
-    ) from agent_bridge.owner_control_attestations attestation
-      where attestation.name='owner-control-v4')
-    and not exists (
+    and(select count(*)=1 and bool_and(catalog_definition=agent_bridge.owner_control_attestation_definition())
+      from agent_bridge.owner_control_attestations where name='owner-control-v7')
+    and not exists(
       (select granted_role,member_role,admin_option,inherit_option,set_option from actual_memberships
-       except select granted_role,member_role,admin_option,inherit_option,set_option from expected_memberships)
-      union all
-      (select granted_role,member_role,admin_option,inherit_option,set_option from expected_memberships
-       except select granted_role,member_role,admin_option,inherit_option,set_option from actual_memberships)
+        except select granted_role,member_role,admin_option,inherit_option,set_option from expected_memberships)
+      union all(select granted_role,member_role,admin_option,inherit_option,set_option from expected_memberships
+        except select granted_role,member_role,admin_option,inherit_option,set_option from actual_memberships)
     )
-    and not exists (select 1 from actual_memberships membership
-      where not membership.grants_valid)
-    and not exists (
-      select 1 from active_registry registry
-      left join pg_catalog.pg_roles role_record on role_record.rolname=registry.member_role
-      where role_record.oid is null or not role_record.rolcanlogin or role_record.rolsuper
-        or role_record.rolcreaterole or role_record.rolcreatedb
-        or role_record.rolreplication or role_record.rolbypassrls
+    and not exists(select 1 from actual_memberships where not grants_valid)
+    and not exists(select 1 from active_registry registry left join pg_catalog.pg_roles role_record on role_record.rolname=registry.member_role
+      where role_record.oid is null or not role_record.rolcanlogin or role_record.rolsuper or role_record.rolcreaterole
+        or role_record.rolcreatedb or role_record.rolreplication or role_record.rolbypassrls)
+    and not exists(
+      (select granted_role,member_role from authority_closure except select granted_role,member_role from expected_memberships)
+      union all(select granted_role,member_role from expected_memberships except select granted_role,member_role from authority_closure)
     )
-    and not exists (
-      (select granted_role,member_role from authority_closure
-       except select granted_role,member_role from expected_memberships)
-      union all
-      (select granted_role,member_role from expected_memberships
-       except select granted_role,member_role from authority_closure)
-    )
-    and not exists (
-      select 1 from active_registry registry
-      join pg_catalog.pg_roles inherited on inherited.rolname<>registry.member_role
-      where pg_catalog.pg_has_role(registry.member_role,inherited.rolname,'MEMBER')
-        and not exists (
-          select 1 from active_registry permitted
-          cross join names
-          where permitted.member_role=registry.member_role
-            and inherited.rolname=case permitted.control_role
-              when 'operator' then names.operator_role else names.auditor_role end
-        )
-    )
-    and not exists (
-      select 1 from active_registry registry
-      cross join pg_catalog.pg_roles candidate
-      cross join names
-      where candidate.rolname not in (registry.member_role,names.schema_owner)
-        and not candidate.rolsuper
-        and pg_catalog.pg_has_role(candidate.rolname,registry.member_role,'MEMBER')
-    )
+    and not exists(select 1 from active_registry registry join pg_catalog.pg_roles inherited on inherited.rolname<>registry.member_role
+      where pg_catalog.pg_has_role(registry.member_role,inherited.rolname,'MEMBER') and not exists(
+        select 1 from active_registry permitted cross join names where permitted.member_role=registry.member_role
+          and inherited.rolname=case permitted.control_role when 'operator' then names.operator_role else names.auditor_role end
+      ))
+    and not exists(select 1 from active_registry registry cross join pg_catalog.pg_roles candidate,names
+      where candidate.rolname not in(registry.member_role,names.schema_owner) and not candidate.rolsuper
+        and pg_catalog.pg_has_role(candidate.rolname,registry.member_role,'MEMBER'))
 $$;
 
 select set_config(
   'role','agent_bridge_control_owner_'||substr(md5(current_database()),1,16),false
 );
-insert into agent_bridge.owner_control_attestations(name,catalog_definition)
-values('owner-control-v4',agent_bridge.owner_control_attestation_definition());
+do $owner_attestation$
+begin
+  insert into agent_bridge.owner_control_attestations(name,catalog_definition)
+  values('owner-control-v7',agent_bridge.owner_control_attestation_definition());
+exception when others then
+  raise exception 'managed authority compatibility owner attestation append failed: %',sqlerrm;
+end
+$owner_attestation$;
 reset role;
 
-insert into agent_bridge.portable_archive_attestations(name,catalog_definition)
-values('portable-archive-v3',agent_bridge.portable_archive_attestation_definition());
+do $archive_attestation$
+begin
+  insert into agent_bridge.portable_archive_attestations(name,catalog_definition)
+  values('portable-archive-v4',agent_bridge.portable_archive_attestation_definition());
+exception when others then
+  raise exception 'managed authority compatibility archive attestation append failed: %',sqlerrm;
+end
+$archive_attestation$;
 
-do $preflight$
+do $final_readiness$
 begin
   if not agent_bridge.security_schema_ready() then
-    raise exception 'native DR fence security readiness validation failed';
-  elseif not agent_bridge.owner_control_plane_ready() then
-    raise exception 'native DR fence owner readiness validation failed';
-  elseif not agent_bridge.portable_archive_ready() then
-    raise exception 'native DR fence portable archive readiness validation failed';
+    raise exception 'managed authority compatibility final security readiness validation failed';
+  elsif not agent_bridge.owner_control_plane_ready() then
+    raise exception 'managed authority compatibility final owner readiness validation failed';
+  elsif not agent_bridge.gateway_authority_ready() then
+    raise exception 'managed authority compatibility final gateway readiness validation failed';
+  elsif not agent_bridge.endpoint_migration_challenge_ready() then
+    raise exception 'managed authority compatibility final endpoint readiness validation failed';
+  elsif not agent_bridge.portable_archive_ready() then
+    raise exception 'managed authority compatibility final archive readiness validation failed';
   end if;
+exception when others then
+  raise exception 'managed authority compatibility final readiness execution failed: %',sqlerrm;
 end
-$preflight$;
+$final_readiness$;
 
 insert into agent_bridge.schema_migrations(version,name,checksum)
-values(16,'native_dr_fence','__AGENT_BRIDGE_MIGRATION_CHECKSUM__');
+values(20,'managed_authority_compat','__AGENT_BRIDGE_MIGRATION_CHECKSUM__');
 
 commit;

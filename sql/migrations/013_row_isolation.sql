@@ -17,11 +17,73 @@ begin
         role_name
       );
     end if;
-    execute format(
-      'alter role %I nologin nosuperuser nocreatedb nocreaterole noreplication nobypassrls',
-      role_name
-    );
-    execute format('grant %I to %I with admin option',role_name,current_user);
+    if exists (
+      select 1 from pg_roles where rolname=role_name and (
+        rolcanlogin or not rolinherit or rolsuper or rolcreatedb or rolcreaterole
+        or rolreplication or rolbypassrls or rolconnlimit<>-1
+      )
+    ) then
+      raise exception 'Agent Bridge row-isolation role % has unsafe attributes',role_name;
+    end if;
+    if current_setting('server_version_num')::integer>=160000 then
+      if not exists (
+        select 1 from pg_catalog.pg_auth_members membership
+        join pg_catalog.pg_roles granted on granted.oid=membership.roleid
+        join pg_catalog.pg_roles member on member.oid=membership.member
+        where granted.rolname=role_name and member.rolname=current_user
+          and membership.admin_option
+      ) then
+        execute format(
+          'grant %I to %I with admin true,inherit true,set true',role_name,current_user
+        );
+      elsif not exists (
+        select 1 from pg_catalog.pg_auth_members membership
+        join pg_catalog.pg_roles granted on granted.oid=membership.roleid
+        join pg_catalog.pg_roles member on member.oid=membership.member
+        where granted.rolname=role_name and member.rolname=current_user
+          and coalesce((to_jsonb(membership)->>'inherit_option')::boolean,true)
+          and coalesce((to_jsonb(membership)->>'set_option')::boolean,true)
+      ) then
+        execute format('grant %I to %I with inherit true,set true',role_name,current_user);
+      end if;
+    elsif not exists (
+      select 1 from pg_catalog.pg_auth_members membership
+      join pg_catalog.pg_roles granted on granted.oid=membership.roleid
+      join pg_catalog.pg_roles member on member.oid=membership.member
+      where granted.rolname=role_name and member.rolname=current_user
+        and membership.admin_option
+    ) then
+      execute format('grant %I to %I with admin option',role_name,current_user);
+    end if;
+    if not exists (
+      select 1 from pg_catalog.pg_auth_members membership
+      join pg_catalog.pg_roles granted on granted.oid=membership.roleid
+      join pg_catalog.pg_roles member on member.oid=membership.member
+      where granted.rolname=role_name and member.rolname=current_user
+        and membership.admin_option
+    ) or not exists (
+      select 1 from pg_catalog.pg_auth_members membership
+      join pg_catalog.pg_roles granted on granted.oid=membership.roleid
+      join pg_catalog.pg_roles member on member.oid=membership.member
+      where granted.rolname=role_name and member.rolname=current_user
+        and coalesce((to_jsonb(membership)->>'inherit_option')::boolean,true)
+        and coalesce((to_jsonb(membership)->>'set_option')::boolean,true)
+    ) or exists (
+      select 1 from pg_catalog.pg_auth_members membership
+      join pg_catalog.pg_roles granted on granted.oid=membership.roleid
+      join pg_catalog.pg_roles member on member.oid=membership.member
+      where granted.rolname=role_name and member.rolname=current_user
+        and not (
+          (membership.grantor=10 and membership.admin_option
+            and not coalesce((to_jsonb(membership)->>'inherit_option')::boolean,true)
+            and not coalesce((to_jsonb(membership)->>'set_option')::boolean,true))
+          or (membership.grantor=member.oid
+            and coalesce((to_jsonb(membership)->>'inherit_option')::boolean,true)
+            and coalesce((to_jsonb(membership)->>'set_option')::boolean,true))
+        )
+    ) then
+      raise exception 'Agent Bridge row-isolation role % has unsafe owner authority',role_name;
+    end if;
   end loop;
 end
 $roles$;
@@ -292,7 +354,8 @@ declare
   event_writer text := 'agent_bridge_event_writer_' || suffix;
   table_name text;
 begin
-  execute format('grant usage on schema agent_bridge to %I',data_owner);
+  execute format('grant usage,create on schema agent_bridge to %I,%I,%I',
+    data_owner,context_reader,event_writer);
   foreach table_name in array array[
     'messages','receipts','deliveries','delivery_events','agent_instances'
   ] loop
@@ -301,9 +364,9 @@ begin
   execute format('alter function agent_bridge.current_request_workspace() owner to %I',context_reader);
   execute format('alter function agent_bridge.current_request_principal() owner to %I',context_reader);
   execute format('alter function agent_bridge.record_delivery_event() owner to %I',event_writer);
-  execute format('grant usage on schema agent_bridge to %I',context_reader);
+  execute format('revoke create on schema agent_bridge from %I,%I,%I',
+    data_owner,context_reader,event_writer);
   execute format('grant select on agent_bridge.request_authorities to %I',context_reader);
-  execute format('grant usage on schema agent_bridge to %I',event_writer);
   execute format('grant insert on agent_bridge.delivery_events to %I',event_writer);
   execute format('grant usage on sequence agent_bridge.delivery_events_sequence_seq to %I',event_writer);
 end

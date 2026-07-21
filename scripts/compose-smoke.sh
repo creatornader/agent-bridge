@@ -117,6 +117,165 @@ if [[ $short_password_status -eq 0 || "$short_password_result" != *"division by 
   exit 1
 fi
 
+"${compose[@]}" run --rm --no-deps bootstrap-runtime >/dev/null
+
+derived_owner="$("${compose[@]}" exec -T postgres psql -U postgres -d agent_bridge -Atc \
+  "SELECT 'agent_bridge_data_owner_' || substr(md5(current_database()), 1, 16)")"
+derived_owner_before="$("${compose[@]}" exec -T postgres psql -U postgres -d agent_bridge -Atc \
+  "SELECT rolcanlogin::text || ':' || (rolpassword IS NULL)::text FROM pg_authid WHERE rolname='$derived_owner'")"
+set +e
+derived_owner_result="$("${compose[@]}" run --rm --no-deps \
+  -e AGENT_BRIDGE_RUNTIME_LOGIN="$derived_owner" bootstrap-runtime 2>&1)"
+derived_owner_status=$?
+set -e
+derived_owner_after="$("${compose[@]}" exec -T postgres psql -U postgres -d agent_bridge -Atc \
+  "SELECT rolcanlogin::text || ':' || (rolpassword IS NULL)::text FROM pg_authid WHERE rolname='$derived_owner'")"
+if [[ $derived_owner_status -eq 0 || "$derived_owner_result" != *"division by zero"* \
+  || "$derived_owner_before" != "false:true" || "$derived_owner_after" != "$derived_owner_before" ]]; then
+  printf '%s\n' \
+    "The runtime bootstrap mutated or accepted a derived authority role: status=$derived_owner_status before=$derived_owner_before after=$derived_owner_after." >&2
+  exit 1
+fi
+
+foreign_derived_role="agent_bridge_runtime_0123456789abcdef"
+"${compose[@]}" exec -T postgres psql -U postgres -d agent_bridge -v ON_ERROR_STOP=1 \
+  -c "CREATE ROLE \"$foreign_derived_role\" NOLOGIN INHERIT" >/dev/null
+foreign_derived_before="$("${compose[@]}" exec -T postgres psql -U postgres -d agent_bridge -Atc \
+  "SELECT rolcanlogin::text || ':' || (rolpassword IS NULL)::text FROM pg_authid WHERE rolname='$foreign_derived_role'")"
+set +e
+foreign_derived_result="$("${compose[@]}" run --rm --no-deps \
+  -e AGENT_BRIDGE_RUNTIME_LOGIN="$foreign_derived_role" bootstrap-runtime 2>&1)"
+foreign_derived_status=$?
+set -e
+foreign_derived_after="$("${compose[@]}" exec -T postgres psql -U postgres -d agent_bridge -Atc \
+  "SELECT rolcanlogin::text || ':' || (rolpassword IS NULL)::text FROM pg_authid WHERE rolname='$foreign_derived_role'")"
+"${compose[@]}" exec -T postgres psql -U postgres -d agent_bridge -v ON_ERROR_STOP=1 \
+  -c "DROP ROLE \"$foreign_derived_role\"" >/dev/null
+if [[ $foreign_derived_status -eq 0 || "$foreign_derived_result" != *"division by zero"* \
+  || "$foreign_derived_before" != "false:true" || "$foreign_derived_after" != "$foreign_derived_before" ]]; then
+  printf '%s\n' "The runtime bootstrap mutated or accepted a foreign derived authority role." >&2
+  exit 1
+fi
+
+runtime_group="$("${compose[@]}" exec -T postgres psql -U postgres -d agent_bridge -Atc \
+  "SELECT 'agent_bridge_runtime_' || substr(md5(current_database()), 1, 16)")"
+reverse_login="ab_bootstrap_reverse_$(printf '%s' "$suffix" | tr -cd '0-9')"
+reverse_member="ab_bootstrap_member_$(printf '%s' "$suffix" | tr -cd '0-9')"
+"${compose[@]}" exec -T postgres psql -U postgres -d agent_bridge -v ON_ERROR_STOP=1 \
+  -c "CREATE ROLE \"$reverse_login\" LOGIN INHERIT PASSWORD '$operator_password'" \
+  -c "CREATE ROLE \"$reverse_member\" NOLOGIN INHERIT" \
+  -c "GRANT \"$runtime_group\" TO \"$reverse_login\"" \
+  -c "GRANT \"$reverse_login\" TO \"$reverse_member\"" >/dev/null
+reverse_password_before="$("${compose[@]}" exec -T postgres psql -U postgres -d agent_bridge -Atc \
+  "SELECT rolpassword FROM pg_authid WHERE rolname='$reverse_login'")"
+set +e
+reverse_result="$("${compose[@]}" run --rm --no-deps \
+  -e AGENT_BRIDGE_RUNTIME_LOGIN="$reverse_login" bootstrap-runtime 2>&1)"
+reverse_status=$?
+set -e
+reverse_password_after="$("${compose[@]}" exec -T postgres psql -U postgres -d agent_bridge -Atc \
+  "SELECT rolpassword FROM pg_authid WHERE rolname='$reverse_login'")"
+"${compose[@]}" exec -T postgres psql -U postgres -d agent_bridge -v ON_ERROR_STOP=1 \
+  -c "DROP ROLE \"$reverse_member\"" -c "DROP ROLE \"$reverse_login\"" >/dev/null
+if [[ $reverse_status -eq 0 || "$reverse_result" != *"division by zero"* \
+  || -z "$reverse_password_before" || "$reverse_password_after" != "$reverse_password_before" ]]; then
+  printf '%s\n' "The runtime bootstrap mutated or accepted a login with a reverse membership edge." >&2
+  exit 1
+fi
+
+cross_owner_database="ab_bootstrap_owned_$(printf '%s' "$suffix" | tr -cd '0-9')"
+cross_owner_login="ab_bootstrap_cross_$(printf '%s' "$suffix" | tr -cd '0-9')"
+"${compose[@]}" exec -T postgres psql -U postgres -d agent_bridge -v ON_ERROR_STOP=1 \
+  -c "CREATE ROLE \"$cross_owner_login\" LOGIN INHERIT PASSWORD '$operator_password'" \
+  -c "GRANT \"$runtime_group\" TO \"$cross_owner_login\"" >/dev/null
+"${compose[@]}" exec -T postgres createdb -U postgres "$cross_owner_database"
+"${compose[@]}" exec -T postgres psql -U postgres -d "$cross_owner_database" \
+  -v ON_ERROR_STOP=1 -c "CREATE SCHEMA bootstrap_owned AUTHORIZATION \"$cross_owner_login\"" >/dev/null
+cross_owner_password_before="$("${compose[@]}" exec -T postgres psql -U postgres -d agent_bridge -Atc \
+  "SELECT rolpassword FROM pg_authid WHERE rolname='$cross_owner_login'")"
+set +e
+cross_owner_result="$("${compose[@]}" run --rm --no-deps \
+  -e AGENT_BRIDGE_RUNTIME_LOGIN="$cross_owner_login" bootstrap-runtime 2>&1)"
+cross_owner_status=$?
+set -e
+cross_owner_password_after="$("${compose[@]}" exec -T postgres psql -U postgres -d agent_bridge -Atc \
+  "SELECT rolpassword FROM pg_authid WHERE rolname='$cross_owner_login'")"
+"${compose[@]}" exec -T postgres dropdb -U postgres "$cross_owner_database"
+"${compose[@]}" exec -T postgres psql -U postgres -d agent_bridge -v ON_ERROR_STOP=1 \
+  -c "DROP ROLE \"$cross_owner_login\"" >/dev/null
+if [[ $cross_owner_status -eq 0 || "$cross_owner_result" != *"division by zero"* \
+  || -z "$cross_owner_password_before" || "$cross_owner_password_after" != "$cross_owner_password_before" ]]; then
+  printf '%s\n' "The runtime bootstrap mutated or accepted a login that owns an object in another database." >&2
+  exit 1
+fi
+
+managed_database="ab_bootstrap_managed_$(printf '%s' "$suffix" | tr -cd '0-9')"
+managed_owner="ab_bootstrap_owner_$(printf '%s' "$suffix" | tr -cd '0-9')"
+managed_login="ab_bootstrap_runtime_$(printf '%s' "$suffix" | tr -cd '0-9')"
+"${compose[@]}" exec -T postgres psql -U postgres -d agent_bridge -v ON_ERROR_STOP=1 \
+  -c "CREATE ROLE \"$managed_owner\" LOGIN INHERIT NOSUPERUSER NOCREATEDB CREATEROLE NOREPLICATION NOBYPASSRLS" \
+  -c "CREATE DATABASE \"$managed_database\" OWNER \"$managed_owner\"" >/dev/null
+managed_runtime_group="$("${compose[@]}" exec -T postgres psql -U postgres -d "$managed_database" -Atc \
+  "SELECT 'agent_bridge_runtime_' || substr(md5(current_database()), 1, 16)")"
+"${compose[@]}" exec -T postgres psql -U "$managed_owner" -d "$managed_database" -v ON_ERROR_STOP=1 \
+  -c "CREATE SCHEMA agent_bridge AUTHORIZATION \"$managed_owner\"" \
+  -c "CREATE ROLE \"$managed_runtime_group\" NOLOGIN INHERIT NOSUPERUSER NOCREATEDB NOCREATEROLE NOREPLICATION NOBYPASSRLS" >/dev/null
+for _ in 1 2; do
+  "${compose[@]}" exec -T \
+    -e AGENT_BRIDGE_RUNTIME_LOGIN="$managed_login" \
+    -e AGENT_BRIDGE_RUNTIME_PASSWORD="$operator_password" \
+    postgres psql -U "$managed_owner" -d "$managed_database" -v ON_ERROR_STOP=1 -f - \
+    < deploy/bootstrap-runtime.sql >/dev/null
+done
+managed_edge_proof="$("${compose[@]}" exec -T postgres psql -U postgres -d agent_bridge -Atc "
+  WITH edges AS (
+    SELECT granted.rolname AS granted, member.rolname AS member,
+           membership.grantor, membership.admin_option,
+           (to_jsonb(membership)->>'inherit_option')::boolean AS inherit_option,
+           (to_jsonb(membership)->>'set_option')::boolean AS set_option
+    FROM pg_auth_members membership
+    JOIN pg_roles granted ON granted.oid=membership.roleid
+    JOIN pg_roles member ON member.oid=membership.member
+    WHERE (granted.rolname='$managed_runtime_group' AND member.rolname='$managed_login')
+       OR granted.rolname='$managed_login'
+  )
+  SELECT
+    count(*) FILTER (WHERE granted='$managed_runtime_group' AND member='$managed_login'
+      AND NOT admin_option AND inherit_option AND set_option),
+    count(*) FILTER (WHERE granted='$managed_login' AND member='$managed_owner'
+      AND grantor=10 AND admin_option AND NOT inherit_option AND NOT set_option),
+    count(*)
+  FROM edges")"
+"${compose[@]}" exec -T postgres dropdb -U postgres "$managed_database"
+"${compose[@]}" exec -T postgres psql -U postgres -d agent_bridge -v ON_ERROR_STOP=1 \
+  -c "DROP ROLE \"$managed_login\"" \
+  -c "DROP ROLE \"$managed_runtime_group\"" \
+  -c "DROP ROLE \"$managed_owner\"" >/dev/null
+if [[ "$managed_edge_proof" != "1|1|2" ]]; then
+  printf '%s\n' "The runtime bootstrap did not preserve the expected PostgreSQL 16 managed membership edges." >&2
+  exit 1
+fi
+
+rollback_database="ab_bootstrap_rollback_$(printf '%s' "$suffix" | tr -cd '0-9')"
+rollback_login="ab_bootstrap_login_$(printf '%s' "$suffix" | tr -cd '0-9')"
+"${compose[@]}" exec -T postgres createdb -U postgres "$rollback_database"
+"${compose[@]}" exec -T postgres psql -U postgres -d "$rollback_database" \
+  -v ON_ERROR_STOP=1 -c "CREATE SCHEMA agent_bridge AUTHORIZATION postgres" >/dev/null
+set +e
+rollback_result="$("${compose[@]}" run --rm --no-deps \
+  -e PGDATABASE="$rollback_database" \
+  -e AGENT_BRIDGE_RUNTIME_LOGIN="$rollback_login" bootstrap-runtime 2>&1)"
+rollback_status=$?
+set -e
+rollback_role_count="$("${compose[@]}" exec -T postgres psql -U postgres -d agent_bridge -Atc \
+  "SELECT count(*) FROM pg_roles WHERE rolname='$rollback_login'")"
+"${compose[@]}" exec -T postgres dropdb -U postgres "$rollback_database"
+if [[ $rollback_status -eq 0 || "$rollback_result" != *"does not exist"* \
+  || "$rollback_role_count" != "0" ]]; then
+  printf '%s\n' "The runtime bootstrap did not roll back a role after later validation failed." >&2
+  exit 1
+fi
+
 curl --fail --silent --show-error "$gateway_url/readyz" >"$proof_dir/ready.json"
 jq -e '.status == "ready"' "$proof_dir/ready.json" >/dev/null
 

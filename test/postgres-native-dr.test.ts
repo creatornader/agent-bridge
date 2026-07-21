@@ -13,6 +13,7 @@ import {
   buildPostgresRoleShellStatements,
   backupPostgresNativeDr,
   canonicalPostgresRoleInventory,
+  collectPostgresRoleInventory,
   createPostgresDrLibpqFiles,
   parsePostgresToolMajor,
   POSTGRES_NATIVE_DR_EXCLUDED_DATA_TABLES,
@@ -236,15 +237,79 @@ describe("PostgreSQL native DR role inventory", () => {
 
   it("preserves PostgreSQL 16 membership options and maps PostgreSQL 15 explicitly", () => {
     const validated = validatePostgresRoleInventory(inventory);
-    const pg16 = buildPostgresMembershipStatements(validated, 16).find((sql) => sql.includes("bridge_schema_owner"));
-    const pg15 = buildPostgresMembershipStatements(validated, 15).find((sql) => sql.includes("bridge_schema_owner"));
+    const pg16Statements = buildPostgresMembershipStatements(validated, 16);
+    const pg15Statements = buildPostgresMembershipStatements(validated, 15);
+    const pg16 = pg16Statements.find((sql) => sql.includes('TO "bridge_schema_owner"'));
+    const pg15 = pg15Statements.find((sql) => sql.includes('TO "bridge_schema_owner"'));
     expect(pg16).toContain("WITH ADMIN OPTION, INHERIT TRUE, SET TRUE");
     expect(pg15).toContain("WITH ADMIN OPTION");
     expect(pg15).not.toContain("INHERIT TRUE");
+    expect(pg16Statements[0]).toContain('TO "bridge_schema_owner"');
+    expect(pg15Statements[0]).toContain('TO "bridge_schema_owner"');
+    expect(pg16Statements.some((sql) => sql.includes('TO "external_operator"'))).toBe(false);
+    expect(pg15Statements.some((sql) => sql.includes('TO "external_operator"'))).toBe(false);
     expect(() => buildPostgresMembershipStatements(validatePostgresRoleInventory({
       ...inventory,
       memberships: [{ ...inventory.memberships[0], inheritOption: false }],
     }), 15)).toThrow(/PostgreSQL 15 cannot preserve/);
+  });
+
+  it("uses the schema owner as grantor for retained non-owner derived memberships", () => {
+    const retained = validatePostgresRoleInventory({
+      ...inventory,
+      roles: [...inventory.roles, { name: "internal_member", kind: "object-role" }],
+      memberships: [
+        ...inventory.memberships,
+        {
+          role: "agent_bridge_control_operator_12fce09c58ce487d",
+          member: "internal_member",
+          adminOption: false,
+          inheritOption: true,
+          setOption: true,
+        },
+      ],
+    });
+
+    expect(buildPostgresMembershipStatements(retained, 17)).toContain(
+      'SET LOCAL ROLE "bridge_schema_owner"; GRANT "agent_bridge_control_operator_12fce09c58ce487d" TO "internal_member" WITH ADMIN FALSE, INHERIT TRUE, SET TRUE; RESET ROLE;',
+    );
+  });
+
+  it("collapses split PostgreSQL 16 grants into one semantic membership edge", async () => {
+    const roles = inventory.roles.map((role) => ({ ...role }));
+    const client = new FakePostgresDrClient((sql) => {
+      if (sql.includes("WITH derived_names")) return roles;
+      if (sql.includes("SELECT granted.rolname AS role")) {
+        return [{
+          role: "agent_bridge_data_owner_12fce09c58ce487d",
+          member: "bridge_schema_owner",
+          adminOption: true,
+          inheritOption: true,
+          setOption: true,
+        }];
+      }
+      if (sql.includes("SELECT 1 AS found FROM pg_catalog.pg_auth_members")) return [];
+      if (sql.includes("FROM pg_catalog.pg_default_acl defaults")) return [];
+      throw new Error(`unexpected inventory query: ${sql}`);
+    });
+
+    const collected = await collectPostgresRoleInventory(client, "agent_bridge");
+    expect(collected.memberships).toEqual([{
+      role: "agent_bridge_data_owner_12fce09c58ce487d",
+      member: "bridge_schema_owner",
+      adminOption: true,
+      inheritOption: true,
+      setOption: true,
+    }]);
+    const membershipQuery = client.statements.find(({ sql }) =>
+      sql.includes("SELECT granted.rolname AS role"))!.sql;
+    expect(membershipQuery).toContain('bool_or(membership.admin_option) AS "adminOption"');
+    expect(membershipQuery).toContain("bool_or(coalesce((to_jsonb(membership)->>'inherit_option')::boolean,true))");
+    expect(membershipQuery).toContain("bool_or(coalesce((to_jsonb(membership)->>'set_option')::boolean,true))");
+    expect(membershipQuery).toContain("GROUP BY granted.rolname,member.rolname");
+    expect(buildPostgresMembershipStatements(collected, 17)).toEqual([
+      'GRANT "agent_bridge_data_owner_12fce09c58ce487d" TO "bridge_schema_owner" WITH ADMIN OPTION, INHERIT TRUE, SET TRUE;',
+    ]);
   });
 
   it("restores global and schema-scoped default privileges without credentials", () => {
@@ -454,6 +519,66 @@ describe("PostgreSQL native DR orchestration", () => {
     await expect(assertPostgresRestoreAuthority(client)).rejects.toMatchObject({ code: "TARGET_AUTHORITY_INSUFFICIENT" });
   });
 
+  it.each([
+    ["a different inventory role", [
+      { name: "agent_bridge_data_owner_12fce09c58ce487d", isCurrentUser: false, isSuperuser: false },
+    ]],
+    ["a matching schema owner that is not current_user", [
+      { name: "bridge_schema_owner", isCurrentUser: false, isSuperuser: true },
+    ]],
+    ["a matching current schema owner that is not a superuser", [
+      { name: "bridge_schema_owner", isCurrentUser: true, isSuperuser: false },
+    ]],
+    ["the reusable schema owner plus another role", [
+      { name: "bridge_schema_owner", isCurrentUser: true, isSuperuser: true },
+      { name: "agent_bridge_data_owner_12fce09c58ce487d", isCurrentUser: false, isSuperuser: false },
+    ]],
+  ] as const)("rejects target role collision with %s", async (_label, conflictingRoles) => {
+    const directory = pgDirectory();
+    const dumpPath = join(directory, "database.dump");
+    const rolesPath = join(directory, "roles.json");
+    const collisionInventory = validatePostgresRoleInventory({
+      schema: "agent-bridge.postgres-native-dr-roles",
+      version: 1,
+      databaseName: "agent_bridge",
+      roles: [
+        { name: "bridge_schema_owner", kind: "schema-owner" },
+        { name: "agent_bridge_data_owner_12fce09c58ce487d", kind: "derived" },
+      ],
+      memberships: [],
+      defaultAcls: [],
+    });
+    const rolesText = canonicalPostgresRoleInventory(collisionInventory);
+    writeFileSync(dumpPath, "custom dump", { mode: 0o600 });
+    writeFileSync(rolesPath, rolesText, { mode: 0o600 });
+    secureTestFile(dumpPath); secureTestFile(rolesPath);
+    const target = new FakePostgresDrClient((sql) => {
+      if (sql.includes("pg_try_advisory_lock")) return [{ acquired: true }];
+      if (sql.includes("to_regnamespace")) return [{
+        databaseName: "agent_bridge", serverVersionNum: "170005",
+        schemaExists: false, databaseFresh: true,
+      }];
+      if (sql.includes("rolname=ANY") && sql.includes("ORDER BY rolname")) {
+        return conflictingRoles.map((role) => ({ ...role }));
+      }
+      return [];
+    });
+
+    await expect(restorePostgresNativeDr({
+      dumpPath,
+      rolesPath,
+      schema: schemaFor(rolesText),
+      artifactAnchors: anchorsFor(dumpPath, rolesPath),
+      acceptSourceSqlRisk: true,
+      environment: { AGENT_BRIDGE_DR_TARGET_DATABASE_URL: "postgresql://target:secret@localhost/agent_bridge" },
+      dependencies: { ...verificationDependencies, createClient: () => target },
+    })).rejects.toMatchObject({
+      code: "TARGET_ROLE_CONFLICT",
+      details: { targetMutated: false, restoreCompleted: false },
+    });
+    expect(target.statements.some(({ sql }) => sql.startsWith("CREATE ROLE"))).toBe(false);
+  });
+
   it("fails immediately when another restore holds the target fence", async () => {
     const directory = pgDirectory();
     const dumpPath = join(directory, "database.dump");
@@ -552,7 +677,9 @@ describe("PostgreSQL native DR orchestration", () => {
       if (sql.includes("pg_export_snapshot")) return [{ snapshot: "00000001-00000001-1" }];
       if (sql.includes("current_setting('server_version_num')")) return [{ databaseName: "agent_bridge", serverVersionNum: "170005" }];
       if (sql.includes("schema_migrations ORDER BY")) return [migration];
-      if (sql.includes("information_schema.tables")) return tableNames.map((tableName) => ({ tableName }));
+      if (sql.includes("information_schema.tables") || sql.includes("relation.relkind IN ('r','p')")) {
+        return tableNames.map((tableName) => ({ tableName }));
+      }
       if (sql.includes("WHERE state='claimed'")) return [{ count: "1" }];
       if (sql.includes("credential_security_prerequisite_definition")) return [{
         security: true, ownerControl: true, portableArchive: true,
@@ -606,6 +733,7 @@ describe("PostgreSQL native DR orchestration", () => {
     expect(lockIndex).toBeGreaterThanOrEqual(0);
     expect(unlockIndex).toBeGreaterThan(lockIndex);
     expect(source.statements.some(({ sql }) => sql.includes("gateway_authority_ready"))).toBe(false);
+    expect(source.statements.some(({ sql }) => sql.includes("native_backup_ready"))).toBe(false);
   });
 
   it("refuses a migration-017 source when gateway authority readiness fails", async () => {
@@ -614,7 +742,9 @@ describe("PostgreSQL native DR orchestration", () => {
       if (sql.includes("pg_export_snapshot")) return [{ snapshot: "00000001-00000001-1" }];
       if (sql.includes("current_setting('server_version_num')")) return [{ databaseName: "agent_bridge", serverVersionNum: "170005" }];
       if (sql.includes("schema_migrations ORDER BY")) return [gatewayMigration];
-      if (sql.includes("information_schema.tables")) return tableNames.map((tableName) => ({ tableName }));
+      if (sql.includes("information_schema.tables") || sql.includes("relation.relkind IN ('r','p')")) {
+        return tableNames.map((tableName) => ({ tableName }));
+      }
       if (sql.includes("WHERE state='claimed'")) return [{ count: "1" }];
       if (sql.includes("credential_security_prerequisite_definition")) return [{
         security: true, ownerControl: true, portableArchive: true,
@@ -664,7 +794,9 @@ describe("PostgreSQL native DR orchestration", () => {
       if (sql.includes("pg_export_snapshot")) return [{ snapshot: "00000001-00000001-1" }];
       if (sql.includes("current_setting('server_version_num')")) return [{ databaseName: "agent_bridge", serverVersionNum: "170005" }];
       if (sql.includes("schema_migrations ORDER BY")) return [migration];
-      if (sql.includes("information_schema.tables")) return tableNames.map((tableName) => ({ tableName }));
+      if (sql.includes("information_schema.tables") || sql.includes("relation.relkind IN ('r','p')")) {
+        return tableNames.map((tableName) => ({ tableName }));
+      }
       if (sql.includes("WHERE state='claimed'")) return [{ count: "1" }];
       if (sql.includes("credential_security_prerequisite_definition")) return [{
         security: true, ownerControl: true, portableArchive: true,
@@ -734,7 +866,9 @@ describe("PostgreSQL native DR orchestration", () => {
       if (sql.includes("rolname=ANY") && sql.includes("ORDER BY rolname")) return [];
       if (sql.includes("WITH changed AS")) return [{ count: "1" }];
       if (sql.includes("schema_migrations ORDER BY")) return [gatewayMigration];
-      if (sql.includes("information_schema.tables")) return tableNames.map((tableName) => ({ tableName }));
+      if (sql.includes("information_schema.tables") || sql.includes("relation.relkind IN ('r','p')")) {
+        return tableNames.map((tableName) => ({ tableName }));
+      }
       if (sql.includes("count(*)::text")) {
         const name = tableNames.find((tableName) => sql.includes(`\"${tableName}\"`))!;
         return [{ count: targetCounts[`agent_bridge.${name}`] }];
@@ -773,6 +907,119 @@ describe("PostgreSQL native DR orchestration", () => {
     expect(target.statements.some(({ sql }) => sql.includes("gateway_authority_immutable"))).toBe(true);
   });
 
+  it("reuses a matching target superuser while suspending external principals", async () => {
+    const directory = pgDirectory();
+    const dumpPath = join(directory, "database.dump");
+    const rolesPath = join(directory, "roles.json");
+    const suspendedInventory = validatePostgresRoleInventory({
+      schema: "agent-bridge.postgres-native-dr-roles",
+      version: 1,
+      databaseName: "agent_bridge",
+      roles: [
+        { name: "bridge_schema_owner", kind: "schema-owner" },
+        { name: "agent_bridge_control_operator_12fce09c58ce487d", kind: "derived" },
+        { name: "agent_bridge_archive_operator_12fce09c58ce487d", kind: "derived" },
+        { name: "external_operator", kind: "external-principal" },
+        { name: "external_archive", kind: "external-principal" },
+      ],
+      memberships: [
+        { role: "agent_bridge_control_operator_12fce09c58ce487d", member: "bridge_schema_owner", adminOption: true, inheritOption: true, setOption: true },
+        { role: "agent_bridge_archive_operator_12fce09c58ce487d", member: "bridge_schema_owner", adminOption: true, inheritOption: true, setOption: true },
+        { role: "agent_bridge_control_operator_12fce09c58ce487d", member: "external_operator", adminOption: false, inheritOption: true, setOption: true },
+        { role: "agent_bridge_archive_operator_12fce09c58ce487d", member: "external_archive", adminOption: false, inheritOption: true, setOption: true },
+      ],
+      defaultAcls: [],
+    });
+    const rolesText = canonicalPostgresRoleInventory(suspendedInventory);
+    writeFileSync(dumpPath, "custom dump", { mode: 0o600 });
+    writeFileSync(rolesPath, rolesText, { mode: 0o600 });
+    secureTestFile(dumpPath); secureTestFile(rolesPath);
+    const suspendedTableNames = [
+      ...tableNames, "control_membership_events", "archive_membership_events",
+    ];
+    const schema = schemaFor(rolesText);
+    schema.tableCounts["agent_bridge.control_membership_events"] = "1";
+    schema.tableCounts["agent_bridge.archive_membership_events"] = "1";
+    const targetCounts: Record<string, string> = {
+      "agent_bridge.deliveries": "2",
+      "agent_bridge.delivery_events": "4",
+      "agent_bridge.agent_instances": "0",
+      "agent_bridge.rate_limit_buckets": "0",
+      "agent_bridge.request_authorities": "0",
+      "agent_bridge.archive_transaction_authorizations": "0",
+      "agent_bridge.control_membership_events": "2",
+      "agent_bridge.archive_membership_events": "2",
+    };
+    const target = new FakePostgresDrClient((sql) => {
+      if (sql.includes("pg_try_advisory_lock")) return [{ acquired: true }];
+      if (sql.includes("to_regnamespace")) return [{ databaseName: "agent_bridge", serverVersionNum: "170005", schemaExists: false, databaseFresh: true }];
+      if (sql.includes("rolsuper AS")) return [{ isSuperuser: true }];
+      if (sql.includes('AS "isCurrentUser"')) return [{
+        name: "bridge_schema_owner", isCurrentUser: true, isSuperuser: true,
+      }];
+      if (sql.includes("WITH changed AS")) return [{ count: "1" }];
+      if (sql.includes("schema_migrations ORDER BY")) return [migration];
+      if (sql.includes("information_schema.tables") || sql.includes("relation.relkind IN ('r','p')")) {
+        return suspendedTableNames.map((tableName) => ({ tableName }));
+      }
+      if (sql.includes("count(*)::text")) {
+        const name = suspendedTableNames.find((tableName) => sql.includes(`"${tableName}"`))!;
+        return [{ count: targetCounts[`agent_bridge.${name}`] }];
+      }
+      if (sql.includes("security_schema_ready")) return [{
+        security: true, ownerControl: true, portableArchive: true,
+        securityDefinition: "security", rowIsolationDefinition: "row",
+        ownerControlDefinition: "owner", portableArchiveDefinition: "archive",
+      }];
+      return [];
+    });
+    const admin = new FakePostgresDrClient(() => []);
+    const randomIds = [
+      "00000000-0000-4000-8000-000000000101",
+      "00000000-0000-4000-8000-000000000102",
+    ];
+
+    await expect(restorePostgresNativeDr({
+      dumpPath, rolesPath, schema, artifactAnchors: anchorsFor(dumpPath, rolesPath), acceptSourceSqlRisk: true,
+      environment: { AGENT_BRIDGE_DR_TARGET_DATABASE_URL: "postgresql://target:s3cret@localhost/agent_bridge" },
+      dependencies: {
+        createClient: (() => { const clients = [target, admin]; return () => clients.shift()!; })(),
+        resolveTool: (tool) => `/tools/${tool}`,
+        runTool: async (command, args) => {
+          if (args[0] === "--version") return { stdout: `${command.includes("dump") ? "pg_dump" : "pg_restore"} (PostgreSQL) 17.5\n`, stderr: "", exitCode: 0 };
+          return { stdout: args[0] === "--list" ? "1; 2615 1 SCHEMA - agent_bridge owner\n2; 0 0 ACL - SCHEMA agent_bridge owner\n" : "", stderr: "", exitCode: 0 };
+        },
+        randomId: () => randomIds.shift()!,
+        checkRowIsolationReady: async () => true,
+      },
+    })).resolves.toMatchObject({ readiness: {
+      security: true, rowIsolation: true, ownerControl: true, portableArchive: true,
+    } });
+    expect(target.statements.some(({ sql }) => sql.includes("native_backup_ready"))).toBe(false);
+    expect(target.statements.some(({ sql }) => sql.includes('TO "external_operator"'))).toBe(false);
+    expect(target.statements.some(({ sql }) => sql.includes('TO "external_archive"'))).toBe(false);
+    expect(target.statements.some(({ sql }) => sql.startsWith('CREATE ROLE "bridge_schema_owner"'))).toBe(false);
+    expect(target.statements.some(({ sql }) =>
+      sql.startsWith('CREATE ROLE "agent_bridge_control_operator_')
+    )).toBe(true);
+    expect(target.statements.filter(({ sql }) =>
+      sql.includes("INSERT INTO agent_bridge.control_membership_events")
+    )).toEqual([
+      expect.objectContaining({ values: [
+        "00000000-0000-4000-8000-000000000102",
+        "external_operator", "operator", "bridge_schema_owner",
+      ] }),
+    ]);
+    expect(target.statements.filter(({ sql }) =>
+      sql.includes("INSERT INTO agent_bridge.archive_membership_events")
+    )).toEqual([
+      expect.objectContaining({ values: [
+        "00000000-0000-4000-8000-000000000101",
+        "external_archive", "bridge_schema_owner",
+      ] }),
+    ]);
+  });
+
   it("reports a completed restore when credential cleanup fails", async () => {
     const directory = pgDirectory();
     const dumpPath = join(directory, "database.dump");
@@ -797,7 +1044,9 @@ describe("PostgreSQL native DR orchestration", () => {
       if (sql.includes("rolname=ANY") && sql.includes("ORDER BY rolname")) return [];
       if (sql.includes("WITH changed AS")) return [{ count: "1" }];
       if (sql.includes("schema_migrations ORDER BY")) return [migration];
-      if (sql.includes("information_schema.tables")) return tableNames.map((tableName) => ({ tableName }));
+      if (sql.includes("information_schema.tables") || sql.includes("relation.relkind IN ('r','p')")) {
+        return tableNames.map((tableName) => ({ tableName }));
+      }
       if (sql.includes("count(*)::text")) {
         const name = tableNames.find((tableName) => sql.includes(`\"${tableName}\"`))!;
         return [{ count: targetCounts[`agent_bridge.${name}`] }];

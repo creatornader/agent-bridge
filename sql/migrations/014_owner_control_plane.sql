@@ -18,11 +18,73 @@ begin
         role_name
       );
     end if;
-    execute format(
-      'alter role %I nologin nosuperuser nocreatedb nocreaterole noreplication nobypassrls',
-      role_name
-    );
-    execute format('grant %I to %I with admin option',role_name,current_user);
+    if exists (
+      select 1 from pg_roles where rolname=role_name and (
+        rolcanlogin or not rolinherit or rolsuper or rolcreatedb or rolcreaterole
+        or rolreplication or rolbypassrls or rolconnlimit<>-1
+      )
+    ) then
+      raise exception 'Agent Bridge control role % has unsafe attributes',role_name;
+    end if;
+    if current_setting('server_version_num')::integer>=160000 then
+      if not exists (
+        select 1 from pg_catalog.pg_auth_members membership
+        join pg_catalog.pg_roles granted on granted.oid=membership.roleid
+        join pg_catalog.pg_roles member on member.oid=membership.member
+        where granted.rolname=role_name and member.rolname=current_user
+          and membership.admin_option
+      ) then
+        execute format(
+          'grant %I to %I with admin true,inherit true,set true',role_name,current_user
+        );
+      elsif not exists (
+        select 1 from pg_catalog.pg_auth_members membership
+        join pg_catalog.pg_roles granted on granted.oid=membership.roleid
+        join pg_catalog.pg_roles member on member.oid=membership.member
+        where granted.rolname=role_name and member.rolname=current_user
+          and coalesce((to_jsonb(membership)->>'inherit_option')::boolean,true)
+          and coalesce((to_jsonb(membership)->>'set_option')::boolean,true)
+      ) then
+        execute format('grant %I to %I with inherit true,set true',role_name,current_user);
+      end if;
+    elsif not exists (
+      select 1 from pg_catalog.pg_auth_members membership
+      join pg_catalog.pg_roles granted on granted.oid=membership.roleid
+      join pg_catalog.pg_roles member on member.oid=membership.member
+      where granted.rolname=role_name and member.rolname=current_user
+        and membership.admin_option
+    ) then
+      execute format('grant %I to %I with admin option',role_name,current_user);
+    end if;
+    if not exists (
+      select 1 from pg_catalog.pg_auth_members membership
+      join pg_catalog.pg_roles granted on granted.oid=membership.roleid
+      join pg_catalog.pg_roles member on member.oid=membership.member
+      where granted.rolname=role_name and member.rolname=current_user
+        and membership.admin_option
+    ) or not exists (
+      select 1 from pg_catalog.pg_auth_members membership
+      join pg_catalog.pg_roles granted on granted.oid=membership.roleid
+      join pg_catalog.pg_roles member on member.oid=membership.member
+      where granted.rolname=role_name and member.rolname=current_user
+        and coalesce((to_jsonb(membership)->>'inherit_option')::boolean,true)
+        and coalesce((to_jsonb(membership)->>'set_option')::boolean,true)
+    ) or exists (
+      select 1 from pg_catalog.pg_auth_members membership
+      join pg_catalog.pg_roles granted on granted.oid=membership.roleid
+      join pg_catalog.pg_roles member on member.oid=membership.member
+      where granted.rolname=role_name and member.rolname=current_user
+        and not (
+          (membership.grantor=10 and membership.admin_option
+            and coalesce((to_jsonb(membership)->>'inherit_option')::boolean,true)
+              =coalesce((to_jsonb(membership)->>'set_option')::boolean,true))
+          or (membership.grantor=member.oid
+            and coalesce((to_jsonb(membership)->>'inherit_option')::boolean,true)
+            and coalesce((to_jsonb(membership)->>'set_option')::boolean,true))
+        )
+    ) then
+      raise exception 'Agent Bridge control role % has unsafe owner authority',role_name;
+    end if;
   end loop;
 end
 $roles$;
@@ -144,27 +206,38 @@ begin
     where event.member_role=session_user and event.control_role in ('operator','auditor')
     order by event.control_role,event.sequence desc
   ), direct_membership as (
-    select granted.rolname control_role,membership.admin_option,
-      coalesce((to_jsonb(membership)->>'inherit_option')::boolean,true) inherit_option,
-      coalesce((to_jsonb(membership)->>'set_option')::boolean,true) set_option,
-      grantor.rolname grantor_role
+    select granted.rolname control_role,
+      bool_or(membership.admin_option) admin_option,
+      bool_or(coalesce((to_jsonb(membership)->>'inherit_option')::boolean,true)) inherit_option,
+      bool_or(coalesce((to_jsonb(membership)->>'set_option')::boolean,true)) set_option,
+      bool_and(case when member.rolname=schema_owner then
+        (membership.grantor=10 and membership.admin_option
+          and coalesce((to_jsonb(membership)->>'inherit_option')::boolean,true)
+            =coalesce((to_jsonb(membership)->>'set_option')::boolean,true))
+        or (membership.grantor=member.oid
+          and coalesce((to_jsonb(membership)->>'inherit_option')::boolean,true)
+          and coalesce((to_jsonb(membership)->>'set_option')::boolean,true))
+      else membership.grantor=(select oid from pg_catalog.pg_roles where rolname=schema_owner)
+        and not membership.admin_option
+        and coalesce((to_jsonb(membership)->>'inherit_option')::boolean,true)
+        and coalesce((to_jsonb(membership)->>'set_option')::boolean,true) end) grants_valid
     from pg_catalog.pg_auth_members membership
     join pg_catalog.pg_roles granted on granted.oid=membership.roleid
     join pg_catalog.pg_roles member on member.oid=membership.member
-    join pg_catalog.pg_roles grantor on grantor.oid=membership.grantor
     where member.rolname=session_user and granted.rolname in (operator_role,auditor_role)
+    group by granted.rolname
   )
   select
     coalesce(bool_or(membership.control_role=operator_role
       and membership.inherit_option and membership.set_option
-      and membership.grantor_role=schema_owner and (
+      and membership.grants_valid and (
         (session_user=schema_owner and membership.admin_option)
         or (latest.control_role='operator' and latest.action='register'
           and not membership.admin_option)
       )),false),
     coalesce(bool_or(membership.control_role=auditor_role
       and membership.inherit_option and membership.set_option
-      and membership.grantor_role=schema_owner and (
+      and membership.grants_valid and (
         (session_user=schema_owner and membership.admin_option)
         or (latest.control_role='auditor' and latest.action='register'
           and not membership.admin_option)
@@ -937,15 +1010,15 @@ language sql stable set search_path = '' set timezone = 'UTC' as $$
     from pg_catalog.pg_roles role where role.rolname in (select role_name from control_roles)
     union all
     select 'membership',granted.rolname||'->'||member.rolname,
-      grantor.rolname||':'||membership.admin_option::text||':'||
-        coalesce(to_jsonb(membership)->>'inherit_option','')||':'||
-        coalesce(to_jsonb(membership)->>'set_option','')
+      bool_or(membership.admin_option)::text||':'||
+        bool_or(coalesce((to_jsonb(membership)->>'inherit_option')::boolean,true))::text||':'||
+        bool_or(coalesce((to_jsonb(membership)->>'set_option')::boolean,true))::text
     from pg_catalog.pg_auth_members membership
     join pg_catalog.pg_roles granted on granted.oid=membership.roleid
     join pg_catalog.pg_roles member on member.oid=membership.member
-    join pg_catalog.pg_roles grantor on grantor.oid=membership.grantor
     where member.rolname in (select role_name from control_roles)
       or granted.rolname=(select owner_role from names)
+    group by granted.rolname,member.rolname
     union all
     select 'schema',namespace.nspname,pg_catalog.pg_get_userbyid(namespace.nspowner)
     from pg_catalog.pg_namespace namespace where namespace.nspname='agent_bridge'
@@ -1106,27 +1179,42 @@ returns boolean language sql stable security definer set search_path = '' as $$
   ), active_registry as (
     select member_role,control_role from latest_registry where action='register'
   ), expected_memberships as (
-    select names.owner_role granted_role,names.schema_owner member_role,true admin_option
+    select names.owner_role granted_role,names.schema_owner member_role,
+      true admin_option,true inherit_option,true set_option
       from names
-    union all select names.operator_role,names.schema_owner,true from names
-    union all select names.auditor_role,names.schema_owner,true from names
+    union all select names.operator_role,names.schema_owner,true,true,true from names
+    union all select names.auditor_role,names.schema_owner,true,true,true from names
     union all
     select case registry.control_role when 'operator' then names.operator_role
-      else names.auditor_role end,registry.member_role,false
+      else names.auditor_role end,registry.member_role,false,true,true
     from active_registry registry cross join names
-  ), actual_memberships as (
+  ), raw_memberships as (
     select granted.rolname::name granted_role,member.rolname::name member_role,
       membership.admin_option,
       coalesce((to_jsonb(membership)->>'inherit_option')::boolean,true) inherit_option,
       coalesce((to_jsonb(membership)->>'set_option')::boolean,true) set_option,
-      grantor.rolname::name grantor_role
+      membership.grantor,member.oid member_oid
     from pg_catalog.pg_auth_members membership
     join pg_catalog.pg_roles granted on granted.oid=membership.roleid
     join pg_catalog.pg_roles member on member.oid=membership.member
-    join pg_catalog.pg_roles grantor on grantor.oid=membership.grantor
     where granted.rolname in (
       (select owner_role from names),(select operator_role from names),(select auditor_role from names)
     )
+  ), actual_memberships as (
+    select membership.granted_role,membership.member_role,
+      bool_or(membership.admin_option) admin_option,
+      bool_or(membership.inherit_option) inherit_option,
+      bool_or(membership.set_option) set_option,
+      bool_and(case when membership.member_role=names.schema_owner then
+        (membership.grantor=10 and membership.admin_option
+          and membership.inherit_option=membership.set_option)
+        or (membership.grantor=membership.member_oid
+          and membership.inherit_option and membership.set_option)
+      else membership.grantor=(select oid from pg_catalog.pg_roles where rolname=names.schema_owner)
+        and not membership.admin_option
+        and membership.inherit_option and membership.set_option end) grants_valid
+    from raw_memberships membership cross join names
+    group by membership.granted_role,membership.member_role
   ), authority_closure as (
     select control_role.granted_role,candidate.rolname::name member_role
     from names
@@ -1145,16 +1233,14 @@ returns boolean language sql stable security definer set search_path = '' as $$
     ) from agent_bridge.owner_control_attestations attestation
       where attestation.name='owner-control-v1')
     and not exists (
-      (select granted_role,member_role,admin_option from actual_memberships
-       except select granted_role,member_role,admin_option from expected_memberships)
+      (select granted_role,member_role,admin_option,inherit_option,set_option from actual_memberships
+       except select granted_role,member_role,admin_option,inherit_option,set_option from expected_memberships)
       union all
-      (select granted_role,member_role,admin_option from expected_memberships
-       except select granted_role,member_role,admin_option from actual_memberships)
+      (select granted_role,member_role,admin_option,inherit_option,set_option from expected_memberships
+       except select granted_role,member_role,admin_option,inherit_option,set_option from actual_memberships)
     )
     and not exists (
-      select 1 from actual_memberships membership,names
-      where not membership.inherit_option or not membership.set_option
-        or membership.grantor_role<>names.schema_owner
+      select 1 from actual_memberships membership where not membership.grants_valid
     )
     and not exists (
       select 1 from active_registry registry
@@ -1216,6 +1302,7 @@ declare
   membership_record record;
   relation_record record;
 begin
+  execute format('grant usage,create on schema agent_bridge to %I',owner_role);
   execute format('alter table agent_bridge.control_requests owner to %I',owner_role);
   execute format('alter table agent_bridge.control_events owner to %I',owner_role);
   execute format('alter table agent_bridge.owner_control_attestations owner to %I',owner_role);
@@ -1230,6 +1317,7 @@ begin
     'control_revoke_credential(uuid,uuid,text)','owner_control_catalog_definition()',
     'owner_control_plane_ready()'
   ] loop execute format('alter function agent_bridge.%s owner to %I',role_name,owner_role); end loop;
+  execute format('revoke create on schema agent_bridge from %I',owner_role);
 
   for membership_record in
     select granted.rolname granted_name,member.rolname member_name
@@ -1287,7 +1375,7 @@ begin
   execute format('grant usage on schema agent_bridge to %I,%I,%I',owner_role,operator_role,auditor_role);
   execute format('grant select,insert,update(request_id) on agent_bridge.control_requests to %I',owner_role);
   execute format('grant insert on agent_bridge.control_events to %I',owner_role);
-  execute format('grant select on agent_bridge.owner_control_attestations to %I',owner_role);
+  execute format('grant select,insert on agent_bridge.owner_control_attestations to %I',owner_role);
   execute format('grant select,insert on agent_bridge.control_membership_events to %I',owner_role);
   execute format('grant usage on sequence agent_bridge.control_events_sequence_seq to %I',owner_role);
   execute format('grant usage on sequence agent_bridge.control_membership_events_sequence_seq to %I',owner_role);
@@ -1306,6 +1394,7 @@ begin
   execute format('grant execute on function agent_bridge.control_revoke_credential(uuid,uuid,text) to %I',operator_role);
   execute format('grant execute on function agent_bridge.control_credential_inventory(text,timestamp with time zone,uuid,integer) to %I,%I',operator_role,auditor_role);
   execute format('grant execute on function agent_bridge.owner_control_plane_ready() to %I',runtime_role);
+  execute format('grant execute on function agent_bridge.owner_control_plane_ready() to %I',current_user);
   execute format('revoke execute on function agent_bridge.replace_credential(uuid,character,text[],text,text,timestamp with time zone,timestamp with time zone,text,uuid) from %I,%I,%I',operator_role,auditor_role,runtime_role);
   execute format('revoke execute on function agent_bridge.revoke_credential(uuid,text,text,uuid) from %I,%I,%I',operator_role,auditor_role,runtime_role);
   foreach role_name in array array['anon','authenticated'] loop
@@ -1632,8 +1721,12 @@ begin
 end
 $preflight$;
 
+select set_config(
+  'role','agent_bridge_control_owner_'||substr(md5(current_database()),1,16),false
+);
 insert into agent_bridge.owner_control_attestations(name,catalog_definition)
 values('owner-control-v1',agent_bridge.owner_control_catalog_definition());
+reset role;
 
 insert into agent_bridge.schema_migrations(version,name,checksum)
 values(14,'owner_control_plane','__AGENT_BRIDGE_MIGRATION_CHECKSUM__');

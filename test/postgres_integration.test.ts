@@ -6,6 +6,7 @@ import { join } from "node:path";
 import { spawn, spawnSync, type ChildProcess } from "node:child_process";
 import { once } from "node:events";
 import { fileURLToPath } from "node:url";
+import { gunzipSync } from "node:zlib";
 import pg from "pg";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { BridgeService } from "../src/bridge-service.js";
@@ -38,6 +39,22 @@ const databaseUrl = process.env.AGENT_BRIDGE_TEST_DATABASE_URL;
 const integration = databaseUrl ? describe : describe.skip;
 const pool = databaseUrl ? new pg.Pool({ connectionString: databaseUrl, max: 8 }) : undefined;
 
+interface ReleasedMigrationFixture {
+  baseCommit: string;
+  migrations: Array<{
+    version: number;
+    name: string;
+    checksum: string;
+    gzipBase64: string;
+  }>;
+}
+
+function loadReleasedV19Fixture(): ReleasedMigrationFixture {
+  return JSON.parse(readFileSync(fileURLToPath(
+    new URL("./fixtures/released-v19-migrations.json", import.meta.url),
+  ), "utf8")) as ReleasedMigrationFixture;
+}
+
 function quotePostgresIdentifier(value: string): string {
   return `"${value.replaceAll('"', '""')}"`;
 }
@@ -47,7 +64,7 @@ async function withTemporaryDatabase(
 ): Promise<void> {
   const name = `bridge_upgrade_${randomUUID().replaceAll("-", "")}`;
   const suffix = createHash("md5").update(name).digest("hex").slice(0, 16);
-  const roleNames = ["runtime", "data_owner", "context_reader", "event_writer", "control_owner", "control_operator", "control_auditor", "archive_operator", "acl_intruder"]
+  const roleNames = ["runtime", "data_owner", "context_reader", "event_writer", "control_owner", "control_operator", "control_auditor", "archive_operator", "backup_reader", "acl_intruder"]
     .map((kind) => `agent_bridge_${kind}_${suffix}`);
   const adminUrl = new URL(databaseUrl!);
   adminUrl.pathname = "/postgres";
@@ -87,6 +104,67 @@ async function withTemporaryDatabase(
   if (failures.length === 1) throw failures[0];
   if (failures.length > 1) {
     throw new AggregateError(failures, "temporary PostgreSQL database run and cleanup failed");
+  }
+}
+
+async function withManagedMigrationAuthority(
+  run: (database: pg.Pool, admin: pg.Client, authorityRole: string) => Promise<void>,
+): Promise<void> {
+  const identifier = randomUUID().replaceAll("-", "");
+  const name = `bridge_managed_${identifier}`;
+  const authorityRole = `bridge_migrator_${identifier}`;
+  const suffix = createHash("md5").update(name).digest("hex").slice(0, 16);
+  const roleNames = [
+    "runtime", "data_owner", "context_reader", "event_writer", "control_owner",
+    "control_operator", "control_auditor", "archive_operator", "backup_reader",
+  ].map((kind) => `agent_bridge_${kind}_${suffix}`);
+  const adminUrl = new URL(databaseUrl!);
+  adminUrl.pathname = "/postgres";
+  const admin = new pg.Client({ connectionString: adminUrl.toString() });
+  await admin.connect();
+  const failures: unknown[] = [];
+  try {
+    await admin.query(
+      `CREATE ROLE ${quotePostgresIdentifier(authorityRole)} LOGIN INHERIT NOSUPERUSER ` +
+      "NOCREATEDB CREATEROLE NOREPLICATION BYPASSRLS",
+    );
+    await admin.query(
+      `CREATE DATABASE ${quotePostgresIdentifier(name)} OWNER ${quotePostgresIdentifier(authorityRole)}`,
+    );
+    const managedUrl = new URL(databaseUrl!);
+    managedUrl.username = authorityRole;
+    managedUrl.password = "";
+    managedUrl.pathname = `/${name}`;
+    const managed = new pg.Pool({ connectionString: managedUrl.toString(), max: 2 });
+    try {
+      await run(managed, admin, authorityRole);
+    } catch (error) {
+      failures.push(error);
+    } finally {
+      try {
+        await managed.end();
+      } catch (error) {
+        failures.push(error);
+      }
+    }
+  } catch (error) {
+    failures.push(error);
+  }
+  for (const cleanup of [
+    () => admin.query(`DROP DATABASE IF EXISTS ${quotePostgresIdentifier(name)}`),
+    ...roleNames.map((roleName) => () => admin.query(`DROP ROLE IF EXISTS ${quotePostgresIdentifier(roleName)}`)),
+    () => admin.query(`DROP ROLE IF EXISTS ${quotePostgresIdentifier(authorityRole)}`),
+    () => admin.end(),
+  ]) {
+    try {
+      await cleanup();
+    } catch (error) {
+      failures.push(error);
+    }
+  }
+  if (failures.length === 1) throw failures[0];
+  if (failures.length > 1) {
+    throw new AggregateError(failures, "managed PostgreSQL migration run and cleanup failed");
   }
 }
 
@@ -211,6 +289,189 @@ integration("PostgreSQL BridgeStore integration", () => {
     }
     await runMigrations(pool!, fileURLToPath(new URL("../sql/migrations", import.meta.url)));
   });
+
+  it("migrates under a managed non-superuser role authority", async () => {
+    await withManagedMigrationAuthority(async (database, admin, authorityRole) => {
+      const authority = (await database.query<{
+        isSuperuser: boolean; canCreateRole: boolean; bypassesRls: boolean;
+      }>(`SELECT rolsuper AS "isSuperuser",rolcreaterole AS "canCreateRole",
+          rolbypassrls AS "bypassesRls" FROM pg_roles WHERE rolname=current_user`)).rows[0];
+      expect(authority).toEqual({
+        isSuperuser: false,
+        canCreateRole: true,
+        bypassesRls: true,
+      });
+
+      await database.query(readFileSync(fileURLToPath(
+        new URL("../sql/setup.sql", import.meta.url),
+      ), "utf8"));
+      const applied = await runMigrations(
+        database,
+        fileURLToPath(new URL("../sql/migrations", import.meta.url)),
+      );
+
+      expect(applied).toHaveLength(21);
+      expect(await runtimeSchemaReady(database, { allowPrivilegedCaller: true })).toBe(true);
+      const roles = await database.query<{ unsafe: string }>(`SELECT count(*) FILTER (WHERE
+          rolcanlogin OR NOT rolinherit OR rolsuper OR rolcreatedb OR rolcreaterole
+          OR rolreplication OR rolbypassrls OR rolconnlimit<>-1)::text AS unsafe
+        FROM pg_roles WHERE rolname LIKE 'agent_bridge_%_'||substr(md5(current_database()),1,16)`);
+      expect(roles.rows[0]?.unsafe).toBe("0");
+
+      const ownerMemberships = await database.query<{
+        grantedRole: string;
+        rowCount: string;
+        hasAdmin: boolean;
+        hasInherit: boolean;
+        hasSet: boolean;
+      }>(`SELECT granted.rolname AS "grantedRole",count(*)::text AS "rowCount",
+          bool_or(membership.admin_option) AS "hasAdmin",
+          bool_or(coalesce((to_jsonb(membership)->>'inherit_option')::boolean,true)) AS "hasInherit",
+          bool_or(coalesce((to_jsonb(membership)->>'set_option')::boolean,true)) AS "hasSet"
+        FROM pg_auth_members membership
+        JOIN pg_roles granted ON granted.oid=membership.roleid
+        JOIN pg_roles member ON member.oid=membership.member
+        WHERE member.rolname=current_user
+          AND granted.rolname LIKE 'agent_bridge_%_'||substr(md5(current_database()),1,16)
+          AND granted.rolname NOT LIKE 'agent_bridge_runtime_%'
+        GROUP BY granted.rolname ORDER BY granted.rolname`);
+      expect(ownerMemberships.rows).toHaveLength(8);
+      expect(ownerMemberships.rows.every((membership) =>
+        membership.hasAdmin && membership.hasInherit && membership.hasSet)).toBe(true);
+      const major = Number((await database.query<{ major: string }>(
+        "SELECT current_setting('server_version_num')::integer/10000 AS major",
+      )).rows[0]?.major);
+      expect(ownerMemberships.rows.every((membership) =>
+        membership.rowCount === (major >= 16 ? "2" : "1"))).toBe(true);
+
+      for (const membership of ownerMemberships.rows) {
+        const options = major >= 16
+          ? "WITH ADMIN TRUE, INHERIT TRUE, SET TRUE"
+          : "WITH ADMIN OPTION";
+        await admin.query(
+          `GRANT ${quotePostgresIdentifier(membership.grantedRole)} ` +
+          `TO ${quotePostgresIdentifier(authorityRole)} ${options}`,
+        );
+        if (major >= 16) {
+          await admin.query(
+            `REVOKE ${quotePostgresIdentifier(membership.grantedRole)} ` +
+            `FROM ${quotePostgresIdentifier(authorityRole)} ` +
+            `GRANTED BY ${quotePostgresIdentifier(authorityRole)}`,
+          );
+        }
+      }
+      expect(await runtimeSchemaReady(database, { allowPrivilegedCaller: true })).toBe(true);
+      const restoredMemberships = await database.query<{
+        rowCount: string; hasAdmin: boolean; hasInherit: boolean; hasSet: boolean;
+      }>(`SELECT count(*)::text AS "rowCount",
+          bool_or(membership.admin_option) AS "hasAdmin",
+          bool_or(coalesce((to_jsonb(membership)->>'inherit_option')::boolean,true)) AS "hasInherit",
+          bool_or(coalesce((to_jsonb(membership)->>'set_option')::boolean,true)) AS "hasSet"
+        FROM pg_auth_members membership
+        JOIN pg_roles granted ON granted.oid=membership.roleid
+        JOIN pg_roles member ON member.oid=membership.member
+        WHERE member.rolname=current_user
+          AND granted.rolname LIKE 'agent_bridge_%_'||substr(md5(current_database()),1,16)
+          AND granted.rolname NOT LIKE 'agent_bridge_runtime_%'
+        GROUP BY granted.rolname`);
+      expect(restoredMemberships.rows).toHaveLength(8);
+      expect(restoredMemberships.rows.every((membership) =>
+        membership.rowCount === "1" && membership.hasAdmin &&
+        membership.hasInherit && membership.hasSet)).toBe(true);
+
+      const backupReader = `agent_bridge_backup_reader_${createHash("md5")
+        .update((await database.query<{ name: string }>("SELECT current_database() AS name")).rows[0]!.name)
+        .digest("hex").slice(0, 16)}`;
+      const backupPrivileges = (await database.query<{
+        canLogin: boolean; canReadTables: boolean; canReadSequences: boolean;
+        canWrite: boolean; canCreate: boolean; canExecute: boolean;
+      }>(`SELECT role.rolcanlogin AS "canLogin",
+          NOT EXISTS(SELECT 1 FROM pg_catalog.pg_class relation
+            JOIN pg_catalog.pg_namespace namespace ON namespace.oid=relation.relnamespace
+            WHERE namespace.nspname='agent_bridge' AND relation.relkind IN ('r','p','v','m','f')
+              AND NOT has_table_privilege($1,relation.oid,'SELECT')) AS "canReadTables",
+          NOT EXISTS(WITH sequences AS MATERIALIZED (
+              SELECT relation.oid FROM pg_catalog.pg_class relation
+              JOIN pg_catalog.pg_namespace namespace ON namespace.oid=relation.relnamespace
+              WHERE namespace.nspname='agent_bridge' AND relation.relkind='S'
+            ) SELECT 1 FROM sequences
+            WHERE NOT has_sequence_privilege($1,sequences.oid,'SELECT')) AS "canReadSequences",
+          EXISTS(SELECT 1 FROM pg_catalog.pg_class relation
+            JOIN pg_catalog.pg_namespace namespace ON namespace.oid=relation.relnamespace
+            WHERE namespace.nspname='agent_bridge' AND relation.relkind IN ('r','p','v','m','f')
+              AND has_table_privilege($1,relation.oid,'INSERT,UPDATE,DELETE,TRUNCATE,REFERENCES,TRIGGER'))
+            AS "canWrite",
+          has_schema_privilege($1,'agent_bridge','CREATE') AS "canCreate",
+          EXISTS(SELECT 1 FROM pg_catalog.pg_proc procedure
+            JOIN pg_catalog.pg_namespace namespace ON namespace.oid=procedure.pronamespace
+            WHERE namespace.nspname='agent_bridge'
+              AND has_function_privilege($1,procedure.oid,'EXECUTE')) AS "canExecute"
+        FROM pg_catalog.pg_roles role WHERE role.rolname=$1`, [backupReader])).rows[0];
+      expect(backupPrivileges).toEqual({
+        canLogin: false,
+        canReadTables: true,
+        canReadSequences: true,
+        canWrite: false,
+        canCreate: false,
+        canExecute: false,
+      });
+      const drift = await database.connect();
+      try {
+        await drift.query("BEGIN");
+        await drift.query(`GRANT INSERT ON agent_bridge.messages TO ${quotePostgresIdentifier(backupReader)}`);
+        expect((await drift.query<{ ready: boolean }>(
+          "SELECT agent_bridge.native_backup_ready() AS ready",
+        )).rows[0]!.ready).toBe(false);
+        expect(await runtimeSchemaReady(drift, { allowPrivilegedCaller: true })).toBe(true);
+      } finally {
+        await drift.query("ROLLBACK").catch(() => undefined);
+        drift.release();
+      }
+
+      await admin.query(`ALTER ROLE ${quotePostgresIdentifier(authorityRole)} NOBYPASSRLS`);
+      expect((await database.query<{
+        canCreateRole: boolean; bypassesRls: boolean; nativeBackupReady: boolean;
+      }>(`SELECT role.rolcreaterole AS "canCreateRole",role.rolbypassrls AS "bypassesRls",
+          agent_bridge.native_backup_ready() AS "nativeBackupReady"
+        FROM pg_catalog.pg_roles role WHERE role.rolname=current_user`)).rows).toEqual([{
+        canCreateRole: true,
+        bypassesRls: false,
+        nativeBackupReady: false,
+      }]);
+      expect(await runtimeSchemaReady(database, { allowPrivilegedCaller: true })).toBe(false);
+
+      const runtimeLogin = `bridge_managed_runtime_${randomUUID().replaceAll("-", "")}`;
+      const runtimePassword = randomUUID();
+      const databaseName = (await database.query<{ name: string }>(
+        "SELECT current_database() AS name",
+      )).rows[0]!.name;
+      const runtimeUrl = new URL(databaseUrl!);
+      runtimeUrl.pathname = `/${databaseName}`;
+      runtimeUrl.username = runtimeLogin;
+      runtimeUrl.password = runtimePassword;
+      let runtime: pg.Pool | undefined;
+      try {
+        await admin.query(
+          `CREATE ROLE ${quotePostgresIdentifier(runtimeLogin)} LOGIN INHERIT NOSUPERUSER ` +
+          `NOCREATEDB NOCREATEROLE NOREPLICATION NOBYPASSRLS PASSWORD '${runtimePassword}'`,
+        );
+        await database.query(
+          `GRANT ${quotePostgresIdentifier(await runtimeRole(database))} ` +
+          `TO ${quotePostgresIdentifier(runtimeLogin)}`,
+        );
+        runtime = new pg.Pool({ connectionString: runtimeUrl.toString(), max: 1 });
+        expect(await runtimeSchemaReady(runtime)).toBe(true);
+      } finally {
+        await runtime?.end().catch(() => undefined);
+        await database.query(
+          `REVOKE ${quotePostgresIdentifier(await runtimeRole(database))} ` +
+          `FROM ${quotePostgresIdentifier(runtimeLogin)}`,
+        ).catch(() => undefined);
+        await admin.query(`DROP ROLE IF EXISTS ${quotePostgresIdentifier(runtimeLogin)}`)
+          .catch(() => undefined);
+      }
+    });
+  }, 30_000);
 
   it("captures non-enumerable PostgreSQL diagnostic properties", () => {
     const diagnostic = new Error("synthetic PostgreSQL error") as Error & { internalQuery?: string };
@@ -1603,6 +1864,24 @@ integration("PostgreSQL BridgeStore integration", () => {
       runtimeUrl.password = password;
       runtime = new pg.Pool({ connectionString: runtimeUrl.toString(), max: 3 });
       expect(await runtimeSchemaReady(runtime)).toBe(true);
+      const major = Number((await pool!.query<{ major: string }>(
+        "SELECT current_setting('server_version_num')::integer/10000 AS major",
+      )).rows[0]?.major);
+      if (major >= 16) {
+        const role = await runtimeRole(pool!);
+        await pool!.query(`GRANT ${role} TO ${login} WITH INHERIT FALSE`);
+        expect(await runtimeSchemaReady(runtime)).toBe(false);
+        await pool!.query(`GRANT ${role} TO ${login} WITH INHERIT TRUE`);
+        expect(await runtimeSchemaReady(runtime)).toBe(true);
+        await pool!.query(`GRANT ${role} TO ${login} WITH SET FALSE`);
+        expect(await runtimeSchemaReady(runtime)).toBe(false);
+        await pool!.query(`GRANT ${role} TO ${login} WITH SET TRUE`);
+        expect(await runtimeSchemaReady(runtime)).toBe(true);
+        await pool!.query(`GRANT ${role} TO ${login} WITH ADMIN TRUE`);
+        expect(await runtimeSchemaReady(runtime)).toBe(false);
+        await pool!.query(`REVOKE ADMIN OPTION FOR ${role} FROM ${login}`);
+        expect(await runtimeSchemaReady(runtime)).toBe(true);
+      }
       await pool!.query(`ALTER ROLE ${login} BYPASSRLS`);
       expect(await runtimeSchemaReady(runtime)).toBe(false);
       await pool!.query(`ALTER ROLE ${login} NOBYPASSRLS`);
@@ -2026,15 +2305,15 @@ integration("PostgreSQL BridgeStore integration", () => {
     );
   });
 
-  it("records the endpoint migration challenge as the final migration state", async () => {
+  it("records native backup readiness as the final migration state", async () => {
     const directory = fileURLToPath(new URL("../sql/migrations", import.meta.url));
     const plan = await loadMigrationPlan(directory);
-    expect(plan.at(-1)).toMatchObject({ version: 19, name: "endpoint_migration_same_successor" });
+    expect(plan.at(-1)).toMatchObject({ version: 21, name: "native_backup_reader" });
     expect(await migrationsReady(pool!, plan)).toBe(true);
     expect(await migrationsReady(pool!, plan.slice(0, -1))).toBe(false);
     expect((await pool!.query<{ version: number; name: string }>(
       "SELECT version,name FROM agent_bridge.schema_migrations ORDER BY version DESC LIMIT 1",
-    )).rows).toEqual([{ version: 19, name: "endpoint_migration_same_successor" }]);
+    )).rows).toEqual([{ version: 21, name: "native_backup_reader" }]);
     expect((await pool!.query<{ authority_id: string }>(
       "SELECT authority_id::text FROM agent_bridge.gateway_authority",
     )).rows).toEqual([{
@@ -2053,6 +2332,14 @@ integration("PostgreSQL BridgeStore integration", () => {
        WHERE name='owner-control-v6'`,
     )).rows).toEqual([{ name: "owner-control-v6" }]);
     expect((await pool!.query<{ name: string }>(
+      `SELECT name FROM agent_bridge.owner_control_attestations
+       WHERE name='owner-control-v7'`,
+    )).rows).toEqual([{ name: "owner-control-v7" }]);
+    expect((await pool!.query<{ name: string }>(
+      `SELECT name FROM agent_bridge.owner_control_attestations
+       WHERE name='owner-control-v8'`,
+    )).rows).toEqual([{ name: "owner-control-v8" }]);
+    expect((await pool!.query<{ name: string }>(
       `SELECT name FROM agent_bridge.endpoint_migration_challenge_attestations
        WHERE name='endpoint-migration-v1'`,
     )).rows).toEqual([{ name: "endpoint-migration-v1" }]);
@@ -2061,10 +2348,208 @@ integration("PostgreSQL BridgeStore integration", () => {
        WHERE name='endpoint-migration-v2'`,
     )).rows).toEqual([{ name: "endpoint-migration-v2" }]);
     expect((await pool!.query<{ name: string }>(
+      `SELECT name FROM agent_bridge.endpoint_migration_challenge_attestations
+       WHERE name='endpoint-migration-v3'`,
+    )).rows).toEqual([{ name: "endpoint-migration-v3" }]);
+    expect((await pool!.query<{ name: string }>(
       `SELECT name FROM agent_bridge.portable_archive_attestations
        WHERE name='portable-archive-v3'`,
     )).rows).toEqual([{ name: "portable-archive-v3" }]);
+    expect((await pool!.query<{ name: string }>(
+      `SELECT name FROM agent_bridge.portable_archive_attestations
+       WHERE name='portable-archive-v4'`,
+    )).rows).toEqual([{ name: "portable-archive-v4" }]);
+    expect((await pool!.query<{ name: string }>(
+      `SELECT name FROM agent_bridge.portable_archive_attestations
+       WHERE name='portable-archive-v5'`,
+    )).rows).toEqual([{ name: "portable-archive-v5" }]);
+    expect((await pool!.query<{ name: string }>(
+      `SELECT name FROM agent_bridge.native_backup_attestations
+       WHERE name='native-backup-v1'`,
+    )).rows).toEqual([{ name: "native-backup-v1" }]);
   });
+
+  it("upgrades the exact released v19 schema without rewriting its ledger", async () => {
+    await withTemporaryDatabase(async (upgrade) => {
+      const directory = fileURLToPath(new URL("../sql/migrations", import.meta.url));
+      const currentPlan = await loadMigrationPlan(directory);
+      const fixture = loadReleasedV19Fixture();
+      expect(fixture.baseCommit).toBe("f3d3fada2bcc20117a0fb97d4f9ce655d79fcb28");
+
+      const releasedSources = new Map(fixture.migrations.map((migration) => {
+        const source = gunzipSync(Buffer.from(migration.gzipBase64, "base64")).toString("utf8");
+        expect(createHash("sha256").update(source).digest("hex")).toBe(migration.checksum);
+        return [migration.version, { ...migration, source }] as const;
+      }));
+      expect([...releasedSources.keys()].sort((left, right) => left - right)).toEqual([
+        7, 13, 14, 15, 16, 18, 19,
+      ]);
+
+      for (const migration of currentPlan.slice(0, 19)) {
+        const released = releasedSources.get(migration.version);
+        const source = released?.source ?? migration.source;
+        const checksum = released?.checksum ?? migration.checksum;
+        await upgrade.query(
+          source.split("__AGENT_BRIDGE_MIGRATION_CHECKSUM__").join(checksum),
+        );
+      }
+
+      const beforeLedger = (await upgrade.query<{
+        version: number; name: string; checksum: string;
+      }>(`SELECT version,name,checksum FROM agent_bridge.schema_migrations
+          ORDER BY version`)).rows;
+      expect(beforeLedger).toHaveLength(19);
+      for (const released of fixture.migrations) {
+        expect(beforeLedger.find((migration) => migration.version === released.version)).toEqual({
+          version: released.version,
+          name: released.name,
+          checksum: released.checksum,
+        });
+      }
+      const readiness = async () => (await upgrade.query<{
+        security: boolean;
+        owner: boolean;
+        gateway: boolean;
+        endpoint: boolean;
+        archive: boolean;
+      }>(`SELECT agent_bridge.security_schema_ready() AS security,
+          agent_bridge.owner_control_plane_ready() AS owner,
+          agent_bridge.gateway_authority_ready() AS gateway,
+          agent_bridge.endpoint_migration_challenge_ready() AS endpoint,
+          agent_bridge.portable_archive_ready() AS archive`)).rows[0];
+      expect(await readiness()).toEqual({
+        security: true,
+        owner: true,
+        gateway: true,
+        endpoint: true,
+        archive: true,
+      });
+      const attestationNames = async () => (await upgrade.query<{
+        kind: string; name: string;
+      }>(`SELECT 'owner' AS kind,name FROM agent_bridge.owner_control_attestations
+          UNION ALL
+          SELECT 'archive' AS kind,name FROM agent_bridge.portable_archive_attestations
+          ORDER BY kind,name`)).rows;
+      const beforeAttestations = await attestationNames();
+
+      const functionContracts = async () => (await upgrade.query<{
+        identity: string;
+        owner: string;
+        acl: string | null;
+        definition: string;
+      }>(`SELECT procedure.oid::regprocedure::text AS identity,
+          pg_catalog.pg_get_userbyid(procedure.proowner) AS owner,
+          procedure.proacl::text AS acl,
+          pg_catalog.pg_get_functiondef(procedure.oid) AS definition
+        FROM pg_catalog.pg_proc procedure
+        WHERE procedure.oid IN (
+          'agent_bridge.assert_control_actor(text)'::regprocedure,
+          'agent_bridge.assert_archive_actor()'::regprocedure,
+          'agent_bridge.owner_control_attestation_definition()'::regprocedure,
+          'agent_bridge.portable_archive_attestation_definition()'::regprocedure,
+          'agent_bridge.portable_archive_ready()'::regprocedure,
+          'agent_bridge.owner_control_plane_ready()'::regprocedure
+        ) ORDER BY identity`)).rows;
+      const beforeContracts = await functionContracts();
+
+      const combinedMemberships = await upgrade.query<{
+        rowCount: string;
+        hasAdmin: boolean;
+        hasInherit: boolean;
+        hasSet: boolean;
+      }>(`SELECT count(*)::text AS "rowCount",
+          bool_or(membership.admin_option) AS "hasAdmin",
+          bool_or(coalesce((to_jsonb(membership)->>'inherit_option')::boolean,true)) AS "hasInherit",
+          bool_or(coalesce((to_jsonb(membership)->>'set_option')::boolean,true)) AS "hasSet"
+        FROM pg_catalog.pg_auth_members membership
+        JOIN pg_catalog.pg_roles granted ON granted.oid=membership.roleid
+        JOIN pg_catalog.pg_roles member ON member.oid=membership.member
+        WHERE member.rolname=current_user
+          AND granted.rolname LIKE 'agent_bridge_%_'||substr(md5(current_database()),1,16)
+          AND granted.rolname NOT LIKE 'agent_bridge_runtime_%'
+        GROUP BY granted.rolname`);
+      expect(combinedMemberships.rows).toHaveLength(7);
+      expect(combinedMemberships.rows.every((membership) =>
+        membership.rowCount === "1" && membership.hasAdmin &&
+        membership.hasInherit && membership.hasSet)).toBe(true);
+
+      let applied;
+      try {
+        applied = await runMigrations(upgrade, directory);
+      } catch (error) {
+        throw new Error(`released v19 upgrade failed: ${databaseErrorDiagnostic(error)}`);
+      }
+      expect(applied).toHaveLength(21);
+
+      const afterLedger = (await upgrade.query<{
+        version: number; name: string; checksum: string;
+      }>(`SELECT version,name,checksum FROM agent_bridge.schema_migrations
+          ORDER BY version`)).rows;
+      expect(afterLedger.slice(0, 19)).toEqual(beforeLedger);
+      expect(afterLedger.at(-2)).toMatchObject({
+        version: 20,
+        name: "managed_authority_compat",
+      });
+      expect(afterLedger.at(-1)).toMatchObject({
+        version: 21,
+        name: "native_backup_reader",
+      });
+
+      const afterContracts = await functionContracts();
+      expect(afterContracts.map(({ identity, owner, acl }) => ({ identity, owner, acl }))).toEqual(
+        beforeContracts.map(({ identity, owner, acl }) => ({ identity, owner, acl })),
+      );
+      for (const beforeContract of beforeContracts) {
+        expect(afterContracts.find((contract) =>
+          contract.identity === beforeContract.identity)?.definition,
+        ).not.toBe(beforeContract.definition);
+      }
+      expect(afterContracts.find((contract) =>
+        contract.identity === "agent_bridge.owner_control_plane_ready()")?.definition,
+      ).toContain("owner-control-v8");
+      expect(afterContracts.find((contract) =>
+        contract.identity === "agent_bridge.portable_archive_ready()")?.definition,
+      ).toContain("portable-archive-v5");
+
+      expect((await upgrade.query<{ name: string; matches: boolean }>(
+        `SELECT name,catalog_definition=agent_bridge.owner_control_attestation_definition() AS matches
+         FROM agent_bridge.owner_control_attestations WHERE name='owner-control-v7'
+         UNION ALL
+         SELECT name,catalog_definition=agent_bridge.portable_archive_attestation_definition() AS matches
+         FROM agent_bridge.portable_archive_attestations WHERE name='portable-archive-v4'
+         UNION ALL
+         SELECT name,catalog_definition=agent_bridge.owner_control_attestation_definition() AS matches
+         FROM agent_bridge.owner_control_attestations WHERE name='owner-control-v8'
+         UNION ALL
+         SELECT name,catalog_definition=agent_bridge.portable_archive_attestation_definition() AS matches
+         FROM agent_bridge.portable_archive_attestations WHERE name='portable-archive-v5'
+         ORDER BY name`,
+      )).rows).toEqual([
+        { name: "owner-control-v7", matches: false },
+        { name: "owner-control-v8", matches: true },
+        { name: "portable-archive-v4", matches: false },
+        { name: "portable-archive-v5", matches: true },
+      ]);
+      expect(await attestationNames()).toEqual([
+        ...beforeAttestations,
+        { kind: "archive", name: "portable-archive-v4" },
+        { kind: "archive", name: "portable-archive-v5" },
+        { kind: "owner", name: "owner-control-v7" },
+        { kind: "owner", name: "owner-control-v8" },
+      ].sort((left, right) => left.kind.localeCompare(right.kind) || left.name.localeCompare(right.name)));
+      expect(await readiness()).toEqual({
+        security: true,
+        owner: true,
+        gateway: true,
+        endpoint: true,
+        archive: true,
+      });
+      expect(await runtimeSchemaReady(upgrade, { allowPrivilegedCaller: true })).toBe(true);
+      expect((await upgrade.query<{ ready: boolean }>(
+        "SELECT agent_bridge.native_backup_ready() AS ready",
+      )).rows).toEqual([{ ready: true }]);
+    });
+  }, 30_000);
 
   it("binds endpoint migration challenges to forward credential replacement authority", async () => {
     const workspaceId = await workspace();
@@ -2213,14 +2698,11 @@ integration("PostgreSQL BridgeStore integration", () => {
     }
   });
 
-  it("excludes membership grantors from portable attestations but keeps them in diagnostics", async () => {
+  it("normalizes membership grantors in protected attestations", async () => {
     const names = await controlRoles(pool!);
     const archiveRole = `agent_bridge_archive_operator_${names.runtime.slice(-16)}`;
     const catalog = await pool!.query<{
       schemaOwner: string;
-      major: number;
-      controlGrantor: string;
-      archiveGrantor: string;
       rawControl: string;
       portableControl: string;
       rawArchive: string;
@@ -2237,25 +2719,13 @@ integration("PostgreSQL BridgeStore integration", () => {
       agent_bridge.portable_archive_attestation_definition() portable_archive
     ) SELECT
       names.schema_owner AS "schemaOwner",
-      current_setting('server_version_num')::integer/10000 AS major,
-      control_grantor.rolname AS "controlGrantor",
-      archive_grantor.rolname AS "archiveGrantor",
       definitions.raw_control AS "rawControl",
       definitions.portable_control AS "portableControl",
       definitions.raw_archive AS "rawArchive",
       definitions.portable_archive AS "portableArchive",
       agent_bridge.owner_control_plane_ready() AS "ownerReady",
       agent_bridge.portable_archive_ready() AS "archiveReady"
-    FROM names CROSS JOIN definitions
-    JOIN pg_roles schema_owner_role ON schema_owner_role.rolname=names.schema_owner
-    JOIN pg_auth_members control_membership ON control_membership.member=schema_owner_role.oid
-    JOIN pg_roles control_granted ON control_granted.oid=control_membership.roleid
-      AND control_granted.rolname=$1
-    JOIN pg_roles control_grantor ON control_grantor.oid=control_membership.grantor
-    JOIN pg_auth_members archive_membership ON archive_membership.member=schema_owner_role.oid
-    JOIN pg_roles archive_granted ON archive_granted.oid=archive_membership.roleid
-      AND archive_granted.rolname=$2
-    JOIN pg_roles archive_grantor ON archive_grantor.oid=archive_membership.grantor`, [names.owner, archiveRole]);
+    FROM names CROSS JOIN definitions`);
     const row = catalog.rows[0]!;
     const record = (definition: string, kind: string, identity: string) =>
       definition.split("\u001e").find((entry) =>
@@ -2269,14 +2739,9 @@ integration("PostgreSQL BridgeStore integration", () => {
     const rawArchiveMembership = row.rawArchive.split("\u001e").find((entry) =>
       entry.startsWith(`owner_membership\u001f${archiveRole}->`)
     )?.split("\u001f")[2];
-    const rawMembershipOptions = row.major === 15 ? "true::" : "true:true:true";
-    expect(rawControlMembership).toBe(
-      `${row.controlGrantor}:${rawMembershipOptions}`,
-    );
+    expect(rawControlMembership).toBe("true:true:true");
     expect(record(row.portableControl, "membership", controlEdge)).toBe("true:true:true");
-    expect(rawArchiveMembership).toBe(
-      `${row.archiveGrantor}:${rawMembershipOptions}`,
-    );
+    expect(rawArchiveMembership).toBe("true:true:true");
     expect(record(row.portableArchive, "owner_membership", archiveEdge)).toBe("true:true:true");
     expect(row).toMatchObject({ ownerReady: true, archiveReady: true });
     expect(await runtimeSchemaReady(pool!, { allowPrivilegedCaller: true })).toBe(true);
@@ -2508,7 +2973,7 @@ integration("PostgreSQL BridgeStore integration", () => {
           "SELECT 1 FROM agent_bridge.schema_migrations WHERE version=17",
         )).rowCount).toBe(0);
         await fence.query("SELECT pg_advisory_unlock($1::bigint)", [NATIVE_DR_ADVISORY_LOCK_KEY]);
-        await expect(migration).resolves.toHaveLength(19);
+        await expect(migration).resolves.toHaveLength(21);
       } finally {
         await fence.query("SELECT pg_advisory_unlock($1::bigint)", [NATIVE_DR_ADVISORY_LOCK_KEY]).catch(() => {});
         fence.release();
@@ -2997,6 +3462,8 @@ integration("PostgreSQL BridgeStore integration", () => {
       const gatewayAuthorityMigration = plan[16]!;
       const endpointMigrationChallengeMigration = plan[17]!;
       const endpointMigrationSameSuccessorMigration = plan[18]!;
+      const managedAuthorityCompatMigration = plan[19]!;
+      const nativeBackupReaderMigration = plan[20]!;
       expect(rowIsolationMigration).toMatchObject({ version: 13, name: "row_isolation" });
       expect(ownerControlPlaneMigration).toMatchObject({ version: 14, name: "owner_control_plane" });
       expect(portableArchiveMigration).toMatchObject({ version: 15, name: "portable_archives" });
@@ -3004,6 +3471,8 @@ integration("PostgreSQL BridgeStore integration", () => {
       expect(gatewayAuthorityMigration).toMatchObject({ version: 17, name: "gateway_authority_binding" });
       expect(endpointMigrationChallengeMigration).toMatchObject({ version: 18, name: "endpoint_migration_challenges" });
       expect(endpointMigrationSameSuccessorMigration).toMatchObject({ version: 19, name: "endpoint_migration_same_successor" });
+      expect(managedAuthorityCompatMigration).toMatchObject({ version: 20, name: "managed_authority_compat" });
+      expect(nativeBackupReaderMigration).toMatchObject({ version: 21, name: "native_backup_reader" });
 
       const workspaceId = "upgrade-row-isolation";
       const messageId = "018f4a70-0000-7000-8000-000000000201";
@@ -3070,9 +3539,9 @@ integration("PostgreSQL BridgeStore integration", () => {
           .join(rowIsolationMigration.checksum),
       );
       const dirtyRoles = await controlRoles(upgrade);
-      await upgrade.query(`CREATE ROLE ${dirtyRoles.owner} LOGIN BYPASSRLS`);
-      await upgrade.query(`CREATE ROLE ${dirtyRoles.operator} LOGIN BYPASSRLS`);
-      await upgrade.query(`CREATE ROLE ${dirtyRoles.auditor} LOGIN BYPASSRLS`);
+      await upgrade.query(`CREATE ROLE ${dirtyRoles.owner}`);
+      await upgrade.query(`CREATE ROLE ${dirtyRoles.operator}`);
+      await upgrade.query(`CREATE ROLE ${dirtyRoles.auditor}`);
       await upgrade.query(`GRANT pg_read_all_data TO ${dirtyRoles.operator}`);
       await upgrade.query(`GRANT ${dirtyRoles.operator},${dirtyRoles.owner} TO pg_monitor`);
       await upgrade.query(`GRANT SELECT ON agent_bridge.messages TO ${dirtyRoles.operator}`);
@@ -3124,6 +3593,16 @@ integration("PostgreSQL BridgeStore integration", () => {
         endpointMigrationSameSuccessorMigration.source
           .split("__AGENT_BRIDGE_MIGRATION_CHECKSUM__")
           .join(endpointMigrationSameSuccessorMigration.checksum),
+      );
+      await upgrade.query(
+        managedAuthorityCompatMigration.source
+          .split("__AGENT_BRIDGE_MIGRATION_CHECKSUM__")
+          .join(managedAuthorityCompatMigration.checksum),
+      );
+      await upgrade.query(
+        nativeBackupReaderMigration.source
+          .split("__AGENT_BRIDGE_MIGRATION_CHECKSUM__")
+          .join(nativeBackupReaderMigration.checksum),
       );
       expect(await migrationsReady(upgrade, plan)).toBe(true);
       expect(await runtimeSchemaReady(upgrade, { allowPrivilegedCaller: true })).toBe(true);
@@ -4512,6 +4991,9 @@ integration("PostgreSQL BridgeStore integration", () => {
       expect((await client.query<{ ready: boolean }>(
         "SELECT agent_bridge.owner_control_plane_ready() AS ready",
       )).rows[0]!.ready).toBe(true);
+      expect((await client.query<{ ready: boolean }>(
+        "SELECT agent_bridge.native_backup_ready() AS ready",
+      )).rows[0]!.ready).toBe(false);
       expect(await runtimeSchemaReady(client, { allowPrivilegedCaller: true })).toBe(true);
     } finally {
       await client.query("ROLLBACK").catch(() => {});
