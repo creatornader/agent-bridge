@@ -114,21 +114,44 @@ The published npm version is the authority for whether this package line has shi
 - Optional exact-message delivery claims in HTTP 2.1, MCP, and the CLI. HTTP 2.0 keeps
   the released claim-next contract.
 
+### 0.5.1 and 0.5.2 package contents
+
+- Runtime PostgreSQL connections can load a base64-encoded CA bundle from the secret
+  environment without writing the certificate to the gateway image or filesystem.
+- The gateway rejects URL parameters that could replace the explicit CA policy.
+- Legacy rows whose ancestry column is SQL `NULL` map to an omitted optional field
+  instead of an invalid protocol value.
+- `/healthz` reports process liveness without database work. `/readyz` remains the
+  database, migration, role, and protected-catalog readiness gate.
+
 ### Post-release validation and adoption
 
-- Move the project's own normal traffic to the authenticated gateway while retaining a
-  tested legacy rollback path.
-- Prove cross-machine claim, settlement, offline replay, and restart behavior against
-  the published package and a deployed v2 gateway. The historical 0.3.0 live release
-  check covered startup, private mailbox sends, caller-scoped history, receipts, and
-  client restart through the legacy compatibility backend. It did not prove
-  gateway-only behavior.
-- Run the manual Fly proof against an operator-owned app and retain its sender,
-  receiver, machine-cycle, and verifier receipts. The repository harness is ready,
-  but the external proof remains incomplete until an approved workflow run succeeds.
-- Replace remaining direct legacy table pollers with the v2 cursor protocol.
-- Confirm the README, npm metadata, GitHub metadata, release notes, and package contents
-  match the released artifact.
+Completed against the published 0.5.2 package:
+
+- Migrated the project authority from the legacy Supabase schema to the canonical
+  PostgreSQL schema after a write freeze, exact-major backup, and restore drill. The
+  gateway uses a restricted runtime login. Legacy writes remain frozen, and the final
+  backup remains available for recovery.
+- Deployed the maintained image to an operator-owned Fly app. Authenticated readiness,
+  capabilities, status, history, publication, exact claim, and settlement checks passed
+  against the live gateway.
+- Moved the managed Codex, Claude Code, and Claude Desktop registrations to separate
+  principal-bound gateway backends. All three passed `doctor`, remote history, empty
+  outbox, and empty delivery-queue checks. Fresh MCP launches exposed 17 tools for each
+  supported adapter. A client process started before cutover keeps its old backend until
+  that host restarts.
+- Stopped normal managed-client traffic from using the legacy adapter. The adapter and
+  frozen data remain available for compatibility and operator-controlled recovery.
+- Verified the published npm version, provenance, immutable GitHub release, package
+  contents, and public repository metadata.
+
+Still required:
+
+- Run the approval-protected production workflow with separate sender and receiver
+  runners, forced offline outbox replay, a Fly machine cycle, and a fresh verifier edge.
+  The live gateway proof above covered delivery and client restarts, but it did not
+  satisfy this two-runner restart contract.
+- Retain the workflow receipts and use them as the public cross-machine recovery proof.
 
 ## Near-term work
 
