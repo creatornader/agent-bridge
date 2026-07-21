@@ -6,6 +6,16 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and 
 
 ## [Unreleased]
 
+## [0.5.2] - 2026-07-20
+
+### Fixed
+
+- Omit `informedBy` when a migrated PostgreSQL message stores SQL `NULL`, matching
+  the optional protocol field and the legacy and SQLite providers.
+- Add an unauthenticated `/healthz` liveness endpoint. It reports whether the HTTP
+  process can respond without querying PostgreSQL. `/readyz` remains the database-backed
+  readiness check.
+
 ## [0.5.1] - 2026-07-20
 
 ### Fixed

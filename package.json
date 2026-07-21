@@ -1,6 +1,6 @@
 {
   "name": "@creatornader/agent-bridge",
-  "version": "0.5.1",
+  "version": "0.5.2",
   "description": "Durable, pull-first mailbox and work-delivery control plane for AI agents across runtimes, sessions, and machines.",
   "type": "module",
   "license": "Apache-2.0",
