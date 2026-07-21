@@ -91,7 +91,7 @@ function asMessage(row: Row): BridgeMessage {
     expiresAt: asTimestamp(row.expires_at),
     idempotencyKey: row.idempotency_key ?? undefined,
     atribReceiptId: row.atrib_receipt_id ?? undefined,
-    informedBy: parse(row.informed_by),
+    informedBy: parse(row.informed_by) ?? undefined,
     metadata: parse(row.metadata),
     deliveryPolicy,
     createdAt: asTimestamp(row.created_at) ?? "",
