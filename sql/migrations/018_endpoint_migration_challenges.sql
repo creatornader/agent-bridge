@@ -899,19 +899,37 @@ returns boolean language sql stable security definer set search_path = '' as $$
   ), active_registry as (
     select member_role,control_role from latest_registry where action='register'
   ), expected_memberships as (
-    select names.owner_role granted_role,names.schema_owner member_role,true admin_option from names
-    union all select names.operator_role,names.schema_owner,true from names
-    union all select names.auditor_role,names.schema_owner,true from names
+    select names.owner_role granted_role,names.schema_owner member_role,
+      true admin_option,true inherit_option,true set_option from names
+    union all select names.operator_role,names.schema_owner,true,true,true from names
+    union all select names.auditor_role,names.schema_owner,true,true,true from names
     union all select case registry.control_role when 'operator' then names.operator_role else names.auditor_role end,
-      registry.member_role,false from active_registry registry cross join names
-  ), actual_memberships as (
-    select granted.rolname::name granted_role,member.rolname::name member_role,membership.admin_option,
+      registry.member_role,false,true,true from active_registry registry cross join names
+  ), raw_memberships as (
+    select granted.rolname::name granted_role,member.rolname::name member_role,
+      membership.admin_option,
       coalesce((to_jsonb(membership)->>'inherit_option')::boolean,true) inherit_option,
-      coalesce((to_jsonb(membership)->>'set_option')::boolean,true) set_option
+      coalesce((to_jsonb(membership)->>'set_option')::boolean,true) set_option,
+      membership.grantor,member.oid member_oid
     from pg_catalog.pg_auth_members membership
     join pg_catalog.pg_roles granted on granted.oid=membership.roleid
     join pg_catalog.pg_roles member on member.oid=membership.member
     where granted.rolname in ((select owner_role from names),(select operator_role from names),(select auditor_role from names))
+  ), actual_memberships as (
+    select membership.granted_role,membership.member_role,
+      bool_or(membership.admin_option) admin_option,
+      bool_or(membership.inherit_option) inherit_option,
+      bool_or(membership.set_option) set_option,
+      bool_and(case when membership.member_role=names.schema_owner then
+        (membership.grantor=10 and membership.admin_option
+          and membership.inherit_option=membership.set_option)
+        or (membership.grantor=membership.member_oid
+          and membership.inherit_option and membership.set_option)
+      else membership.grantor=(select oid from pg_catalog.pg_roles where rolname=names.schema_owner)
+        and not membership.admin_option
+        and membership.inherit_option and membership.set_option end) grants_valid
+    from raw_memberships membership cross join names
+    group by membership.granted_role,membership.member_role
   ), authority_closure as (
     select control_role.granted_role,candidate.rolname::name member_role
     from names cross join lateral(values(names.owner_role),(names.operator_role),(names.auditor_role)) control_role(granted_role)
@@ -924,10 +942,12 @@ returns boolean language sql stable security definer set search_path = '' as $$
     and(select count(*)=1 and bool_and(catalog_definition=agent_bridge.owner_control_attestation_definition())
       from agent_bridge.owner_control_attestations where name='owner-control-v5')
     and not exists(
-      (select granted_role,member_role,admin_option from actual_memberships except select granted_role,member_role,admin_option from expected_memberships)
-      union all(select granted_role,member_role,admin_option from expected_memberships except select granted_role,member_role,admin_option from actual_memberships)
+      (select granted_role,member_role,admin_option,inherit_option,set_option from actual_memberships
+        except select granted_role,member_role,admin_option,inherit_option,set_option from expected_memberships)
+      union all(select granted_role,member_role,admin_option,inherit_option,set_option from expected_memberships
+        except select granted_role,member_role,admin_option,inherit_option,set_option from actual_memberships)
     )
-    and not exists(select 1 from actual_memberships where not inherit_option or not set_option)
+    and not exists(select 1 from actual_memberships where not grants_valid)
     and not exists(select 1 from active_registry registry left join pg_catalog.pg_roles role_record on role_record.rolname=registry.member_role
       where role_record.oid is null or not role_record.rolcanlogin or role_record.rolsuper or role_record.rolcreaterole
         or role_record.rolcreatedb or role_record.rolreplication or role_record.rolbypassrls)
@@ -967,7 +987,9 @@ declare
   control_owner text := 'agent_bridge_control_owner_'||substr(md5(current_database()),1,16);
   role_name text;
 begin
+  execute format('grant create on schema agent_bridge to %I',control_owner);
   execute format('alter function agent_bridge.owner_control_plane_ready() owner to %I',control_owner);
+  execute format('revoke create on schema agent_bridge from %I',control_owner);
   foreach role_name in array array[
     'guard_endpoint_migration_challenge()',
     'reject_endpoint_migration_challenge_truncate()',
@@ -1003,8 +1025,12 @@ $ownership_and_grants$;
 
 insert into agent_bridge.endpoint_migration_challenge_attestations(name,catalog_definition)
 values('endpoint-migration-v1',agent_bridge.endpoint_migration_challenge_catalog_definition());
+select set_config(
+  'role','agent_bridge_control_owner_'||substr(md5(current_database()),1,16),false
+);
 insert into agent_bridge.owner_control_attestations(name,catalog_definition)
 values('owner-control-v5',agent_bridge.owner_control_attestation_definition());
+reset role;
 
 do $final_readiness$
 begin

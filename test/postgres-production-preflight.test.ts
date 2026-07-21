@@ -1,5 +1,6 @@
 import { fileURLToPath } from "node:url";
 import { describe, expect, it } from "vitest";
+import { loadMigrationPlan } from "../src/migrations.js";
 import { runPostgresProductionPreflight } from "../src/postgres-production-preflight.js";
 
 const migrationsDirectory = fileURLToPath(new URL("../sql/migrations", import.meta.url));
@@ -12,6 +13,7 @@ function authority(overrides: Record<string, unknown> = {}) {
     inherits: true,
     isSuperuser: false,
     canCreateRole: true,
+    bypassesRls: true,
     canCreateDatabaseObject: true,
     bridgeSchema: null,
     migrationTable: null,
@@ -55,7 +57,7 @@ describe("PostgreSQL production preflight", () => {
       serverMajor: 16,
       migrationState: "uninitialized",
       appliedMigrationCount: 0,
-      requiredMigrationCount: 19,
+      requiredMigrationCount: 21,
       legacyTable: false,
       ssl: true,
     });
@@ -96,6 +98,25 @@ describe("PostgreSQL production preflight", () => {
     expect(report.checks.find((entry) => entry.name === "schema.migrations")?.ok).toBe(false);
   });
 
+  it("accepts a released checksum in an otherwise current migration prefix", async () => {
+    const plan = await loadMigrationPlan(migrationsDirectory);
+    const migrations = plan.slice(0, 7).map(({ version, name, checksum }) => ({ version, name, checksum }));
+    migrations[6] = {
+      ...migrations[6]!,
+      checksum: "70cca251f736c5e5a9835d5b80645e8816131767127a11a5daa9281bd38004fc",
+    };
+    const db = new FakeDatabase(
+      authority({ bridgeSchema: "agent_bridge", migrationTable: "agent_bridge.schema_migrations" }),
+      migrations,
+    );
+
+    const report = await runPostgresProductionPreflight(db, migrationsDirectory);
+
+    expect(report.ok).toBe(true);
+    expect(report.observations.migrationState).toBe("upgradeable");
+    expect(report.checks.find((entry) => entry.name === "schema.migrations")?.ok).toBe(true);
+  });
+
   it("rejects an existing schema with an empty migration ledger", async () => {
     const db = new FakeDatabase(
       authority({ bridgeSchema: "agent_bridge", migrationTable: "agent_bridge.schema_migrations" }),
@@ -114,6 +135,24 @@ describe("PostgreSQL production preflight", () => {
 
     expect(report.ok).toBe(false);
     expect(report.checks.find((entry) => entry.name === "authority.roles")?.ok).toBe(false);
+  });
+
+  it("reports migration and native DR authority separately", async () => {
+    const db = new FakeDatabase(authority({ bypassesRls: false }));
+
+    const report = await runPostgresProductionPreflight(db, migrationsDirectory);
+
+    expect(report.ok).toBe(false);
+    expect(report.checks.find((entry) => entry.name === "authority.roles")).toEqual({
+      name: "authority.roles",
+      ok: true,
+      detail: "migration role can administer restricted roles",
+    });
+    expect(report.checks.find((entry) => entry.name === "authority.native_dr")).toEqual({
+      name: "authority.native_dr",
+      ok: false,
+      detail: "native DR source role can bypass row-level security",
+    });
   });
 
   it("enforces TLS only when the operator requires it", async () => {

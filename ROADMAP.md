@@ -87,13 +87,32 @@ The published npm version is the authority for whether this package line has shi
   idempotent restart, and PostgreSQL volume persistence.
 - A production deployment guide covering TLS, network exposure, secret separation,
   backups, upgrade order, and schema rollback limits.
-- A maintained Fly.io reference config and read-only production preflight. The
-  repository contract keeps schema-owner and operator authority out of the gateway,
-  but creating an app, provisioning PostgreSQL, setting secrets, migrating, and
-  deploying still require an operator gate.
+
+### 0.5.0 package contents
+
+- Read-only PostgreSQL and Fly production preflights. The database preflight reports
+  migration authority separately from native DR authority. The Fly preflight checks
+  the maintained deployment contract and existing app state without exposing secret
+  values.
+- A maintained Fly.io reference config. The repository contract keeps schema-owner
+  and operator authority out of the gateway, but creating an app, provisioning
+  PostgreSQL, setting secrets, migrating, and deploying still require an operator
+  gate.
 - A manual, approval-protected production proof harness for an existing Fly gateway.
   It separates sender, receiver, machine restart, and fresh-edge verification,
   and publishes versioned receipts that exclude credentials and message content.
+- Managed PostgreSQL schema-owner and native-backup compatibility across PostgreSQL 15
+  through 18. Migrations accept either a true superuser or a non-superuser with the
+  required role-administration authority. Native DR separately requires the schema
+  owner to be a true superuser or hold `BYPASSRLS`. A restore target superuser can
+  validate the intentionally suspended restored schema-owner shell. PostgreSQL 16 and
+  newer split grants are normalized to one effective membership for readiness and native DR. A
+  dedicated read-only role lets the schema owner back up protected tables without
+  granting that access to the gateway or control principals. Exact released migration
+  checksums remain accepted during upgrade, while unrelated checksum drift still fails
+  closed.
+- Optional exact-message delivery claims in HTTP 2.1, MCP, and the CLI. HTTP 2.0 keeps
+  the released claim-next contract.
 
 ### Post-release validation and adoption
 

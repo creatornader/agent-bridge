@@ -40,6 +40,22 @@ receives no schema-owner authority. Its readiness check fails on an incomplete
 migration plan, unsupported PostgreSQL major, row-isolation drift, protected catalog
 drift, or an invalid owner-control membership graph.
 
+Runtime bootstrap runs in one transaction. Before it changes an existing login, it
+rejects every database-derived Agent Bridge authority name, unexpected role edge, and
+object owner. PostgreSQL 16 and newer may add one managed-provider administrator edge
+when the schema owner creates the login. The bootstrap validates that edge exactly. It
+does not adopt a `NOLOGIN` shell restored by native DR.
+
+The schema owner can be a true superuser or a managed-provider administrator with
+`CREATEROLE`. That authority is sufficient for migrations. Native backup requires the
+schema owner to be a true superuser or hold `BYPASSRLS`. A restore target validates the
+intentionally suspended restored schema-owner shell through its superuser session. PostgreSQL 16 and newer may
+split its authority over an internal role between a bootstrap administrator row and a
+schema-owner inherit-and-set row. Native DR may restore the same effective authority as
+one combined bootstrap-superuser row. Security checks aggregate the effective options
+but also validate each allowed physical grant shape. Registered operator and archive
+memberships remain single, schema-owner-granted edges without the admin option.
+
 The repository Compose stack publishes the gateway and PostgreSQL on loopback for
 development. Production deployments put PostgreSQL on a private network, terminate TLS
 before every non-loopback gateway, and source credentials from the platform's secret
@@ -168,9 +184,24 @@ server major, an exact-major `pg_restore`, and superuser authority. It restores 
 shells as `NOLOGIN`, then schema objects, memberships, and default privileges. Claimed
 deliveries become retrying deliveries with cleared leases. The restore checks migrations,
 counts, role inventory, and every readiness attestation before success. External
-principals remain `NOLOGIN`. A failure after target mutation begins disables new target
-connections. If that offlining step fails, the command reports the target as unsafe and
-lists residual role shells.
+principals remain `NOLOGIN`. Runtime memberships are omitted. Active control and archive
+memberships are omitted and receive explicit revocation events after their prior history.
+A matching schema-owner role may be reused only when it is the target session user and
+a true superuser. Every other role collision fails. A failure after target mutation
+begins disables new target connections. If that offlining step fails, the command
+reports the target as unsafe and lists residual role shells.
+
+Managed schema owners need read access to protected ledgers and sequences before
+`pg_dump` can produce a complete native backup. A database-derived `NOLOGIN`
+backup-reader role receives only that access and is granted only to the schema owner.
+Native backup requires that schema owner to be a true superuser or hold `BYPASSRLS`.
+During restore, the target superuser may validate the intentionally suspended restored
+schema-owner shell. A restricted runtime login cannot substitute for that authority.
+`CREATEROLE` alone can apply migrations but cannot produce a complete native backup.
+Native-backup readiness attests the role, authority, membership, and object ACLs. The
+gateway and external operator roles cannot inherit the reader. This backup gate is
+separate from gateway runtime readiness, so drift in an owner-only backup object cannot
+take a healthy gateway out of service.
 
 PostgreSQL source and target URLs come only from
 `AGENT_BRIDGE_DR_SOURCE_DATABASE_URL` and
@@ -512,7 +543,7 @@ must already satisfy that final policy. Node identity and file-type checks run b
 and after the native policy check. Native reparse attributes
 reject symlinks, junctions, and other reparse objects before and after DACL work.
 
-The schema owner is the trusted offline role administrator. It holds all three control roles with the admin option and registers eligible login roles through `register_control_member`; `revoke_control_member` removes them. Those functions are not available through HTTP or MCP. Each call is idempotent by request UUID and appends the database session actor to the membership ledger. Runtime readiness compares the active registry with the full `pg_has_role` closure and the direct `pg_auth_members` edges. It rejects unregistered operator or auditor holders, every external owner holder, missing registered grants, unsafe login attributes, extra roles inherited by a registered member, and roles that inherit a registered member. Direct edges must retain their expected grantor, admin, inherit, and set options. Only the schema owner is exempt from the broad closure check because a PostgreSQL superuser reports membership across roles. A direct `GRANT` is never a valid deployment shortcut.
+The schema owner is the trusted offline role administrator. It holds all three control roles with effective admin, inherit, and set authority and registers eligible login roles through `register_control_member`; `revoke_control_member` removes them. Those functions are not available through HTTP or MCP. Each call is idempotent by request UUID and appends the database session actor to the membership ledger. Runtime readiness compares the active registry with the full `pg_has_role` closure and normalized direct `pg_auth_members` edges. It also checks the raw grant origins and option shapes. It rejects unregistered operator or auditor holders, every external owner holder, missing registered grants, unsafe login attributes, extra roles inherited by a registered member, and roles that inherit a registered member. Only the schema owner is exempt from the broad closure check because a PostgreSQL superuser reports membership across roles. A direct `GRANT` is never a valid deployment shortcut.
 
 Every protected operation first locks a member-global key for `session_user`, followed by capability keys in operator-before-auditor order. It then checks the active registry, direct membership edge, safe login attributes, and complete upstream and downstream role closure. Inventory accepts either registered capability. Registration and revocation use the same global-first lock hierarchy. Opposite operator and auditor changes for one member therefore cannot deadlock. A revocation waits for an operation that already passed authorization, while every operation begun after revocation observes the new state. A session that remains in a revoked role through `SET ROLE` cannot use that stale authorization.
 

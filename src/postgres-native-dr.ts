@@ -44,7 +44,7 @@ const SSL_PARAMETERS = new Set([
   "sslsni",
 ]);
 
-const DERIVED_ROLE = /^agent_bridge_(?:runtime|data_owner|context_reader|event_writer|control_owner|control_operator|control_auditor|archive_operator)_[0-9a-f]{16}$/;
+const DERIVED_ROLE = /^agent_bridge_(?:runtime|data_owner|context_reader|event_writer|control_owner|control_operator|control_auditor|archive_operator|backup_reader)_[0-9a-f]{16}$/;
 const ROLE_NAME = /^[^\u0000-\u001f\u007f]{1,63}$/u;
 
 function validPostgresIdentifier(value: string): boolean {
@@ -66,6 +66,10 @@ export interface PostgresDrMembership {
   inheritOption: boolean;
   setOption: boolean;
 }
+
+type PostgresDrSuspendedMembership =
+  | { kind: "control"; member: string; controlRole: "operator" | "auditor" }
+  | { kind: "archive"; member: string };
 
 interface PostgresDrDefaultAclGrantBase {
   grantor: string;
@@ -689,20 +693,67 @@ export function buildPostgresMembershipStatements(inventory: PostgresDrRoleInven
   if (!Number.isSafeInteger(serverMajor) || serverMajor < 15 || serverMajor > 18) {
     throw new Error("PostgreSQL membership target major must be between 15 and 18");
   }
-  return validatePostgresRoleInventory(inventory).memberships.map((membership) => {
+  const validated = validatePostgresRoleInventory(inventory);
+  const schemaOwner = validated.roles.find((role) => role.kind === "schema-owner")!;
+  const rolesByName = new Map(validated.roles.map((role) => [role.name, role]));
+  const orderedMemberships = [...validated.memberships].sort((left, right) => {
+    const leftOwnerAuthority = left.member === schemaOwner.name ? 0 : 1;
+    const rightOwnerAuthority = right.member === schemaOwner.name ? 0 : 1;
+    return leftOwnerAuthority - rightOwnerAuthority
+      || left.role.localeCompare(right.role)
+      || left.member.localeCompare(right.member);
+  });
+  return orderedMemberships.filter((membership) =>
+    rolesByName.get(membership.member)!.kind !== "external-principal"
+  ).map((membership) => {
+    let grant: string;
     if (serverMajor === 15) {
       if (!membership.inheritOption || !membership.setOption) {
         throw new Error("PostgreSQL 15 cannot preserve membership INHERIT FALSE or SET FALSE semantics");
       }
-      return `GRANT ${quoteIdentifier(membership.role)} TO ${quoteIdentifier(membership.member)}${membership.adminOption ? " WITH ADMIN OPTION" : ""};`;
+      grant = `GRANT ${quoteIdentifier(membership.role)} TO ${quoteIdentifier(membership.member)}${membership.adminOption ? " WITH ADMIN OPTION" : ""};`;
+    } else {
+      const options = [
+        `ADMIN ${membership.adminOption ? "OPTION" : "FALSE"}`,
+        `INHERIT ${membership.inheritOption ? "TRUE" : "FALSE"}`,
+        `SET ${membership.setOption ? "TRUE" : "FALSE"}`,
+      ].join(", ");
+      grant = `GRANT ${quoteIdentifier(membership.role)} TO ${quoteIdentifier(membership.member)} WITH ${options};`;
     }
-    const options = [
-      `ADMIN ${membership.adminOption ? "OPTION" : "FALSE"}`,
-      `INHERIT ${membership.inheritOption ? "TRUE" : "FALSE"}`,
-      `SET ${membership.setOption ? "TRUE" : "FALSE"}`,
-    ].join(", ");
-    return `GRANT ${quoteIdentifier(membership.role)} TO ${quoteIdentifier(membership.member)} WITH ${options};`;
+    const role = rolesByName.get(membership.role)!;
+    const schemaOwnerGrantedDerivedMembership = membership.member !== schemaOwner.name
+      && role.kind === "derived";
+    return schemaOwnerGrantedDerivedMembership
+      ? `SET LOCAL ROLE ${quoteIdentifier(schemaOwner.name)}; ${grant} RESET ROLE;`
+      : grant;
   });
+}
+
+function suspendedPostgresMemberships(inventory: PostgresDrRoleInventory): PostgresDrSuspendedMembership[] {
+  const suffix = createHash("md5").update(inventory.databaseName).digest("hex").slice(0, 16);
+  const recognizedRoles = new Map<string, "operator" | "auditor" | "archive">([
+    [`agent_bridge_control_operator_${suffix}`, "operator"],
+    [`agent_bridge_control_auditor_${suffix}`, "auditor"],
+    [`agent_bridge_archive_operator_${suffix}`, "archive"],
+  ]);
+  const rolesByName = new Map(inventory.roles.map((role) => [role.name, role]));
+  const suspended: PostgresDrSuspendedMembership[] = [];
+  for (const membership of inventory.memberships) {
+    if (rolesByName.get(membership.member)?.kind !== "external-principal") continue;
+    const recognized = recognizedRoles.get(membership.role);
+    if (recognized === "archive") {
+      suspended.push({ kind: "archive", member: membership.member });
+      continue;
+    }
+    if (recognized === "operator" || recognized === "auditor") {
+      suspended.push({
+        kind: "control",
+        member: membership.member,
+        controlRole: recognized,
+      });
+    }
+  }
+  return suspended;
 }
 
 const DEFAULT_PRIVILEGE_OBJECTS: Record<PostgresDrDefaultAcl["objectType"], string> = {
@@ -1042,7 +1093,8 @@ export async function collectPostgresRoleInventory(
       FROM unnest(ARRAY[
         'agent_bridge_runtime_','agent_bridge_data_owner_','agent_bridge_context_reader_',
         'agent_bridge_event_writer_','agent_bridge_control_owner_','agent_bridge_control_operator_',
-        'agent_bridge_control_auditor_','agent_bridge_archive_operator_'
+        'agent_bridge_control_auditor_','agent_bridge_archive_operator_',
+        'agent_bridge_backup_reader_'
       ]) prefix
     ), object_roles AS (
       SELECT namespace.nspowner AS oid, 'schema-owner'::text AS kind
@@ -1121,13 +1173,14 @@ export async function collectPostgresRoleInventory(
   const names = roleRows.rows.map((row) => row.name);
   const membershipRows = names.length === 0 ? { rows: [], rowCount: 0 } : await client.query<PostgresDrMembership>(`
     SELECT granted.rolname AS role, member.rolname AS member,
-      membership.admin_option AS "adminOption",
-      coalesce((to_jsonb(membership)->>'inherit_option')::boolean,true) AS "inheritOption",
-      coalesce((to_jsonb(membership)->>'set_option')::boolean,true) AS "setOption"
+      bool_or(membership.admin_option) AS "adminOption",
+      bool_or(coalesce((to_jsonb(membership)->>'inherit_option')::boolean,true)) AS "inheritOption",
+      bool_or(coalesce((to_jsonb(membership)->>'set_option')::boolean,true)) AS "setOption"
     FROM pg_catalog.pg_auth_members membership
     JOIN pg_catalog.pg_roles granted ON granted.oid=membership.roleid
     JOIN pg_catalog.pg_roles member ON member.oid=membership.member
     WHERE granted.rolname=ANY($1::text[]) AND member.rolname=ANY($1::text[])
+    GROUP BY granted.rolname,member.rolname
     ORDER BY granted.rolname,member.rolname`, [names]);
   if (names.length > 0) {
     const boundary = await client.query<{ found: number }>(`
@@ -1238,8 +1291,11 @@ async function collectSnapshotMetadata(
   if (migrations.length === 0) throw new PostgresNativeDrError("SOURCE_SCHEMA_EMPTY", "source has no Agent Bridge migrations");
   const schemaVersion = Math.max(...migrations.map((migration) => migration.version));
   const tableRows = await client.query<{ tableName: string }>(`
-    SELECT table_name AS "tableName" FROM information_schema.tables
-    WHERE table_schema='agent_bridge' AND table_type='BASE TABLE' ORDER BY table_name`);
+    SELECT relation.relname AS "tableName"
+    FROM pg_catalog.pg_class relation
+    JOIN pg_catalog.pg_namespace namespace ON namespace.oid=relation.relnamespace
+    WHERE namespace.nspname='agent_bridge' AND relation.relkind IN ('r','p')
+    ORDER BY relation.relname`);
   const tableCounts: Record<string, string> = {};
   for (const row of tableRows.rows) {
     const qualified = `agent_bridge.${row.tableName}`;
@@ -1249,6 +1305,9 @@ async function collectSnapshotMetadata(
     const value = count.rows[0]?.count;
     if (!value || !/^(?:0|[1-9][0-9]*)$/u.test(value)) throw new PostgresNativeDrError("SOURCE_COUNT_INVALID", `source count is invalid for ${qualified}`);
     tableCounts[qualified] = value;
+  }
+  if (!tableRows.rows.some((row) => row.tableName === "deliveries")) {
+    throw new PostgresNativeDrError("SOURCE_COUNT_INVALID", "source deliveries table is unavailable");
   }
   const claimed = await client.query<{ count: string }>(
     `SELECT count(*)::text AS count FROM agent_bridge.deliveries WHERE state='claimed'`,
@@ -1261,6 +1320,7 @@ async function collectSnapshotMetadata(
     security: boolean;
     ownerControl: boolean;
     portableArchive: boolean;
+    nativeBackup?: boolean;
     securityDefinition: string;
     ownerControlDefinition: string;
     portableArchiveDefinition: string;
@@ -1269,6 +1329,7 @@ async function collectSnapshotMetadata(
     SELECT agent_bridge.security_schema_ready() AS security,
       agent_bridge.owner_control_plane_ready() AS "ownerControl",
       agent_bridge.portable_archive_ready() AS "portableArchive",
+      ${schemaVersion >= 21 ? 'agent_bridge.native_backup_ready() AS "nativeBackup",' : ""}
       agent_bridge.credential_security_prerequisite_definition() AS "securityDefinition",
       agent_bridge.row_isolation_catalog_definition() AS "rowIsolationDefinition",
       agent_bridge.owner_control_attestation_definition() AS "ownerControlDefinition",
@@ -1277,6 +1338,7 @@ async function collectSnapshotMetadata(
   const rowReady = await checkRowReady(client);
   const authorityReady = await gatewayAuthorityReady(client, schemaVersion);
   if (!ready?.security || !rowReady || !ready.ownerControl || !ready.portableArchive
+    || (schemaVersion >= 21 && !ready.nativeBackup)
     || !authorityReady
     || typeof ready.securityDefinition !== "string"
     || typeof ready.rowIsolationDefinition !== "string"
@@ -1682,12 +1744,27 @@ async function targetTableCounts(client: PostgresDrClient): Promise<Record<strin
   return counts;
 }
 
-function expectedRestoredTableCounts(schema: PostgresNativeDrSchema): Record<string, string> {
+function expectedRestoredTableCounts(
+  schema: PostgresNativeDrSchema,
+  suspendedMemberships: readonly PostgresDrSuspendedMembership[],
+): Record<string, string> {
   const expected = { ...schema.tableCounts };
   for (const table of excludedDataTablesForSchemaVersion(schema.schemaVersion)) expected[table] = "0";
   const deliveryEvents = expected["agent_bridge.delivery_events"];
   if (deliveryEvents === undefined) throw new PostgresNativeDrError("INVALID_MANIFEST", "PostgreSQL delivery event count is missing");
   expected["agent_bridge.delivery_events"] = (BigInt(deliveryEvents) + BigInt(schema.claimedDeliveryCount)).toString();
+  for (const [kind, table] of [
+    ["control", "agent_bridge.control_membership_events"],
+    ["archive", "agent_bridge.archive_membership_events"],
+  ] as const) {
+    const increment = suspendedMemberships.filter((membership) => membership.kind === kind).length;
+    if (increment === 0) continue;
+    const current = expected[table];
+    if (current === undefined) {
+      throw new PostgresNativeDrError("INVALID_MANIFEST", `PostgreSQL ${kind} membership event count is missing`);
+    }
+    expected[table] = (BigInt(current) + BigInt(increment)).toString();
+  }
   return expected;
 }
 
@@ -1783,11 +1860,24 @@ async function restorePostgresNativeDrInternal(options: RestorePostgresNativeDrO
     if (metadata.schemaExists || !metadata.databaseFresh) {
       throw new PostgresNativeDrError("TARGET_NOT_FRESH", "target must be a dedicated fresh database without user objects or default ACLs");
     }
-    const conflicts = await target.query<{ name: string }>(
-      `SELECT rolname AS name FROM pg_catalog.pg_roles WHERE rolname=ANY($1::text[]) ORDER BY rolname`,
+    const schemaOwner = inventory.roles.find((role) => role.kind === "schema-owner")!;
+    const conflicts = await target.query<{
+      name: string;
+      isCurrentUser: boolean;
+      isSuperuser: boolean;
+    }>(
+      `SELECT rolname AS name,rolname=current_user AS "isCurrentUser",
+         rolsuper "isSuperuser"
+       FROM pg_catalog.pg_roles WHERE rolname=ANY($1::text[]) ORDER BY rolname`,
       [inventory.roles.map((role) => role.name)],
     );
-    if (conflicts.rows.length > 0) throw new PostgresNativeDrError("TARGET_ROLE_CONFLICT", "target contains a role required by the backup");
+    const reusesSchemaOwner = conflicts.rows.length === 1
+      && conflicts.rows[0]?.name === schemaOwner.name
+      && conflicts.rows[0].isCurrentUser
+      && conflicts.rows[0].isSuperuser;
+    if (conflicts.rows.length > 0 && !reusesSchemaOwner) {
+      throw new PostgresNativeDrError("TARGET_ROLE_CONFLICT", "target contains a role required by the backup");
+    }
     await assertPostgresRestoreAuthority(target);
     admin = deps.createClient(administrativeDatabaseUrl(targetUrl, metadata.databaseName));
     await admin.connect();
@@ -1797,12 +1887,13 @@ async function restorePostgresNativeDrInternal(options: RestorePostgresNativeDrO
     securePrivatePath(schemaAclListPath, "file");
     verifyPrivatePathAccess(schemaAclListPath, "file");
     for (const [index, statement] of buildPostgresRoleShellStatements(inventory).entries()) {
+      const role = inventory.roles[index]!;
+      if (reusesSchemaOwner && role.name === schemaOwner.name) continue;
       phase = "role shell creation";
       restoreStarted = true;
       await target.query(statement);
-      createdRoles.push(inventory.roles[index]!.name);
+      createdRoles.push(role.name);
     }
-    const schemaOwner = inventory.roles.find((role) => role.kind === "schema-owner")!;
     phase = "schema creation";
     await target.query(`CREATE SCHEMA agent_bridge AUTHORIZATION ${quoteIdentifier(schemaOwner.name)}`);
     phase = "schema ACL restore";
@@ -1833,6 +1924,25 @@ async function restorePostgresNativeDrInternal(options: RestorePostgresNativeDrO
     transactionOpen = true;
     phase = "membership restore";
     for (const statement of buildPostgresMembershipStatements(inventory, major)) await target.query(statement);
+    const suspendedMemberships = suspendedPostgresMemberships(inventory);
+    phase = "external membership suspension";
+    for (const membership of suspendedMemberships) {
+      if (membership.kind === "control") {
+        await target.query(
+          `INSERT INTO agent_bridge.control_membership_events(
+             request_id,action,member_role,control_role,actor
+           ) VALUES($1::uuid,'revoke',$2::name,$3,$4::name)`,
+          [deps.randomId(), membership.member, membership.controlRole, schemaOwner.name],
+        );
+      } else {
+        await target.query(
+          `INSERT INTO agent_bridge.archive_membership_events(
+             request_id,action,member_role,actor
+           ) VALUES($1::uuid,'revoke',$2::name,$3::name)`,
+          [deps.randomId(), membership.member, schemaOwner.name],
+        );
+      }
+    }
     phase = "default privilege restore";
     for (const statement of buildPostgresDefaultPrivilegeStatements(inventory)) await target.query(statement);
     phase = "claim normalization";
@@ -1859,12 +1969,13 @@ async function restorePostgresNativeDrInternal(options: RestorePostgresNativeDrO
     }
     phase = "table count validation";
     const counts = await targetTableCounts(target);
-    compareStringMaps(counts, expectedRestoredTableCounts(schema), "restored PostgreSQL");
+    compareStringMaps(counts, expectedRestoredTableCounts(schema, suspendedMemberships), "restored PostgreSQL");
     phase = "readiness validation";
     const readiness = await target.query<{
       security: boolean;
       ownerControl: boolean;
       portableArchive: boolean;
+      nativeBackup?: boolean;
       securityDefinition: string;
       rowIsolationDefinition: string;
       ownerControlDefinition: string;
@@ -1873,6 +1984,7 @@ async function restorePostgresNativeDrInternal(options: RestorePostgresNativeDrO
       SELECT agent_bridge.security_schema_ready() AS security,
         agent_bridge.owner_control_plane_ready() AS "ownerControl",
         agent_bridge.portable_archive_ready() AS "portableArchive",
+        ${schema.schemaVersion >= 21 ? 'agent_bridge.native_backup_ready() AS "nativeBackup",' : ""}
         agent_bridge.credential_security_prerequisite_definition() AS "securityDefinition",
         agent_bridge.row_isolation_catalog_definition() AS "rowIsolationDefinition",
         agent_bridge.owner_control_attestation_definition() AS "ownerControlDefinition",
@@ -1885,6 +1997,7 @@ async function restorePostgresNativeDrInternal(options: RestorePostgresNativeDrO
       !restoredRowReady ? "row-isolation" : undefined,
       !ready?.ownerControl ? "owner-control" : undefined,
       !ready?.portableArchive ? "portable-archive" : undefined,
+      schema.schemaVersion >= 21 && !ready?.nativeBackup ? "native-backup" : undefined,
       !restoredGatewayAuthorityReady ? "gateway-authority" : undefined,
     ].filter(Boolean);
     if (failedReadiness.length > 0) {

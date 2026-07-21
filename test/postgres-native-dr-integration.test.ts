@@ -1,5 +1,5 @@
 import { spawnSync } from "node:child_process";
-import { createHash } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import {
   chmodSync, closeSync, constants, fstatSync, mkdtempSync, openSync, readdirSync, readFileSync,
   rmSync, writeFileSync,
@@ -248,6 +248,20 @@ integration.each(matrix)("PostgreSQL $major native DR", ({ major, image, port })
       await sourcePool.query(`ALTER DEFAULT PRIVILEGES FOR ROLE agent_bridge_control_owner_${currentSuffix}
         REVOKE EXECUTE ON FUNCTIONS FROM PUBLIC`);
       await runMigrations(sourcePool, migrationDirectory);
+      await sourcePool.query(`
+        CREATE ROLE native_dr_operator LOGIN INHERIT NOSUPERUSER NOCREATEDB NOCREATEROLE
+          NOREPLICATION NOBYPASSRLS;
+        CREATE ROLE native_dr_archive LOGIN INHERIT NOSUPERUSER NOCREATEDB NOCREATEROLE
+          NOREPLICATION NOBYPASSRLS;
+      `);
+      await sourcePool.query(
+        "SELECT * FROM agent_bridge.register_control_member($1::uuid,$2::name,'operator')",
+        [randomUUID(), "native_dr_operator"],
+      );
+      await sourcePool.query(
+        "SELECT * FROM agent_bridge.register_archive_member($1::uuid,$2::name)",
+        [randomUUID(), "native_dr_archive"],
+      );
       sourceGatewayAuthorityId = (await sourcePool.query<{ authority_id: string }>(
         "SELECT authority_id::text FROM agent_bridge.gateway_authority",
       )).rows[0]!.authority_id;
@@ -354,6 +368,219 @@ integration.each(matrix)("PostgreSQL $major native DR", ({ major, image, port })
         `SELECT rolcanlogin FROM pg_catalog.pg_roles WHERE rolname='source_admin'`,
       );
       expect(external.rows).toEqual([{ rolcanlogin: false }]);
+      const suspendedLogins = await targetPool.query<{ name: string; canLogin: boolean }>(`
+        SELECT rolname AS name,rolcanlogin AS "canLogin" FROM pg_catalog.pg_roles
+        WHERE rolname IN ('native_dr_operator','native_dr_archive') ORDER BY rolname`);
+      expect(suspendedLogins.rows).toEqual([
+        { name: "native_dr_archive", canLogin: false },
+        { name: "native_dr_operator", canLogin: false },
+      ]);
+      const suspensionEvents = await targetPool.query<{
+        kind: string; member: string; role: string | null; action: string;
+      }>(`
+        SELECT 'archive' AS kind,member_role::text AS member,NULL::text AS role,action
+        FROM agent_bridge.archive_membership_events WHERE member_role='native_dr_archive'
+        UNION ALL
+        SELECT 'control',member_role::text,control_role,action
+        FROM agent_bridge.control_membership_events WHERE member_role='native_dr_operator'
+        ORDER BY kind,action`);
+      expect(suspensionEvents.rows).toEqual([
+        { kind: "archive", member: "native_dr_archive", role: null, action: "register" },
+        { kind: "archive", member: "native_dr_archive", role: null, action: "revoke" },
+        { kind: "control", member: "native_dr_operator", role: "operator", action: "register" },
+        { kind: "control", member: "native_dr_operator", role: "operator", action: "revoke" },
+      ]);
+      const restoredMemberships = await targetPool.query<{ count: string }>(`
+        SELECT count(*)::text AS count FROM pg_catalog.pg_auth_members membership
+        JOIN pg_catalog.pg_roles member ON member.oid=membership.member
+        WHERE member.rolname IN ('native_dr_operator','native_dr_archive')`);
+      expect(restoredMemberships.rows).toEqual([{ count: "0" }]);
+      expect((await targetPool.query(`SELECT
+        agent_bridge.owner_control_plane_ready() AS owner,
+        agent_bridge.portable_archive_ready() AS archive`)).rows).toEqual([
+        { owner: true, archive: true },
+      ]);
+
+      expect((await targetPool.query<{
+        sessionUser: string;
+        schemaOwner: string;
+        schemaOwnerCanLogin: boolean;
+        schemaOwnerBypassesRls: boolean;
+        nativeBackupReady: boolean;
+      }>(`SELECT session_user::text AS "sessionUser",owner.rolname AS "schemaOwner",
+          owner.rolcanlogin AS "schemaOwnerCanLogin",owner.rolbypassrls AS "schemaOwnerBypassesRls",
+          agent_bridge.native_backup_ready() AS "nativeBackupReady"
+        FROM pg_catalog.pg_namespace namespace
+        JOIN pg_catalog.pg_roles owner ON owner.oid=namespace.nspowner
+        WHERE namespace.nspname='agent_bridge'`)).rows).toEqual([{
+        sessionUser: "target_admin",
+        schemaOwner: "source_admin",
+        schemaOwnerCanLogin: false,
+        schemaOwnerBypassesRls: false,
+        nativeBackupReady: true,
+      }]);
+
+      const runtimeLogin = `native_dr_runtime_${randomUUID().replaceAll("-", "")}`;
+      const runtimePassword = randomUUID();
+      const runtimeRole = `agent_bridge_runtime_${createHash("md5")
+        .update("agent_bridge").digest("hex").slice(0, 16)}`;
+      const runtimeUrl = new URL(targetUrl);
+      runtimeUrl.username = runtimeLogin;
+      runtimeUrl.password = runtimePassword;
+      let runtimePool: pg.Pool | undefined;
+      try {
+        await targetPool.query(
+          `CREATE ROLE ${runtimeLogin} LOGIN INHERIT NOSUPERUSER NOCREATEDB NOCREATEROLE ` +
+          `NOREPLICATION NOBYPASSRLS PASSWORD '${runtimePassword}'`,
+        );
+        await targetPool.query(`GRANT ${runtimeRole} TO ${runtimeLogin}`);
+        runtimePool = new pg.Pool({ connectionString: runtimeUrl.toString(), max: 1 });
+        expect((await runtimePool.query<{ nativeBackupReady: boolean }>(
+          "SELECT agent_bridge.native_backup_ready() AS \"nativeBackupReady\"",
+        )).rows).toEqual([{ nativeBackupReady: false }]);
+      } finally {
+        await runtimePool?.end().catch(() => undefined);
+        await targetPool.query(`REVOKE ${runtimeRole} FROM ${runtimeLogin}`).catch(() => undefined);
+        await targetPool.query(`DROP ROLE IF EXISTS ${runtimeLogin}`).catch(() => undefined);
+      }
+    } finally {
+      await targetPool.end();
+    }
+  }, 240_000);
+
+  it.skipIf(major !== 17)("reuses a matching target superuser for a managed schema owner", async () => {
+    const directory = mkdtempSync(join(process.cwd(), ".agent-bridge-pg17-managed-owner-"));
+    residues.add(directory);
+    const sourceName = "agent-bridge-native-dr-17-managed-owner-source";
+    const targetName = "agent-bridge-native-dr-17-managed-owner-target";
+    const sourceAdminUrl = await startDatabase(sourceName, image, port, "source_admin", directory);
+    const sourceAdmin = new pg.Client({ connectionString: sourceAdminUrl });
+    await sourceAdmin.connect();
+    await sourceAdmin.query(`
+      CREATE ROLE postgres LOGIN INHERIT NOSUPERUSER NOCREATEDB CREATEROLE
+        NOREPLICATION BYPASSRLS PASSWORD '${password}';
+      ALTER DATABASE agent_bridge OWNER TO postgres;
+    `);
+    await sourceAdmin.end();
+    const sourceUrl = new URL(sourceAdminUrl);
+    sourceUrl.username = "postgres";
+    sourceUrl.password = password;
+    const sourcePool = new pg.Pool({ connectionString: sourceUrl.toString(), max: 3 });
+    let backup: Awaited<ReturnType<typeof backupPostgresNativeDr>>;
+    let sourceDefinitions: Record<string, string>;
+    try {
+      await runMigrations(sourcePool, migrationDirectory);
+      const sourceAttributes = (await sourcePool.query<{
+        isSuperuser: boolean; canCreateRole: boolean; bypassesRls: boolean;
+      }>(`SELECT rolsuper AS "isSuperuser",rolcreaterole AS "canCreateRole",
+          rolbypassrls AS "bypassesRls" FROM pg_catalog.pg_roles WHERE rolname=current_user`)).rows[0];
+      expect(sourceAttributes).toEqual({
+        isSuperuser: false, canCreateRole: true, bypassesRls: true,
+      });
+      const controlEvidence = await sourcePool.query(`
+        SELECT owner.rolname AS owner,
+          pg_has_role(current_user,owner.rolname,'SET') AS "canSet",
+          has_table_privilege(current_user,relation.oid,'SELECT') AS "inheritedSelect",
+          has_table_privilege(owner.rolname,relation.oid,'SELECT') AS "ownerSelect"
+        FROM pg_catalog.pg_class relation
+        JOIN pg_catalog.pg_namespace namespace ON namespace.oid=relation.relnamespace
+        JOIN pg_catalog.pg_roles owner ON owner.oid=relation.relowner
+        WHERE namespace.nspname='agent_bridge' AND relation.relname='control_events'`);
+      expect(controlEvidence.rows).toEqual([{
+        owner: expect.stringMatching(/^agent_bridge_control_owner_/u),
+        canSet: true,
+        inheritedSelect: true,
+        ownerSelect: false,
+      }]);
+      const backupReader = (await sourcePool.query<{
+        name: string; canLogin: boolean; canWrite: boolean; canCreate: boolean;
+        canExecute: boolean; rawMembershipRows: string; ready: boolean;
+      }>(`WITH names AS (SELECT
+          'agent_bridge_backup_reader_'||substr(md5(current_database()),1,16) AS backup_role
+        ) SELECT role.rolname AS name,role.rolcanlogin AS "canLogin",
+          EXISTS(SELECT 1 FROM pg_catalog.pg_class relation
+            JOIN pg_catalog.pg_namespace namespace ON namespace.oid=relation.relnamespace
+            WHERE namespace.nspname='agent_bridge' AND relation.relkind IN ('r','p','v','m','f')
+              AND has_table_privilege(role.rolname,relation.oid,
+                'INSERT,UPDATE,DELETE,TRUNCATE,REFERENCES,TRIGGER')) AS "canWrite",
+          has_schema_privilege(role.rolname,'agent_bridge','CREATE') AS "canCreate",
+          EXISTS(SELECT 1 FROM pg_catalog.pg_proc procedure
+            JOIN pg_catalog.pg_namespace namespace ON namespace.oid=procedure.pronamespace
+            WHERE namespace.nspname='agent_bridge'
+              AND has_function_privilege(role.rolname,procedure.oid,'EXECUTE')) AS "canExecute",
+          (SELECT count(*)::text FROM pg_catalog.pg_auth_members membership
+            WHERE membership.roleid=role.oid) AS "rawMembershipRows",
+          agent_bridge.native_backup_ready() AS ready
+        FROM names JOIN pg_catalog.pg_roles role ON role.rolname=names.backup_role`)).rows[0];
+      expect(backupReader).toEqual({
+        name: expect.stringMatching(/^agent_bridge_backup_reader_/u),
+        canLogin: false,
+        canWrite: false,
+        canCreate: false,
+        canExecute: false,
+        rawMembershipRows: "2",
+        ready: true,
+      });
+      sourceDefinitions = (await sourcePool.query<Record<string, string>>(`SELECT
+        agent_bridge.credential_security_prerequisite_definition() AS security,
+        agent_bridge.row_isolation_catalog_definition() AS "rowIsolation",
+        agent_bridge.owner_control_attestation_definition() AS "ownerControl",
+        agent_bridge.portable_archive_attestation_definition() AS "portableArchive",
+        agent_bridge.native_backup_catalog_definition() AS "nativeBackup"`)).rows[0]!;
+      backup = await backupPostgresNativeDr({
+        stagingDirectory: directory,
+        environment: { AGENT_BRIDGE_DR_SOURCE_DATABASE_URL: sourceUrl.toString() },
+        dependencies: dockerToolDependencies(image, sourceName, directory),
+      });
+    } finally {
+      await sourcePool.end();
+      docker(["rm", "-f", sourceName], true);
+      residues.delete(`container:${sourceName}`);
+    }
+
+    const targetUrl = await startDatabase(targetName, image, port, "postgres", directory);
+    const artifactAnchors = {
+      dump: anchorFor(backup.entries[0].path),
+      roles: anchorFor(backup.entries[1].path),
+    };
+    const targetTools = dockerToolDependencies(image, targetName, directory);
+    const verified = await verifyPostgresNativeDrArtifacts({
+      dumpPath: backup.entries[0].path,
+      rolesPath: backup.entries[1].path,
+      schema: backup.schema,
+      artifactAnchors,
+      dependencies: targetTools,
+    });
+    await expect(restorePostgresNativeDr({
+      dumpPath: backup.entries[0].path,
+      rolesPath: backup.entries[1].path,
+      schema: backup.schema,
+      artifactAnchors: verified.artifactAnchors,
+      acceptSourceSqlRisk: true,
+      environment: { AGENT_BRIDGE_DR_TARGET_DATABASE_URL: targetUrl },
+      dependencies: targetTools,
+    })).resolves.toMatchObject({ readiness: {
+      security: true, rowIsolation: true, ownerControl: true, portableArchive: true,
+    } });
+    const targetPool = new pg.Pool({ connectionString: targetUrl, max: 1 });
+    try {
+      const targetAttributes = (await targetPool.query<{
+        isSuperuser: boolean; canCreateRole: boolean; bypassesRls: boolean;
+      }>(`SELECT rolsuper AS "isSuperuser",rolcreaterole AS "canCreateRole",
+          rolbypassrls AS "bypassesRls" FROM pg_catalog.pg_roles WHERE rolname=current_user`)).rows[0];
+      expect(targetAttributes).toEqual({
+        isSuperuser: true, canCreateRole: true, bypassesRls: true,
+      });
+      const targetDefinitions = (await targetPool.query<Record<string, string>>(`SELECT
+        agent_bridge.credential_security_prerequisite_definition() AS security,
+        agent_bridge.row_isolation_catalog_definition() AS "rowIsolation",
+        agent_bridge.owner_control_attestation_definition() AS "ownerControl",
+        agent_bridge.portable_archive_attestation_definition() AS "portableArchive",
+        agent_bridge.native_backup_catalog_definition() AS "nativeBackup"`)).rows[0];
+      expect(targetDefinitions).toEqual(sourceDefinitions);
+      expect((await targetPool.query(
+        "SELECT agent_bridge.native_backup_ready() AS ready",
+      )).rows).toEqual([{ ready: true }]);
     } finally {
       await targetPool.end();
     }

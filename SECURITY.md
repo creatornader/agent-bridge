@@ -74,6 +74,29 @@ Keep the schema-owner, runtime, operator, archive, backup, and restore database
 authorities separate. Do not copy one client's token or backend file into another
 client's configuration.
 
+Managed PostgreSQL may expose a schema-owner administrator with `CREATEROLE` instead
+of true superuser authority. That capability is sufficient for migrations. Native backup
+requires the schema owner to be a true superuser or hold `BYPASSRLS`, because the source
+backup must read tables protected by RLS. A restore target validates a suspended restored
+schema-owner shell through its own superuser session. Agent Bridge creates internal roles with safe
+defaults and fails if an existing role has elevated attributes. PostgreSQL 16 and newer
+may split the schema owner's admin, inherit, and set authority across two catalog rows.
+Native DR may restore the same authority as one combined bootstrap-superuser row.
+Security readiness accepts only those documented grant shapes, then checks their
+effective authority. Registered runtime, control, and archive logins do not receive
+that exception.
+
+The database-derived backup-reader role is `NOLOGIN` and has read-only access to Agent
+Bridge tables and sequences. Only the schema owner may inherit it. The runtime role,
+control and archive roles, and external principals must not hold it. Native-backup
+readiness fails on a missing object grant, an added privilege, an unexpected member, or
+a source schema owner without true-superuser or `BYPASSRLS` authority. A restricted
+runtime login cannot validate a suspended restored schema owner.
+
+PostgreSQL native restore does not reactivate external identities. Runtime memberships
+are omitted. Active control and archive memberships are replaced by explicit revocation
+events after the restored history. Re-enrollment requires a separate operator action.
+
 Run migrations as a one-shot schema-owner job before starting a new gateway image.
 Take and verify a native DR backup first. Gateway readiness checks the exact migration
 plan and protected catalog state. Once a migration changes the database, starting an
