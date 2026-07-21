@@ -16,10 +16,14 @@ RUN npm ci --omit=dev --ignore-scripts && npm cache clean --force
 
 FROM node:24-alpine@sha256:a0b9bf06e4e6193cf7a0f58816cc935ff8c2a908f81e6f1a95432d679c54fbfd AS runtime
 
+ARG AGENT_BRIDGE_BUILD_REVISION=""
+
 LABEL org.opencontainers.image.source="https://github.com/creatornader/agent-bridge"
 LABEL org.opencontainers.image.licenses="Apache-2.0"
+LABEL org.opencontainers.image.revision="${AGENT_BRIDGE_BUILD_REVISION}"
 
 ENV NODE_ENV=production
+ENV AGENT_BRIDGE_BUILD_REVISION="${AGENT_BRIDGE_BUILD_REVISION}"
 WORKDIR /app
 
 COPY --from=production-dependencies --chown=node:node /app/node_modules ./node_modules

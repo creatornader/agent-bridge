@@ -32,6 +32,11 @@ declared by the registry, while local mode uses process identity and reports sco
 enforcement as false. [ADR-0005](0005-retire-direct-supabase-runtime.md) removed the
 legacy runtime provider from this contract.
 
+Authenticated gateway capability documents may also identify the running package
+version and image Git revision. These implementation fields are independent of the
+HTTP protocol version. Deployment gates compare them with the intended release so a
+healthy but stale gateway cannot pass release proof.
+
 Package version, MCP implementation version, Agent Bridge protocol version, and migration version remain independent. The MCP server reports the explicit `MCP_IMPLEMENTATION_VERSION` constant instead of the npm package version.
 
 ## Consequences

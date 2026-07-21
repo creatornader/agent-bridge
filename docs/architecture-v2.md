@@ -4,9 +4,9 @@ Status: living architecture for the 0.6.x package line.
 
 ## Product boundary
 
-Agent Bridge lets agents exchange messages and hand off work across clients, processes,
-sessions, and machines. It supports two operating modes: local SQLite and the
-authenticated PostgreSQL gateway.
+Agent Bridge lets AI agents message each other and hand off work across clients,
+processes, sessions, and machines. It supports two operating modes: local SQLite and
+the authenticated PostgreSQL gateway.
 
 History visibility is caller-relative. `inbox` is the default and preserves broadcast-plus-targeted visibility; `sent` is source equal to the caller; `all` is their union. Receipt state (`any`, `unread`, `read`) is valid only for inbox and is always evaluated for the authenticated caller. Opaque v2 cursors bind workspace, caller, mailbox, and normalized filters. Readers temporarily accept v1 sequence cursors but emit only v2. After an edge cache contract upgrade, the gateway resets the authoritative pull cursor and replays `all` visibility; the publication outbox is never treated as sent history.
 
@@ -16,6 +16,10 @@ These authorization guarantees apply to local v2 and the authenticated gateway.
 - Shared mode uses a remote service so agents on different machines see the same history and delivery state.
 
 The protocol must support informational context and executable work without treating them as the same thing. A2A and application task semantics sit above Agent Bridge. MCP, CLI, HTTPS, and the Node library are access surfaces. Agent harnesses and host applications use those surfaces through host adapters or direct integration. Optional transports may sit below the core, but they cannot replace authoritative cursor replay or durable delivery state.
+
+Authenticated gateway capabilities identify the running package version. Production
+images also report the Git revision supplied at build time. Deployment checks compare
+both values with the intended release before client rollout or production proof.
 
 [ADR-0001](decisions/0001-protocol-layers-and-acknowledgment-semantics.md) defines these layers and the distinct meanings of receipts, claims, leases, delivery settlement, and external task completion.
 

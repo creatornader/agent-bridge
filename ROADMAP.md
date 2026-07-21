@@ -1,7 +1,8 @@
 # Agent Bridge roadmap
 
-Agent Bridge is working toward one specific role: durable messaging and work delivery
-between agent runtimes that do not share a process, vendor, session, or machine.
+Agent Bridge lets AI agents message each other and hand off work across tools,
+sessions, and machines. This roadmap tracks the reliability, compatibility, and
+operating work needed to make that simple promise hold under real failures.
 
 This roadmap separates released behavior from code that has not reached a public
 release. A merged implementation is not considered shipped until the package is
@@ -140,9 +141,19 @@ The published npm version is the authority for whether this package line has shi
 - Public package language leads with cross-tool, cross-session, and cross-machine
   messaging and work handoff.
 
+### 0.6.1 package contents
+
+- Authenticated gateway capabilities identify the running package version and Git
+  revision.
+- The Fly deployment procedure records the source revision in the image. A release
+  check compares the deployed version and revision with the intended release before
+  the production proof starts.
+- Public descriptions explain what an agent can do before introducing protocol and
+  storage terminology.
+
 ### Production validation and adoption
 
-Completed against the published 0.5.2 package:
+Completed through the published and deployed 0.6.0 package:
 
 - Migrated the project authority from the legacy Supabase schema to the canonical
   PostgreSQL schema after a write freeze, exact-major backup, and restore drill. The
@@ -158,24 +169,29 @@ Completed against the published 0.5.2 package:
   that host restarts.
 - Verified the published npm version, provenance, immutable GitHub release, package
   contents, and public repository metadata.
-- Ran the approval-protected production workflow with distinct sender and receiver
-  runners, an offline sender outbox, a real Fly machine cycle, and a fresh verifier
-  edge. The retained receipts prove replay, exact idempotency, claim, settlement, and
-  recovery after restart.
+- Ran the approval-protected production workflow on the canonical gateway with
+  distinct sender and receiver runners, an offline sender outbox, a real Fly machine
+  cycle, and a fresh verifier edge. The retained receipts prove replay, exact
+  idempotency, claim, settlement, and recovery after restart.
 - Took and verified a canonical native PostgreSQL backup after the proof. Removed the
   obsolete public v1 table and receipt function from the live database without changing
   the canonical PostgreSQL authority.
 - Moved the shared config to the gateway and rechecked the Codex, Claude Code, and
   Claude Desktop managed backends. All three passed active gateway diagnostics.
 
-Publication of 0.6.0 remains the release boundary for the package changes listed
-above.
+The production proof is repeatable release evidence, not a permanent certification.
+Every gateway release must match its package version and source revision before the
+workflow runs with disposable credentials.
 
 ## Near-term work
 
 ### Installation and operations
 
 - Publish a maintained client compatibility matrix.
+- Run dedicated Windows-host acceptance for native ACLs, SQLite sidecars, operation
+  journals, archive publication, and directory durability boundaries.
+- Fence independent PostgreSQL authorities so a restored clone cannot serve writes
+  while the original authority remains active.
 
 ### Storage lifecycle and observability
 

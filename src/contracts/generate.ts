@@ -173,6 +173,7 @@ const openapi = {
   openapi: "3.1.2",
   info: {
     title: "Agent Bridge Gateway",
+    description: "Let AI agents message each other and hand off work across tools, sessions, and machines.",
     version: PROTOCOL_VERSION,
     license: { name: "Apache-2.0", identifier: "Apache-2.0" },
   },

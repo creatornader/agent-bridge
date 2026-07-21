@@ -4,6 +4,22 @@ All notable changes to agent-bridge are documented in this file.
 
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and the project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.6.1] - 2026-07-21
+
+### Added
+
+- Report the running package version and image Git revision through authenticated
+  gateway capabilities.
+- Add a release check that compares the live gateway with the intended version and
+  revision before the production proof starts.
+
+### Changed
+
+- Describe Agent Bridge first as a way for AI agents to message each other and hand
+  off work across tools, sessions, and machines. Keep mailbox and provider terms in
+  the technical sections where they explain behavior.
+- Record the source revision in production image builds and labels.
+
 ## [0.6.0] - 2026-07-21
 
 ### Added

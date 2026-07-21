@@ -44,6 +44,14 @@ jobs:
           cache: npm
       - run: npm ci
       - run: npm run build
+      - name: Verify the deployed package and source revision
+        env:
+          AGENT_BRIDGE_URL: ${{ inputs.gateway_origin }}
+          AGENT_BRIDGE_TOKEN: ${{ secrets.PROOF_SENDER_TOKEN }}
+        run: >-
+          npm run verify:gateway:release --
+          --version "$(node -p "require('./package.json').version")"
+          --revision "$GITHUB_SHA"
       - name: Queue offline publication and synchronize its idempotency key
         env:
           AGENT_BRIDGE_TOKEN: ${{ secrets.PROOF_SENDER_TOKEN }}

@@ -2,6 +2,7 @@
   "openapi": "3.1.2",
   "info": {
     "title": "Agent Bridge Gateway",
+    "description": "Let AI agents message each other and hand off work across tools, sessions, and machines.",
     "version": "2.1",
     "license": {
       "name": "Apache-2.0",
@@ -346,6 +347,13 @@
                         "local",
                         "gateway"
                       ]
+                    },
+                    "implementationVersion": {
+                      "type": "string"
+                    },
+                    "implementationRevision": {
+                      "type": "string",
+                      "pattern": "^[0-9a-f]{7,40}$"
                     },
                     "grantedScopes": {
                       "type": "array",

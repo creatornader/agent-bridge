@@ -1,7 +1,7 @@
 # Agent Bridge in the agent ecosystem
 
-Agent Bridge lets agents exchange messages and hand off work across tools, sessions,
-and machines. It preserves each inbox through disconnections and restarts. It stores
+Agent Bridge lets AI agents message each other and hand off work across tools,
+sessions, and machines. Messages wait through disconnections and restarts. It stores
 immutable messages, read receipts, delivery claims, leases, retries, and replay state.
 It does not own the full agent stack.
 
