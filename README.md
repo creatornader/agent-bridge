@@ -80,11 +80,17 @@ AGENT_BRIDGE_DATABASE_URL="..." npm run preflight:postgres:production -- --json 
 
 The command checks the PostgreSQL major, database and role authority, existing
 migration ledger, derived-role collisions, and the legacy `shared_context` import
-shape inside a read-only transaction. It does not print the connection URL or apply
-DDL. `--require-ssl` rejects an unencrypted public database connection. Passing the
-preflight does not replace a backup or authorize migration. When a session pooler
-terminates TLS, the check inspects the client socket instead of the pooler's separate
-database connection.
+shape inside a read-only transaction. `authority.roles` reports migration capability:
+the schema owner may be a true superuser or a managed-provider administrator with
+`CREATEROLE`. `authority.native_dr` reports source-backup capability. The source normally
+connects as the schema owner, which must be a true superuser or hold `BYPASSRLS`, so
+`CREATEROLE` alone can run migrations but cannot create a native backup. A restore target
+uses its superuser session to validate a suspended restored schema-owner shell. The
+migration suite tests both authority forms on PostgreSQL 15 through
+18. The command does not print the connection URL or apply DDL. `--require-ssl` rejects
+an unencrypted public database connection. Passing the preflight does not replace a
+backup or authorize migration. When a session pooler terminates TLS, the check inspects
+the client socket instead of the pooler's separate database connection.
 
 After an operator supplies an existing app, `npm run preflight:fly -- --app <app>
 --json` adds read-only account, app, machine, config, and secret-name observations.
@@ -403,10 +409,15 @@ PostgreSQL restore executes SQL from the dump, so use `--accept-source-sql-risk`
 for a bundle from a source you trust. The target must be a dedicated fresh database
 with the same database name and PostgreSQL major as the backup. Restore requires a
 superuser because it recreates object owners, role shells, memberships, and default
-privileges. It never enables login on restored external principals. If a restore fails
-after mutation begins, Agent Bridge disables new target connections and reports any
-residual roles or recovery paths. Inspect and clean those artifacts before retrying.
-Never run the source and restored target as active authorities at the same time.
+privileges. It never enables login on restored external principals. Runtime principals
+lose their runtime membership. Active control and archive registrations receive a new
+revocation event, and their principals lose those memberships. Re-enable a principal
+and register it again only after inspecting the restored target. A restore may reuse a
+preexisting role only when it is the source schema owner, the target session user, and
+a true superuser. Every other role collision fails. If a restore fails after mutation
+begins, Agent Bridge disables new target connections and reports any residual roles or
+recovery paths. Inspect and clean those artifacts before retrying. Never run the source
+and restored target as active authorities at the same time.
 
 Backup publication never replaces an existing output. Deterministic adjacent staging
 paths use the backup or request UUID. A retry with the same UUID reports retained
@@ -824,9 +835,18 @@ followed by capability locks in operator-before-auditor order. Registration and
 revocation use the same order. A stale session that remains in a revoked role cannot
 continue operating. The schema owner is the only bootstrap holder of all three control
 roles and the only role with ordinary execution authority on the registration
-functions. PostgreSQL superusers remain inside this trusted database-administration
-boundary. Readiness checks the running PostgreSQL major on every call, so upgrading an
-already-migrated database to an uncertified major disables the runtime.
+functions. PostgreSQL 16 and newer may represent its effective admin, inherit, and set
+authority with a bootstrap administrator row plus a schema-owner row. A native DR
+restore may recreate the same authority as one combined bootstrap-superuser grant.
+Readiness validates either physical form and its effective authority. True superusers
+and managed-provider schema owners remain inside this trusted database-administration
+boundary. A separate `NOLOGIN` backup-reader role grants only table and sequence read
+access to the schema owner. Runtime, control, archive, and external principals cannot
+inherit it. Native backups require the schema owner to be a true superuser or hold
+`BYPASSRLS`. A target restore superuser can validate the intentionally suspended
+schema-owner shell. `CREATEROLE` alone remains sufficient for migrations. Readiness checks the
+running PostgreSQL major on every call, so upgrading an already-migrated database to an
+uncertified major disables the runtime.
 
 Direct credential inserts default to empty scopes rather than full access. Issued
 identity, scope, label, expiry, and lineage fields cannot be edited directly. Existing

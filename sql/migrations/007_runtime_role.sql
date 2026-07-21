@@ -12,10 +12,14 @@ begin
       role_name
     );
   end if;
-  execute format(
-    'alter role %I nologin nosuperuser nocreatedb nocreaterole noreplication nobypassrls',
-    role_name
-  );
+  if exists (
+    select 1 from pg_roles where rolname=role_name and (
+      rolcanlogin or not rolinherit or rolsuper or rolcreatedb or rolcreaterole
+      or rolreplication or rolbypassrls or rolconnlimit<>-1
+    )
+  ) then
+    raise exception 'Agent Bridge runtime role has unsafe attributes';
+  end if;
   execute format('revoke all on schema agent_bridge from %I', role_name);
   execute format('revoke all on all tables in schema agent_bridge from %I', role_name);
   execute format('revoke all on all sequences in schema agent_bridge from %I', role_name);

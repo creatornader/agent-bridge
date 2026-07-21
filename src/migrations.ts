@@ -211,6 +211,25 @@ export interface MigrationPlanEntry extends AppliedMigration {
   source: string;
 }
 
+const RELEASED_MIGRATION_CHECKSUMS = new Map<string, ReadonlySet<string>>([
+  ["7_runtime_role", new Set(["70cca251f736c5e5a9835d5b80645e8816131767127a11a5daa9281bd38004fc"])],
+  ["13_row_isolation", new Set(["52ed880fe6df145181f102421be8a757731713a561acfcc98acdbbca12dcf8e4"])],
+  ["14_owner_control_plane", new Set(["7249901ab5db665fa36d6854202c9db4339f6b989a7c5b8c46b3819c5ab54353"])],
+  ["15_portable_archives", new Set(["b019bbd9b6cfbdc0501d2cb78541de04001cde47c55fd7e011e1f88bd072460d"])],
+  ["16_native_dr_fence", new Set(["801edad796813320bfd5d194abf35c108ab51380027af4f160b7a14a4fc79e11"])],
+  ["18_endpoint_migration_challenges", new Set(["353285c04d8c4287dea75b30779c26f0e38e8572618403c4ed8f8a346eed0c97"])],
+  ["19_endpoint_migration_same_successor", new Set(["feb805b9ba00f82e303a294ec26e3a7ae0f587438e5138f3ead6ad84f54bee5f"])],
+]);
+
+export function migrationRecordMatches(
+  recorded: Pick<AppliedMigration, "version" | "name" | "checksum">,
+  required: Pick<AppliedMigration, "version" | "name" | "checksum">,
+): boolean {
+  if (recorded.version !== required.version || recorded.name !== required.name) return false;
+  if (recorded.checksum === required.checksum) return true;
+  return RELEASED_MIGRATION_CHECKSUMS.get(`${required.version}_${required.name}`)?.has(recorded.checksum) === true;
+}
+
 export const REQUIRED_MIGRATIONS = [
   { version: 1, name: "schema_state" },
   { version: 2, name: "workspaces_agents_credentials" },
@@ -231,6 +250,8 @@ export const REQUIRED_MIGRATIONS = [
   { version: 17, name: "gateway_authority_binding" },
   { version: 18, name: "endpoint_migration_challenges" },
   { version: 19, name: "endpoint_migration_same_successor" },
+  { version: 20, name: "managed_authority_compat" },
+  { version: 21, name: "native_backup_reader" },
 ] as const;
 
 function withNativeDrSharedLock(source: string): string {
@@ -291,10 +312,7 @@ export async function migrationsReady(
 ): Promise<boolean> {
   const applied = await recordedMigrations(db);
   return expected.every(
-    (required, index) =>
-      applied[index]?.version === required.version &&
-      applied[index]?.name === required.name &&
-      applied[index]?.checksum === required.checksum,
+    (required, index) => applied[index] !== undefined && migrationRecordMatches(applied[index], required),
   ) && applied.length === expected.length;
 }
 
@@ -315,7 +333,8 @@ export async function rowIsolationReady(db: PgQueryable, allowPrivilegedCaller: 
         ('agent_bridge_runtime_' || substr(md5(current_database()),1,16))::name AS runtime_role,
         ('agent_bridge_data_owner_' || substr(md5(current_database()),1,16))::name AS data_owner,
         ('agent_bridge_context_reader_' || substr(md5(current_database()),1,16))::name AS context_reader,
-        ('agent_bridge_event_writer_' || substr(md5(current_database()),1,16))::name AS event_writer
+        ('agent_bridge_event_writer_' || substr(md5(current_database()),1,16))::name AS event_writer,
+        (SELECT nspowner FROM pg_namespace WHERE nspname='agent_bridge') AS schema_owner
     ), required_roles(role_name) AS (
       SELECT runtime_role FROM names UNION ALL SELECT data_owner FROM names
       UNION ALL SELECT context_reader FROM names UNION ALL SELECT event_writer FROM names
@@ -323,6 +342,18 @@ export async function rowIsolationReady(db: PgQueryable, allowPrivilegedCaller: 
       VALUES ('messages'),('receipts'),('deliveries'),('delivery_events'),('agent_instances')
     ), caller_role AS (
       SELECT * FROM pg_roles WHERE rolname=current_user
+    ), runtime_membership AS (
+      SELECT count(*)=1 AND bool_and(
+        NOT membership.admin_option
+        AND coalesce((to_jsonb(membership)->>'inherit_option')::boolean,true)
+        AND coalesce((to_jsonb(membership)->>'set_option')::boolean,true)
+        AND membership.grantor=(SELECT schema_owner FROM names)
+      ) AS ready
+      FROM pg_auth_members membership
+      JOIN pg_roles granted ON granted.oid=membership.roleid
+      JOIN pg_roles member ON member.oid=membership.member
+      WHERE member.rolname=current_user
+        AND granted.rolname=(SELECT runtime_role::text FROM names)
     ), expected_policies(table_name,policy_name,command_name,role_name,needs_workspace,needs_principal) AS (
       SELECT 'messages','messages_owner_all','*',data_owner::text,false,false FROM names UNION ALL
       SELECT 'messages','messages_runtime_select','r',runtime_role::text,true,true FROM names UNION ALL
@@ -366,7 +397,7 @@ export async function rowIsolationReady(db: PgQueryable, allowPrivilegedCaller: 
         (SELECT rolcanlogin AND rolinherit AND NOT rolsuper AND NOT rolcreatedb
            AND NOT rolcreaterole AND NOT rolreplication AND NOT rolbypassrls
          FROM caller_role)
-        AND pg_has_role(current_user,(SELECT runtime_role FROM names),'MEMBER')
+        AND (SELECT ready FROM runtime_membership)
         AND NOT EXISTS (
           SELECT 1 FROM pg_roles unexpected
           WHERE unexpected.oid<>(SELECT oid FROM caller_role)
@@ -588,7 +619,7 @@ export async function rowIsolationReady(db: PgQueryable, allowPrivilegedCaller: 
   );
 }
 
-export async function runtimeSchemaReady(
+async function inspectRuntimeSchemaReady(
   db: PgQueryable,
   options: { allowPrivilegedCaller?: boolean } = {},
 ): Promise<boolean> {
@@ -872,25 +903,32 @@ export async function runtimeSchemaReady(
   `);
   const endpoint = endpointChallenge.rows[0];
   if (!endpoint?.tables || !endpoint.functions || !endpoint.grants || !endpoint.marker) return false;
+  const security = await db.query<{ ready: boolean }>(
+    "SELECT agent_bridge.security_schema_ready() AS ready",
+  );
+  const ownerControl = await db.query<{ ready: boolean }>(
+    "SELECT agent_bridge.owner_control_plane_ready() AS ready",
+  );
+  const portableArchive = await db.query<{ ready: boolean }>(
+    "SELECT agent_bridge.portable_archive_ready() AS ready",
+  );
+  const gatewayAuthority = await db.query<{ ready: boolean }>(
+    "SELECT agent_bridge.gateway_authority_ready() AS ready",
+  );
+  return security.rows[0]?.ready === true && ownerControl.rows[0]?.ready === true &&
+    portableArchive.rows[0]?.ready === true && gatewayAuthority.rows[0]?.ready === true &&
+    await rowIsolationReady(
+    db,
+    options.allowPrivilegedCaller === true,
+  );
+}
+
+export async function runtimeSchemaReady(
+  db: PgQueryable,
+  options: { allowPrivilegedCaller?: boolean } = {},
+): Promise<boolean> {
   try {
-    const security = await db.query<{ ready: boolean }>(
-      "SELECT agent_bridge.security_schema_ready() AS ready",
-    );
-    const ownerControl = await db.query<{ ready: boolean }>(
-      "SELECT agent_bridge.owner_control_plane_ready() AS ready",
-    );
-    const portableArchive = await db.query<{ ready: boolean }>(
-      "SELECT agent_bridge.portable_archive_ready() AS ready",
-    );
-    const gatewayAuthority = await db.query<{ ready: boolean }>(
-      "SELECT agent_bridge.gateway_authority_ready() AS ready",
-    );
-    return security.rows[0]?.ready === true && ownerControl.rows[0]?.ready === true &&
-      portableArchive.rows[0]?.ready === true && gatewayAuthority.rows[0]?.ready === true &&
-      await rowIsolationReady(
-      db,
-      options.allowPrivilegedCaller === true,
-    );
+    return await inspectRuntimeSchemaReady(db, options);
   } catch {
     return false;
   }
@@ -906,7 +944,7 @@ export async function runMigrations(
     const applied = await recordedMigrations(db);
     const recorded = applied.find((entry) => entry.version === migration.version);
     if (recorded) {
-      if (recorded.name !== migration.name || recorded.checksum !== migration.checksum) {
+      if (!migrationRecordMatches(recorded, migration)) {
         throw new Error(`migration ${migration.version}_${migration.name} conflicts with schema state`);
       }
       continue;

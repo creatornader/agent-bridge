@@ -6,12 +6,31 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and 
 
 ## [Unreleased]
 
+## [0.5.0] - 2026-07-20
+
 ### Added
+
+- Add migration 020 to converge databases released through migration 019 on the managed-authority
+  function and attestation contract. Migration readiness accepts only the exact
+  released checksums or the current checksums for changed migrations, so existing
+  databases can advance without allowing arbitrary ledger drift.
+
+- Add migration 021 with an attested, database-derived backup-reader role. The role is
+  `NOLOGIN`, receives read-only access to Agent Bridge tables and sequences, and is
+  granted only to the schema owner so managed PostgreSQL can produce complete native
+  backups without exposing backup access to runtime or control principals. Migrations
+  accept `CREATEROLE`, while source native backups require a true superuser or
+  `BYPASSRLS`. A restore target superuser can validate a suspended restored schema owner.
+
+- Add a PostgreSQL 15 through 18 integration path that applies every migration as a
+  non-superuser with `CREATEROLE` and `BYPASSRLS`, matching the authority available on
+  managed providers such as Supabase.
 
 - Add a read-only production PostgreSQL preflight. It rejects unsupported server
   majors, insufficient migration authority, migration-ledger drift, derived-role
   collisions, and incompatible legacy import tables before any schema change runs.
-  Reports omit connection URLs and database identities.
+  It reports migration authority separately from native DR authority. Reports omit
+  connection URLs and database identities.
 
 - Add a manual production proof workflow for an existing Agent Bridge gateway. It
   uses separate sender, receiver, Fly machine-cycle, and verifier jobs behind the
@@ -30,6 +49,23 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and 
   bootstrap, secret changes, deployment, and cross-machine proof behind operator gates.
 
 ### Fixed
+
+- Support managed PostgreSQL role administration without restating protected role
+  attributes. PostgreSQL 16 and newer may split one schema-owner membership across an
+  administrator grant and a separate inherit-and-set grant. Readiness and native DR
+  now validate and preserve the effective authority while rejecting unexpected grant
+  shapes. Ownership transfers receive schema `CREATE` only for the transaction that
+  needs it, and runtime bootstrap verifies an existing login before changing its
+  password or membership.
+
+- Make runtime bootstrap transactional and reject derived authority names, object
+  owners, unexpected memberships, and reverse membership edges before changing an
+  existing login.
+
+- Suspend restored runtime, control, and archive principals as `NOLOGIN` roles without
+  authority memberships. Control and archive registration histories receive explicit
+  revocation events. Restore may reuse one preexisting role only when it is the source
+  schema owner, the target session user, and a true superuser.
 
 - Resolve the Fly Dockerfile from the deployment config directory and reject missing
   configured build files during the production preflight.
@@ -319,7 +355,8 @@ First tagged release. Marks the point where agent-bridge has shipped its initial
 - Narrative-leak detection in CI + on commit via `creatornader/textleaks@v0.2.0` (renamed from leakguard).
 
 [0.1.0]: https://github.com/creatornader/agent-bridge/releases/tag/v0.1.0
-[Unreleased]: https://github.com/creatornader/agent-bridge/compare/v0.4.0...HEAD
+[Unreleased]: https://github.com/creatornader/agent-bridge/compare/v0.5.0...HEAD
+[0.5.0]: https://github.com/creatornader/agent-bridge/compare/v0.4.0...v0.5.0
 [0.4.0]: https://github.com/creatornader/agent-bridge/compare/v0.3.1...v0.4.0
 [0.3.1]: https://github.com/creatornader/agent-bridge/compare/v0.3.0...v0.3.1
 [0.3.0]: https://github.com/creatornader/agent-bridge/compare/v0.2.0...v0.3.0

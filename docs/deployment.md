@@ -119,6 +119,26 @@ Keep these authorities separate:
 | Archive operator | Portable PostgreSQL archive operations | Never |
 | Backup and restore | Native DR backup or restore | Never |
 
+The schema owner may be a true PostgreSQL superuser or a managed-provider
+administrator with `CREATEROLE` and the database privileges reported by the production
+preflight. `CREATEROLE` is sufficient for migrations. Native backup requires the
+schema owner to be a true superuser or hold `BYPASSRLS`. A restore target validates the
+intentionally suspended restored schema-owner shell through its superuser session. Migrations create internal
+roles with safe defaults and reject unsafe preexisting roles instead of trying to demote
+them. PostgreSQL 16 and newer may store the schema owner's effective admin, inherit,
+and set authority in two physical grant rows. A native DR restore may recreate it as one
+combined bootstrap-superuser grant. Agent Bridge validates both forms and their
+effective authority. The restricted runtime login must never receive either schema-owner
+authority or `BYPASSRLS`.
+
+Migration 021 creates a database-derived `NOLOGIN` backup-reader role. It receives
+`SELECT` on Agent Bridge tables and sequences and is granted only to the schema owner.
+This lets a managed schema owner retain `BYPASSRLS` while producing a complete native
+backup. Do not grant the reader to the runtime login, control members, archive members,
+or another external principal. Native backup and restore require this attestation.
+Gateway runtime readiness does not, so an owner-only backup fault cannot stop normal
+gateway traffic.
+
 Use the platform's secret manager or private mounted secret files. Do not put raw
 passwords, tokens, or complete database URLs in image layers, source control, command
 arguments, deployment logs, or shared client config. Rotate each authority on its own
@@ -174,18 +194,25 @@ repository does not perform them:
    ```
 
    The command opens a read-only transaction and reports only nonsecret capability
-   and schema facts. It checks supported server majors, migration-role authority,
-   migration-ledger drift, derived-role collisions, and the legacy import shape.
-   `--require-ssl` is required for a public database endpoint. The preflight cannot
-   prove that later DDL will succeed. For a session pooler, it checks the client TLS
-   socket because PostgreSQL reports the pooler's separate database connection.
+   and schema facts. `authority.roles` reports migration authority. `authority.native_dr`
+   reports whether the source schema owner is a true superuser or has `BYPASSRLS`. A
+   `CREATEROLE` role can pass the migration check while failing the native DR check.
+   The command also checks supported server majors, migration-ledger drift, derived-role
+   collisions, and the legacy import shape. The PostgreSQL 15 through 18 test matrix
+   separately applies the full migration plan as both a superuser and a
+   managed-provider-style `CREATEROLE` administrator. `--require-ssl` is required for a
+   public database endpoint. The preflight cannot prove that later DDL will succeed. For
+   a session pooler, it checks the client TLS socket because PostgreSQL reports the
+   pooler's separate database connection.
 3. Take and verify a native DR backup when upgrading an existing authority.
 4. Run `agent-bridge migrate` once in an isolated job with
    `AGENT_BRIDGE_DATABASE_URL`. Drain old gateways first when the migration notes
    require it.
 5. Run [`deploy/bootstrap-runtime.sql`](../deploy/bootstrap-runtime.sql) through a
    separate trusted PostgreSQL session. Supply the schema-owner connection and the
-   runtime password to that job only.
+   runtime password to that job only. The bootstrap is transactional and changes an
+   existing login only when its attributes, ownership, and membership graph already
+   match the recorded runtime contract. It never adopts a restored `NOLOGIN` shell.
 6. Construct the restricted runtime URL, set only
    `AGENT_BRIDGE_RUNTIME_DATABASE_URL` on the Fly app, and run the app-aware read-only
    preflight.
