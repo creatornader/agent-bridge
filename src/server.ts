@@ -6,13 +6,10 @@ import {
   ListToolsRequestSchema,
   McpError,
 } from "@modelcontextprotocol/sdk/types.js";
-import { homedir } from "node:os";
-import { join } from "node:path";
 
 import { normalizeReceiptId } from "./atrib-receipt.js";
 import {
   buildMessageEnvelope,
-  filterContextRows,
   mergeEnvelopeMetadata,
 } from "./message-envelope.js";
 import { resolveAgentIdentity, resolvePostSource } from "./source-identity.js";
@@ -28,7 +25,6 @@ import {
 import { createStore } from "./client-runtime.js";
 import { legacyContextMetadata, legacyNumericMessageId } from "./legacy-compat.js";
 import {
-  readClientConfigFile,
   resolveClientConfig,
   type ClientConfig,
   type ClientEnvironment,
@@ -43,8 +39,6 @@ import {
 } from "./contracts/registry.js";
 
 export interface AgentBridgeServerConfig {
-  supabaseUrl?: string;
-  supabaseKey?: string;
   agent?: string;
   provider?: ClientProvider;
   workspace?: string;
@@ -71,111 +65,35 @@ export interface AgentBridgeServerEnv {
   AGENT_BRIDGE_DB?: string;
 }
 
-function normalizedConfigValue(value: string | undefined): string | undefined {
-  const trimmed = value?.trim();
-  return trimmed || undefined;
-}
-
-function defaultConfigPath(env: AgentBridgeServerEnv): string {
-  return (
-    normalizedConfigValue(env.AGENT_BRIDGE_CONFIG) ??
-    join(normalizedConfigValue(env.HOME) ?? homedir(), ".agent-bridge", "config")
-  );
-}
-
 export function configFromEnv(
   env: AgentBridgeServerEnv = process.env,
 ): AgentBridgeServerConfig {
-  const sharedFile = readClientConfigFile(defaultConfigPath(env));
-  const value = (key: keyof AgentBridgeServerEnv) =>
-    normalizedConfigValue(env[key]) ?? normalizedConfigValue(sharedFile[key]);
-  const runtimeAgent = normalizedConfigValue(env.AGENT_BRIDGE_AGENT);
-  const rawProvider = normalizedConfigValue(env.AGENT_BRIDGE_PROVIDER) ??
-    normalizedConfigValue(sharedFile.AGENT_BRIDGE_PROVIDER);
-  const provider = rawProvider === "legacy" || rawProvider === "supabase"
-    ? "legacy-supabase"
-    : rawProvider ?? (value("AGENT_BRIDGE_TOKEN") ? "gateway" : "legacy-supabase");
-  if (!(["local", "gateway", "legacy-supabase"] as string[]).includes(provider)) {
-    throw new Error(`Unsupported AGENT_BRIDGE_PROVIDER: ${rawProvider}`);
-  }
-  if (provider === "local" || provider === "gateway") {
-    const client = resolveClientConfig(env as ClientEnvironment);
-    return {
-      provider: client.provider,
-      agent: client.principal.agent,
-      workspace: client.principal.workspace,
-      instance: client.principal.instance,
-      databasePath: client.databasePath,
-      edgeDatabasePath: client.edgeDatabasePath,
-      cursorPath: client.cursorPath,
-      gatewayUrl: client.provider === "gateway" ? client.url : undefined,
-      gatewayToken: client.provider === "gateway" ? client.credential : undefined,
-    };
-  }
-  const supabaseUrl =
-    value("AGENT_BRIDGE_URL");
-  const supabaseKey =
-    value("AGENT_BRIDGE_KEY");
-  if (!supabaseUrl || !supabaseKey) {
-    throw new Error(
-      "Missing AGENT_BRIDGE_URL or AGENT_BRIDGE_KEY environment variables or ~/.agent-bridge/config",
-    );
-  }
+  const client = resolveClientConfig(env as ClientEnvironment);
   return {
-    supabaseUrl,
-    supabaseKey,
-    agent: runtimeAgent,
-    provider: provider as ClientProvider,
-    workspace: value("AGENT_BRIDGE_WORKSPACE") ?? "*",
-    instance: normalizedConfigValue(env.AGENT_BRIDGE_INSTANCE),
-  };
-}
-
-function buildSupabaseRequest(config: AgentBridgeServerConfig & { supabaseUrl: string; supabaseKey: string }) {
-  const parsed = new URL(config.supabaseUrl);
-  const loopback = parsed.hostname === "localhost" || parsed.hostname === "127.0.0.1" || parsed.hostname === "[::1]";
-  if (parsed.protocol !== "https:" && !(parsed.protocol === "http:" && loopback)) {
-    throw new Error("Agent Bridge requires HTTPS for non-loopback legacy providers");
-  }
-  const restUrl = `${config.supabaseUrl.replace(/\/$/, "")}/rest/v1`;
-  const headers = {
-    apikey: config.supabaseKey,
-    Authorization: `Bearer ${config.supabaseKey}`,
-    "Content-Type": "application/json",
-    Prefer: "return=representation",
-  };
-
-  return async function supabaseRequest(
-    path: string,
-    options: RequestInit = {},
-  ): Promise<unknown> {
-    const url = `${restUrl}${path}`;
-    const res = await fetch(url, {
-      ...options,
-      signal: options.signal ?? AbortSignal.timeout(10_000),
-      headers: { ...headers, ...(options.headers as Record<string, string>) },
-    });
-    if (!res.ok) {
-      throw new Error(`Supabase request failed (${res.status})`);
-    }
-    const text = await res.text();
-    return text ? JSON.parse(text) : null;
+    provider: client.provider,
+    agent: client.principal.agent,
+    workspace: client.principal.workspace,
+    instance: client.principal.instance,
+    databasePath: client.databasePath,
+    edgeDatabasePath: client.edgeDatabasePath,
+    cursorPath: client.cursorPath,
+    gatewayUrl: client.provider === "gateway" ? client.url : undefined,
+    gatewayToken: client.provider === "gateway" ? client.credential : undefined,
   };
 }
 
 export function createAgentBridgeServer(
   config: AgentBridgeServerConfig,
 ): Server {
-  const supabaseRequest = config.supabaseUrl && config.supabaseKey ? buildSupabaseRequest(config as AgentBridgeServerConfig & { supabaseUrl: string; supabaseKey: string }) : undefined;
-  const provider = config.provider ?? (config.gatewayToken ? "gateway" : config.supabaseUrl ? "legacy-supabase" : "local");
+  const provider = config.provider ?? (config.gatewayToken ? "gateway" : "local");
   const principal: BridgePrincipal | undefined = config.agent ? {
-    workspace: provider === "legacy-supabase" ? "*" : config.workspace ?? "default",
+    workspace: config.workspace ?? "default",
     agent: config.agent,
     instance: config.instance,
   } : undefined;
   const clientConfig: ClientConfig | undefined = principal ? {
     provider, principal,
-    url: config.gatewayUrl ?? config.supabaseUrl, credential: config.gatewayToken ?? config.supabaseKey,
+    url: config.gatewayUrl, credential: config.gatewayToken,
     databasePath: config.databasePath ?? ":memory:", edgeDatabasePath: config.edgeDatabasePath ?? config.databasePath ?? ":memory:", cursorPath: config.cursorPath ?? "", configPath: "",
   } : undefined;
   const store = clientConfig ? createStore(clientConfig) : undefined;
@@ -436,38 +354,13 @@ export function createAgentBridgeServer(
           informedBy: Array.isArray(args?.informed_by) ? args.informed_by.map(String) : [],
           metadata: mergeEnvelopeMetadata(args?.metadata, envelope) as MessageDraft["metadata"],
         });
-        const body: Record<string, unknown> = {
-          source,
-          category: draft.type,
-          content: draft.content,
-          priority: draft.priority,
-          project: draft.project ?? null,
-          metadata: draft.metadata,
-        };
-        // Optional cross-tool causal anchor; written when an atrib-signing
-        // wrapper signs this call before forwarding. Format-validated so
-        // unexpected producers cannot pollute the column with garbage.
-        if (receiptId) {
-          body.atrib_receipt_id = receiptId;
-        }
-        if (!supabaseRequest) {
-          if (!service || !principal) throw new McpError(ErrorCode.InternalError, "bridge provider is not configured");
-          const result = await service.publish(principal, draft);
-          return { content: [{ type: "text", text: JSON.stringify(result) }], structuredContent: result as unknown as Record<string, unknown> };
-        }
-        if (!supabaseRequest) throw new McpError(ErrorCode.InternalError, "bridge provider is not configured");
-        const data = await supabaseRequest("/shared_context", {
-          method: "POST",
-          body: JSON.stringify(body),
-        });
-        return {
-          content: [{ type: "text", text: JSON.stringify(data, null, 2) }],
-        };
+        if (!service || !principal) throw new McpError(ErrorCode.InternalError, "bridge provider is not configured");
+        const result = await service.publish(principal, draft);
+        return { content: [{ type: "text", text: JSON.stringify(result) }], structuredContent: result as unknown as Record<string, unknown> };
       }
 
       case "get_context": {
         const project = validateProject(args?.project);
-        const contextArgs = { ...(args ?? {}), project };
         const rawLimit = args?.limit;
         if (
           rawLimit !== undefined &&
@@ -497,9 +390,7 @@ export function createAgentBridgeServer(
           const entries = result.messages
             .slice(0, requestedLimit)
             .map((message) => ({
-              id: clientConfig?.provider === "legacy-supabase" && /^\d+$/.test(message.sequence)
-                ? Number.isSafeInteger(Number(message.sequence)) ? Number(message.sequence) : message.sequence
-                : message.id,
+              id: message.id,
               source: message.source,
               category: message.type,
               content: message.content,
@@ -536,43 +427,7 @@ export function createAgentBridgeServer(
             structuredContent: { entries, ...cacheMetadata },
           };
         }
-        const hasEnvelopeFilter = Boolean(
-          args?.target_agent || args?.thread_id || args?.kind,
-        );
-        const fetchLimit = hasEnvelopeFilter
-          ? Math.min(Math.max(requestedLimit * 5, 50), 200)
-          : requestedLimit;
-        const params: string[] = [
-          "order=created_at.desc",
-          `limit=${fetchLimit}`,
-        ];
-        if (args?.since)
-          params.push(
-            `created_at=gte.${encodeURIComponent(String(args.since))}`,
-          );
-        if (args?.source)
-          params.push(`source=eq.${encodeURIComponent(String(args.source))}`);
-        if (args?.category)
-          params.push(
-            `category=eq.${encodeURIComponent(String(args.category))}`,
-          );
-        if (project)
-          params.push(`project=eq.${encodeURIComponent(project)}`);
-        const unackedBy = args?.unacked_by ?? config.agent;
-        if (unackedBy)
-          params.push(
-            `acked_by=not.cs.%7B${encodeURIComponent(String(unackedBy))}%7D`,
-          );
-
-        if (!supabaseRequest) throw new McpError(ErrorCode.InternalError, "bridge provider is not configured");
-        const data = await supabaseRequest(
-          `/shared_context?${params.join("&")}`,
-        );
-        const filtered = filterContextRows(data, contextArgs, requestedLimit);
-        return {
-          content: [{ type: "text", text: JSON.stringify(filtered, null, 2) }],
-          structuredContent: { entries: filtered },
-        };
+        throw new McpError(ErrorCode.InternalError, "bridge provider is not configured");
       }
 
       case "ack_context": {
@@ -594,29 +449,13 @@ export function createAgentBridgeServer(
         }
         if (service && principal) {
           if (!service || !principal) throw new McpError(ErrorCode.InternalError, "bridge provider is not configured");
-          const rawIds = ids.map(String);
-          const acknowledged = clientConfig?.provider === "legacy-supabase" &&
-              store?.recordLegacyReceipt && rawIds.every((id) => /^\d+$/.test(id))
-            ? await store.recordLegacyReceipt(rawIds, principal.agent)
-            : await service.acknowledge(
-                principal,
-                ids.map((id) => legacyNumericMessageId(id as string | number)),
-              );
+          const acknowledged = await service.acknowledge(
+            principal,
+            ids.map((id) => legacyNumericMessageId(id as string | number)),
+          );
           return { content: [{ type: "text", text: JSON.stringify({ acknowledged, agent }) }], structuredContent: { acknowledged, agent } };
         }
-        if (!supabaseRequest) throw new McpError(ErrorCode.InternalError, "bridge provider is not configured");
-        const data = await supabaseRequest("/rpc/ack_context", {
-          method: "POST",
-          body: JSON.stringify({ entry_ids: ids.map(String), agent_name: agent }),
-        });
-        return {
-          content: [
-            {
-              type: "text",
-              text: JSON.stringify({ acknowledged: data, agent }),
-            },
-          ],
-        };
+        throw new McpError(ErrorCode.InternalError, "bridge provider is not configured");
       }
 
       case "send": {

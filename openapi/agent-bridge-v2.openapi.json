@@ -331,8 +331,7 @@
                       "enum": [
                         "scoped-credential",
                         "credential-wide",
-                        "process-identity",
-                        "legacy-key"
+                        "process-identity"
                       ]
                     },
                     "surface": {
@@ -345,8 +344,7 @@
                     "provider": {
                       "enum": [
                         "local",
-                        "gateway",
-                        "legacy-supabase"
+                        "gateway"
                       ]
                     },
                     "grantedScopes": {
@@ -849,8 +847,7 @@
                     "schemaVersion": {
                       "enum": [
                         "local-v2",
-                        "postgres-v2",
-                        "legacy-v1"
+                        "postgres-v2"
                       ]
                     },
                     "deliverySupported": {

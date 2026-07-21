@@ -81,6 +81,21 @@ Queued sends retain their idempotency keys. Long-lived MCP clients retry them, a
 `agent-bridge sync` triggers the same bounded replay manually. Claims, lease changes,
 delivery settlement, presence, and read-receipt writes still require the gateway.
 
+## Legacy Supabase provider was removed
+
+Agent Bridge 0.6.0 rejects `legacy`, `supabase`, `legacy-supabase`, and key-only
+configurations. These names selected the direct PostgREST adapter in older releases.
+Choose local mode for one machine or create a principal-bound gateway backend:
+
+```bash
+agent-bridge init --provider local
+```
+
+Do not point new clients at `public.shared_context`. If the old table still contains
+data that has not been migrated, preserve it and follow the historical import and
+reconciliation steps in the
+[README](../README.md#upgrading-historical-supabase-deployments).
+
 ## Migration gate reported by status or doctor
 
 `clients migrate stage` does not begin a drain. `clients migrate cutover

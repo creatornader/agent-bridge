@@ -12,7 +12,6 @@ import { loadMigrationPlan, runMigrations } from "./migrations.js";
 import { reconcileLegacyProjects } from "./legacy-project-reconciliation.js";
 import { legacyContextMetadata, legacyNumericMessageId } from "./legacy-compat.js";
 import { BridgeHttpError } from "./http-bridge-store.js";
-import { LegacySupabaseError } from "./legacy-supabase-store.js";
 import { installClient, type InstallableRuntime } from "./client-installer.js";
 import { adoptClient, inspectClient } from "./client-lifecycle.js";
 import {
@@ -103,9 +102,7 @@ function failedClientStatus(
   error: unknown,
   failure: { component: "local-store" | "remote"; remoteAttempted?: boolean },
 ): void {
-  const schemaVersion = config.provider === "legacy-supabase"
-    ? "legacy-v1"
-    : config.provider === "gateway" ? "postgres-v2" : "local-v2";
+  const schemaVersion = config.provider === "gateway" ? "postgres-v2" : "local-v2";
   const remote = config.provider === "local" || !failure.remoteAttempted ? null : false;
   const localHealthy = failure.component !== "local-store";
   const code = error && typeof error === "object" && "code" in error && typeof error.code === "string"
@@ -200,7 +197,7 @@ async function initialize(options: Options): Promise<void> {
   }
   const values: Record<string, string | undefined> = {
     AGENT_BRIDGE_PROVIDER: provider,
-    AGENT_BRIDGE_WORKSPACE: one(options, "workspace") ?? process.env.AGENT_BRIDGE_WORKSPACE ?? (provider === "legacy-supabase" || provider === "legacy" || provider === "supabase" ? "*" : "default"),
+    AGENT_BRIDGE_WORKSPACE: one(options, "workspace") ?? process.env.AGENT_BRIDGE_WORKSPACE ?? "default",
     AGENT_BRIDGE_DB: one(options, "db") ?? process.env.AGENT_BRIDGE_DB,
     AGENT_BRIDGE_EDGE_DB: process.env.AGENT_BRIDGE_EDGE_DB,
     AGENT_BRIDGE_URL: one(options, "url") ?? process.env.AGENT_BRIDGE_URL,
@@ -263,9 +260,6 @@ function configFor(options: Options, command: string): ClientConfig {
   const assertedWorkspace = one(options, "workspace");
   if (config.provider === "gateway" && assertedWorkspace && assertedWorkspace !== config.principal.workspace) {
     throw new Error("--workspace must match the workspace bound to the gateway credential");
-  }
-  if (config.provider === "legacy-supabase" && assertedWorkspace && assertedWorkspace !== "*") {
-    throw new Error("--workspace is not supported by the global legacy Supabase schema");
   }
   if (config.provider === "local" && assertedWorkspace && assertedWorkspace !== config.principal.workspace) {
     return resolveClientConfig(
@@ -563,10 +557,9 @@ export async function runCli(argv = process.argv.slice(2)): Promise<void> {
     });
   } catch (error) {
     if (command !== "doctor" && command !== "status") throw error;
-    const remoteInitialization = command === "doctor" && config.provider === "legacy-supabase";
     failedClientStatus(config, error, {
-      component: remoteInitialization ? "remote" : "local-store",
-      remoteAttempted: remoteInitialization,
+      component: "local-store",
+      remoteAttempted: false,
     });
     process.exitCode = 1;
     return;
@@ -576,10 +569,10 @@ export async function runCli(argv = process.argv.slice(2)): Promise<void> {
       validateRequest("client_status", {});
       const active = command === "doctor";
       try {
-        const diagnostics = await runtime.store.diagnostics?.(config.principal, { mode: active ? "probe" : "snapshot" }) ?? { schemaVersion: config.provider === "legacy-supabase" ? "legacy-v1" as const : "local-v2" as const, deliverySupported: false, pending: null, claimed: null, retrying: null, dead: null };
+        const diagnostics = await runtime.store.diagnostics?.(config.principal, { mode: active ? "probe" : "snapshot" }) ?? { schemaVersion: "local-v2" as const, deliverySupported: false, pending: null, claimed: null, retrying: null, dead: null };
         const remoteReachable = "remoteReachable" in diagnostics
           ? diagnostics.remoteReachable ?? null
-          : active && config.provider === "legacy-supabase" ? true : null;
+          : null;
         type CheckStatus = "ok" | "unknown" | "degraded" | "failed";
         const checks: Array<{ name: string; status: CheckStatus; message: string }> = [{
           name: "local-store",
@@ -587,7 +580,7 @@ export async function runCli(argv = process.argv.slice(2)): Promise<void> {
           message: "local diagnostics are readable",
         }];
         if (config.provider !== "local") {
-          const provider = config.provider === "gateway" ? "gateway" : "legacy provider";
+          const provider = "gateway";
           const remoteError = "remoteError" in diagnostics && typeof diagnostics.remoteError === "string"
             ? diagnostics.remoteError
             : undefined;
@@ -683,17 +676,14 @@ export async function runCli(argv = process.argv.slice(2)): Promise<void> {
       cliOutput("sync", await runtime.store.sync(input));
       return;
     }
-    if (command === "history" || command === "inbox" || command === "sent") { const query = validateRequest("history", { cursor: one(options, "cursor"), limit: integer(options, "limit", 20), types: list(options, "type").concat(list(options, "category")), source: one(options, "source"), project: one(options, "project"), since: since(options), mailbox: command === "inbox" ? "inbox" : command === "sent" ? "sent" : one(options, "mailbox") as any, receiptState: one(options, "receipt-state") as any, unacknowledgedBy: assertedUnackedBy, threadId: one(options, "thread-id"), latest: raw === "get" || boolean(options, "latest") }); const page = await runtime.service.history(config.principal, query); if (raw === "get") { cliOutput("history", page.messages.map((message) => ({ id: config.provider === "legacy-supabase" ? Number(message.sequence) : message.id, source: message.source, category: message.type, content: message.content, priority: message.priority, project: message.project ?? null, metadata: legacyContextMetadata(message), created_at: message.createdAt })), { command: raw, optionNames: Object.keys(options) }); } else cliOutput("history", page); return; }
+    if (command === "history" || command === "inbox" || command === "sent") { const query = validateRequest("history", { cursor: one(options, "cursor"), limit: integer(options, "limit", 20), types: list(options, "type").concat(list(options, "category")), source: one(options, "source"), project: one(options, "project"), since: since(options), mailbox: command === "inbox" ? "inbox" : command === "sent" ? "sent" : one(options, "mailbox") as any, receiptState: one(options, "receipt-state") as any, unacknowledgedBy: assertedUnackedBy, threadId: one(options, "thread-id"), latest: raw === "get" || boolean(options, "latest") }); const page = await runtime.service.history(config.principal, query); if (raw === "get") { cliOutput("history", page.messages.map((message) => ({ id: message.id, source: message.source, category: message.type, content: message.content, priority: message.priority, project: message.project ?? null, metadata: legacyContextMetadata(message), created_at: message.createdAt })), { command: raw, optionNames: Object.keys(options) }); } else cliOutput("history", page); return; }
     if (command === "acknowledge" || (command === "ack" && one(options, "ids"))) {
       const rawIds = list(options, "ids");
       validateRequest("record_receipt", { messageIds: rawIds });
-      const acknowledged = config.provider === "legacy-supabase" &&
-          runtime.store.recordLegacyReceipt && rawIds.every((id) => /^\d+$/.test(id))
-        ? await runtime.store.recordLegacyReceipt(rawIds, config.principal.agent)
-        : await runtime.service.acknowledge(
-            config.principal,
-            rawIds.map(legacyNumericMessageId),
-          );
+      const acknowledged = await runtime.service.acknowledge(
+        config.principal,
+        rawIds.map(legacyNumericMessageId),
+      );
       cliOutput("record_receipt", { acknowledged, agent: config.principal.agent }, {
         command: raw,
         optionNames: Object.keys(options),
@@ -732,7 +722,7 @@ export async function runCli(argv = process.argv.slice(2)): Promise<void> {
           saveCursor(checkpointPath, current);
           interval = page.messages.length ? baseInterval : Math.min(maxInterval, Math.max(baseInterval, interval * 2));
         } catch (error) {
-          const status = error instanceof BridgeHttpError || error instanceof LegacySupabaseError
+          const status = error instanceof BridgeHttpError
             ? error.status
             : undefined;
           const retryable = status !== undefined &&

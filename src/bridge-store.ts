@@ -16,7 +16,7 @@ export interface MessageQuery {
 }
 export interface MessagePage { messages: BridgeMessage[]; cursor?: string; }
 export interface BridgeDiagnostics {
-  schemaVersion: "local-v2" | "postgres-v2" | "legacy-v1";
+  schemaVersion: "local-v2" | "postgres-v2";
   deliverySupported: boolean;
   pending: number | null;
   claimed: number | null;

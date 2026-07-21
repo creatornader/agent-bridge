@@ -2,7 +2,6 @@ export * from "./bridge-domain.js";
 export * from "./bridge-store.js";
 export * from "./bridge-service.js";
 export * from "./postgres-bridge-store.js";
-export * from "./legacy-supabase-store.js";
 export * from "./gateway-auth.js";
 export * from "./gateway.js";
 export * from "./http-bridge-store.js";

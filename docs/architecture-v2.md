@@ -1,14 +1,16 @@
 # Agent Bridge v2 architecture
 
-Status: living architecture for the 0.4.x package line.
+Status: living architecture for the 0.6.x package line.
 
 ## Product boundary
 
-Agent Bridge is the durable, pull-first mailbox and work-delivery control plane for agents that run in different clients, processes, sessions, and machines. It supports three operating modes: local SQLite, the authenticated PostgreSQL gateway, and the legacy Supabase adapter.
+Agent Bridge lets agents exchange messages and hand off work across clients, processes,
+sessions, and machines. It supports two operating modes: local SQLite and the
+authenticated PostgreSQL gateway.
 
 History visibility is caller-relative. `inbox` is the default and preserves broadcast-plus-targeted visibility; `sent` is source equal to the caller; `all` is their union. Receipt state (`any`, `unread`, `read`) is valid only for inbox and is always evaluated for the authenticated caller. Opaque v2 cursors bind workspace, caller, mailbox, and normalized filters. Readers temporarily accept v1 sequence cursors but emit only v2. After an edge cache contract upgrade, the gateway resets the authoritative pull cursor and replays `all` visibility; the publication outbox is never treated as sent history.
 
-These authorization guarantees apply to local v2 and the authenticated gateway. The legacy Supabase adapter can enforce them only cooperatively because its publishable key can call the underlying PostgREST table and receipt RPC directly.
+These authorization guarantees apply to local v2 and the authenticated gateway.
 
 - Local mode runs without an account or network connection.
 - Shared mode uses a remote service so agents on different machines see the same history and delivery state.
@@ -29,7 +31,10 @@ PostgreSQL stores shared messages, identities, receipts, deliveries, and migrati
 
 A standalone Agent Bridge API sits between remote clients and PostgreSQL. Clients authenticate to the API with scoped credentials. They do not receive a database password or rely on a shared Supabase publishable key for identity.
 
-Supabase can still host the database. Existing direct PostgREST deployments remain available through an explicitly named legacy adapter while they migrate.
+Supabase can host the database. Agent Bridge 0.6.0 removed the direct PostgREST runtime
+adapter. Historical deployments migrate through the checked-in schema and ordered
+PostgreSQL migrations described in
+[ADR-0005](decisions/0005-retire-direct-supabase-runtime.md).
 
 ### Deployment separates schema and request authority
 
@@ -237,7 +242,7 @@ The v2 envelope uses fields that can be mapped to CloudEvents without changing s
 
 A receipt records that a principal read a message.
 
-A publisher stores an immutable `deliveryPolicy` with each message. Untargeted messages default to mailbox mode. Targeted messages default to leased mode with `maxAttempts: 5`, `retryBaseDelayMs: 1000`, `retryMaxDelayMs: 60000`, and `retryJitterRatio: 0.2`. Leased policy may also set `notBefore`. Mailbox messages create no deliveries, and legacy mode rejects leased policy.
+A publisher stores an immutable `deliveryPolicy` with each message. Untargeted messages default to mailbox mode. Targeted messages default to leased mode with `maxAttempts: 5`, `retryBaseDelayMs: 1000`, `retryMaxDelayMs: 60000`, and `retryJitterRatio: 0.2`. Leased policy may also set `notBefore`. Mailbox messages create no deliveries.
 
 A leased delivery records executable work for a recipient. Its state is one of `pending`, `claimed`, `acked`, `retrying`, `dead`, or `cancelled`. `attempt` is lifetime-monotonic, while `cycleAttempt` resets on publisher requeue and `requeueCount` increments. Stored policy owns retry and exhaustion. Claims order due work by urgent, high, then info priority, followed by availability, message creation time, and the stable delivery ID tie-break. HTTP 2.1, MCP, and CLI may optionally identify one message. That form atomically selects only the eligible delivery for the authenticated recipient and scopes claim-time expiry and exhaustion maintenance to the same message. Omitting the filter preserves claim-next behavior. The frozen HTTP 2.0 request rejects the additive field.
 
@@ -253,7 +258,9 @@ The system promises at-least-once delivery. It does not promise exactly-once exe
 
 Project participates in the idempotency fingerprint. Reads without a project filter span labeled and unlabeled messages inside the credential-bound workspace. An exact filter narrows that same cursor authority. Migration 008 adds the PostgreSQL column and index. Existing local and edge SQLite databases add their project columns during initialization. Migration 006 is not rewritten. A schema-owner command dry-runs or reconciles its rows into workspace `agent-bridge` in one transaction. It preserves IDs, timestamps, receipts, and row counts, and it verifies that no delivery exists before or after the change.
 
-The legacy Supabase schema has no tenant workspace column. Its adapter reports workspace `*` and uses the legacy `project` column only as a message label. It rejects per-command workspace overrides because assigning a caller-selected workspace to global rows would create a false isolation boundary.
+The historical Supabase schema has no tenant workspace column. Migration 006 maps its
+global rows into canonical workspaces before gateway activation. A caller cannot use
+the retired runtime shape to assign a workspace to those rows.
 
 The delivery API supports:
 
@@ -274,9 +281,9 @@ Reads use an opaque cursor backed by the backend sequence number. UUIDv7 improve
 
 During gateway outages, normal inbox and pending reads return the locally cached candidate set with explicit degraded and stale metadata. Because receipt state is remote authority and is not mirrored, an offline `unacknowledgedBy` result reports acknowledgement state as unknown; it must not be interpreted as proof that every returned message is unread.
 
-Realtime, hooks, webhooks, and desktop notifications may wake a client. The client still pulls from its last durable cursor. This closes notification gaps and makes reconnect behavior testable.
-
-Supabase documents that Realtime does not guarantee every database change. Agent Bridge therefore treats it as an optional delivery hint, not a message log.
+Hooks, webhooks, and desktop notifications may wake a client. The client still pulls
+from its last durable cursor. This closes notification gaps and makes reconnect
+behavior testable.
 
 ### Identity is bound at the client boundary
 
@@ -311,7 +318,6 @@ Protocol logic depends on a `BridgeStore` interface, not a provider SDK. The ini
 
 - SQLite for local mode and edge state.
 - PostgreSQL for a standalone shared deployment.
-- Supabase legacy REST for v1 compatibility during migration.
 - Agent Bridge HTTP API for normal remote clients.
 
 Host and wakeup adapters are independent from storage. A client manifest declares identity injection, supported wake modes, config locations, health checks, and install actions for Codex, Claude Code, Claude Desktop, OpenClaw, or a generic MCP client. The v1 manifest key named `runtime` identifies an installation target for compatibility. It does not identify a unique running process. The `codex` adapter configures the profile shared by the Codex CLI and the Codex surface in the ChatGPT desktop app. Scripts, CI jobs, daemons, and application services may instead call the CLI or HTTPS API or embed the Node library without pretending to be a harness adapter.
@@ -503,11 +509,14 @@ because an immutable read could miss uncheckpointed outbox state.
 
 The MCP tools `post_context`, `get_context`, and `ack_context` remain available. Existing CLI verbs and flags remain accepted. Text responses remain present while v2 adds structured result data.
 
-Legacy Supabase rows remain readable as broadcast messages. A migration command checks schema state, backfills v2 records, and verifies counts before activation. Secure shared mode cannot silently inherit the old permissive RLS policies.
+Migration 006 checks the historical Supabase schema, imports v1 records, and verifies
+counts before activation. The reconciliation command can correct imported project
+labels without reopening the retired runtime adapter. Secure shared mode cannot
+silently inherit the old permissive RLS policies.
 
 ## Security boundary
 
-Shared mode uses a token-authenticated API. The service stores only token hashes. Credentials bind a workspace and principal, carry canonical operation scopes, can expire, and can be revoked. Capabilities requires an active credential but no named scope. Local and legacy providers do not claim gateway scope enforcement.
+Shared mode uses a token-authenticated API. The service stores only token hashes. Credentials bind a workspace and principal, carry canonical operation scopes, can expire, and can be revoked. Capabilities requires an active credential but no named scope. Local mode does not claim gateway scope enforcement.
 
 Migration 011 grants every pre-migration credential the full compatibility scope set, including expired and revoked rows, without rewriting lifecycle metadata. Migration 014 preserves those rows but changes new raw inserts to empty scopes. Owner provisioning selects an immutable named scope set. Database constraints reject unknown, duplicated, or unsorted scopes.
 
@@ -640,7 +649,7 @@ The TypeBox 1.x registry validates closed requests before domain semantics. Resp
 
 Compatibility is asymmetric. An upgraded gateway serves released headerless and explicit 2.0 clients. A new 2.1 client probes before mutation and accepts the gateway only when complete, consistent response headers select 2.1 and advertise 2.1 support. A headerless response, selected 2.0 response, or partial negotiation means the gateway must be upgraded. The client rejects mutation instead of using the d8184fe 2.0 contract. Deploy the gateway before 2.1 clients.
 
-The OpenAPI paths describe protocol 2.1. Embedded 2.0 vendor extensions carry only the frozen compatibility schemas and metadata needed to document released clients; they do not form a second OpenAPI description. `npm run contracts:check` proves that JSON Schema 2020-12, OpenAPI 3.1.2, MCP manifest, and capability artifacts match the registry. All schema references are local. Protocol, npm package, MCP implementation, and migration versions are independent. Gateway scope enforcement comes from the registry. Provider-neutral artifacts report enforcement separately for gateway, local, and legacy modes.
+The OpenAPI paths describe protocol 2.1. Embedded 2.0 vendor extensions carry only the frozen compatibility schemas and metadata needed to document released clients; they do not form a second OpenAPI description. `npm run contracts:check` proves that JSON Schema 2020-12, OpenAPI 3.1.2, MCP manifest, and capability artifacts match the registry. All schema references are local. Protocol, npm package, MCP implementation, and migration versions are independent. Gateway scope enforcement comes from the registry. Provider-neutral artifacts report enforcement separately for gateway and local modes.
 
 The v2 implementation is not accepted until all of these checks pass:
 
@@ -670,7 +679,6 @@ End-to-end payload encryption needs a separate threat model and key-management d
 - SQLite WAL-reset bug: <https://sqlite.org/forum/forumpost/0b7fd7f028>
 - PostgreSQL row locking and `SKIP LOCKED`: <https://www.postgresql.org/docs/current/sql-select.html#SQL-FOR-UPDATE-SHARE>
 - Supabase self-hosting responsibilities: <https://supabase.com/docs/guides/self-hosting>
-- Supabase Realtime delivery limitations: <https://supabase.com/docs/reference/self-hosting-realtime>
 - MCP tools specification: <https://modelcontextprotocol.io/specification/2025-11-25/server/tools>
 - MCP transport specification: <https://modelcontextprotocol.io/specification/2025-11-25/basic/transports>
 - UUIDv7: <https://www.rfc-editor.org/rfc/rfc9562.html#name-uuid-version-7>

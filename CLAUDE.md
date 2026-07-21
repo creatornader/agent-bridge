@@ -22,7 +22,7 @@ Provider-neutral MCP server, CLI, and HTTPS gateway for messaging between AI age
 - `bin/agent-bridge`: Cross-platform Node CLI launcher
 - `clients/*.json`: v1 host-adapter manifests and installation contracts
 - `sql/migrations/`: Ordered gateway schema migrations
-- `sql/setup.sql`: Legacy Supabase v1 schema
+- `sql/setup.sql`: Historical Supabase v1 migration fixture
 - `Dockerfile`: Pinned, non-root gateway image
 - `compose.yaml`: Loopback-only PostgreSQL and gateway development stack
 - `deploy/bootstrap-runtime.sql`: Idempotent restricted runtime-login bootstrap
@@ -34,6 +34,7 @@ Provider-neutral MCP server, CLI, and HTTPS gateway for messaging between AI age
 - `docs/decisions/0002-canonical-operation-contract-registry.md`: Canonical v2 contracts and version negotiation
 - `docs/decisions/0003-host-adapters-and-consumer-instance-keys.md`: Host integration layers and consumer instance-key semantics
 - `docs/decisions/0004-client-lifecycle-and-endpoint-migration.md`: Managed client ownership, exact adoption, and endpoint-migration boundary
+- `docs/decisions/0005-retire-direct-supabase-runtime.md`: Runtime-provider retirement and historical migration boundary
 - `docs/architecture-v2.md`: Accepted v2 protocol, storage, security, delivery, and migration design
 - `docs/ecosystem.md`: Public product boundary and interoperability position
 - `docs/troubleshooting.md`: Public MCP and client recovery guide
@@ -80,11 +81,11 @@ Sync triggers:
 
 ### Architecture decisions
 
-- Agent Bridge is the durable, pull-first mailbox and work-delivery control plane. A2A and application task semantics sit above it.
+- Agent Bridge provides messaging and work delivery across tools, sessions, and machines. A2A and application task semantics sit above it.
 - MCP, CLI, HTTPS, and the Node library are access surfaces. Harnesses, host applications, host adapters, and access surfaces are separate layers. Optional transports may sit below the core but cannot replace authoritative cursor replay.
 - Read receipts, delivery claims, lease extensions, delivery settlement, and external task completion are separate semantics.
 - agmsg is a reference for adapters, interoperability, and client experience, not the protocol authority.
-- PostgreSQL is the canonical shared store. Supabase is an optional PostgreSQL host and a named legacy adapter.
+- PostgreSQL is the canonical shared store. Supabase is an optional PostgreSQL host. The direct Supabase runtime adapter was retired in 0.6.0.
 - SQLite is the local authority in local mode. In gateway mode it stores the durable outbox, cache, and cursor state.
 - Shared config contains backend settings only. `AGENT_BRIDGE_AGENT` is accepted only from the active process or an explicit CLI identity argument.
 - Client installers write separate owner-only backend files. Gateway tokens are bound to one principal and never stored in the shared config.
@@ -97,7 +98,7 @@ Sync triggers:
 - Message content and routing are immutable. Receipts, deliveries, delivery events, and presence use separate records.
 - History defaults to caller-relative inbox visibility. Sent is source-equal-to-caller, all is their union, and receipt state is caller-bound and inbox-only. Cursors bind identity, visibility, and normalized filters.
 - Project is an optional immutable message label. Workspace remains the tenant and credential boundary; omitted project reads all labels.
-- The legacy Supabase schema is global and has no tenant workspace. Legacy clients report workspace `*` and use project only as a message label.
+- The historical Supabase schema is global and has no tenant workspace. Migration 006 imports those rows into the canonical workspace model.
 - Migration 008 adds project storage. Migration 006 remains unchanged and its imported rows are corrected only by the schema-owner reconciliation command.
 - Cursor pulls are authoritative. Notifications may wake a client but never replace replay.
 - Delivery is at least once through claim, lease, ack, nack, retry, and dead-letter state.
@@ -106,13 +107,12 @@ Sync triggers:
   that eligible recipient delivery. HTTP 2.0 rejects the additive field.
 - Immutable publisher delivery policy owns delivery mode, retry limits, and backoff. Cancel and requeue are publisher-only. Requeue resets cycle attempt but not lifetime attempt. Consumer `maxAttempts` and `retryPolicy` inputs are validated and ignored for one compatibility release.
 - Exact idempotent replay deduplicates. Changed content under an existing idempotency key fails.
-- Direct fetch remains in the legacy adapter. The normal remote path uses the authenticated gateway.
+- Historical direct-database rows are handled only by migration and reconciliation commands. The normal remote path uses the authenticated gateway.
 - Local and edge SQLite files use WAL, owner-only modes where supported, and bounded busy waits. Initialization and schema upgrade use a 15-second minimum retry window; normal operations retain the configured timeout. Windows verifies the private parent and main database before open, then applies explicit sidecar ACLs after WAL setup and the serialized schema transaction. Replacement during one ACL check still fails.
 - Host-adapter manifests and installers inject identity per installed client. The v1 manifest field named `runtime` is a compatibility key for the installation target. It does not mean a live process. Installers do not write one identity into shared config.
 - The `codex` adapter configures the profile shared by the Codex CLI and the Codex surface in the ChatGPT desktop app. Claude Code and Claude Desktop use separate adapters and registrations.
 - `AGENT_BRIDGE_INSTANCE` is an optional caller-supplied stable consumer key. Supported installers generate and persist it; direct clients may manage it themselves. The gateway does not bind it to an installer registration. Unless `AGENT_BRIDGE_CURSOR` is explicit, the key selects cursor storage. It also selects leases and instance presence. Without a key or explicit cursor path, cursor storage uses `default`. Lease ownership falls back to the principal, and presence is unavailable. It is not a PID or session. Per-process presence must be additive.
-- URL-encoded braces in PostgREST array contains filter (`%7B`/`%7D` instead of `{`/`}`): curl strips unencoded braces
-- Permissive RLS belongs only to the legacy schema. The private v2 schema denies Supabase Data API roles.
+- Permissive RLS belongs only to the historical schema. The private v2 schema denies Supabase Data API roles.
 - `ack_context` uses a Postgres RPC function (`security definer`, `set search_path`) for atomic `array_append`: avoids race conditions and reduces network calls from 2 to 1
 - `bridge-meta` category enables agents to suggest improvements to the bridge itself
 - `agent-bridge-atrib` is an optional signed HTTP wrapper, not the canonical implementation; clients should keep a direct source-repo MCP path available when wrapper liveness is uncertain
@@ -120,7 +120,7 @@ Sync triggers:
 - HTTP protocol 2.1 is current. The gateway accepts exactly 2.0 and 2.1; a missing request header selects the 2.0 compatibility shape, and every other version returns 426. Package, MCP implementation, protocol, and migration versions are independent.
 - Upgraded gateways preserve released 2.0 clients. New 2.1 clients require complete, consistent 2.1 negotiation before mutation and reject headerless or selected 2.0 gateways instead of downgrading. Upgrade the gateway before 2.1 clients.
 - OpenAPI paths describe protocol 2.1. The embedded 2.0 vendor extensions contain limited compatibility schema metadata, not a second OpenAPI description.
-- Gateway credentials enforce the canonical operation scopes. Capabilities requires an active credential but no named scope. Local and legacy providers report scope enforcement as false.
+- Gateway credentials enforce the canonical operation scopes. Capabilities requires an active credential but no named scope. Local mode reports scope enforcement as false.
 - For requests with bodies, the gateway validates media type, size, and JSON before opening the request transaction. Every authorized operation then consumes a credential-wide rate bucket and an operation bucket through narrow security-definer functions. Scope and rate denials append secret-free security events before domain work begins.
 - Production request authority, security accounting, and domain work use one checked-out client and one explicit outer transaction. Readiness uses a separate one-connection pool. Node hashes the bearer credential before PostgreSQL receives it. Migration 012 matches that hash and derives canonical workspace, principal, and scopes on the request backend. Migration 013 forces RLS on the five domain tables and records a protected catalog attestation. Gateway capabilities report row isolation only after live readiness checks pass. Lease transitions and target-to-delivery membership remain application-enforced.
 - Migration 017 adds one immutable PostgreSQL authority UUID. The released request-authority opener remains available with its original return shape. Production requests use a bound opener and authenticated status adds optional `gatewayAuthorityId` and `credentialId` fields without changing HTTP protocol 2.1. Runtime readiness verifies the singleton row, immutable trigger coverage and catalog, and runtime or public table and column privileges. Native DR preserves the UUID as logical authority continuity only. It does not fence a live clone. Drain old gateways before this migration because a running old process can still serve normal traffic after its readiness probe fails.
@@ -138,7 +138,6 @@ Sync triggers:
 
 - Local: `AGENT_BRIDGE_PROVIDER=local`
 - Gateway: shared URL and workspace plus a separate principal-bound token in each installed client's backend file
-- Legacy: `AGENT_BRIDGE_PROVIDER=legacy-supabase`, Supabase URL and key
 
 ### Integration points
 

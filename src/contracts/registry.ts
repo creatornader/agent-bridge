@@ -182,7 +182,7 @@ const PresenceSchema = Type.Object({
 }, { additionalProperties: true });
 
 const DeliveryDiagnosticsProperties = {
-  schemaVersion: Type.Enum(["local-v2", "postgres-v2", "legacy-v1"]),
+  schemaVersion: Type.Enum(["local-v2", "postgres-v2"]),
   deliverySupported: Type.Boolean(),
   pending: NullableNumber(),
   claimed: NullableNumber(),
@@ -236,11 +236,11 @@ const ClientStatusSchema = Type.Object({
   localHealthy: Type.Boolean(),
   connected: Type.Boolean(),
   remoteReachable: Type.Union([Type.Boolean(), Type.Null()]),
-  provider: Type.Enum(["local", "gateway", "legacy-supabase"]),
+  provider: Type.Enum(["local", "gateway"]),
   workspace: Type.String(),
   agent: Type.String(),
   instance: Type.Union([Type.String(), Type.Null()]),
-  schemaVersion: Type.Enum(["local-v2", "postgres-v2", "legacy-v1"]),
+  schemaVersion: Type.Enum(["local-v2", "postgres-v2"]),
   endpoint: Type.Union([Type.String(), Type.Null()]),
   database: Type.Union([Type.String(), Type.Null()]),
   cursorPath: Type.String(),
@@ -348,7 +348,7 @@ export const AUTHORIZATION_SCOPES = [
 
 export type AuthorizationScope = typeof AUTHORIZATION_SCOPES[number];
 
-export type ContractProvider = "local" | "gateway" | "legacy-supabase";
+export type ContractProvider = "local" | "gateway";
 export type ContractSurface = "mcp" | "http" | "cli";
 export type OperationId =
   | "capabilities" | "status" | "client_status" | "gateway_metrics" | "publish_message" | "history"
@@ -393,7 +393,7 @@ export interface OperationContract {
   cli?: CliContract;
 }
 
-const ALL_PROVIDERS = ["local", "gateway", "legacy-supabase"] as const;
+const ALL_PROVIDERS = ["local", "gateway"] as const;
 const DELIVERY_PROVIDERS = ["local", "gateway"] as const;
 const GATEWAY_PROVIDER = ["gateway"] as const;
 const operation = (entry: OperationContract): OperationContract => entry;
@@ -414,7 +414,7 @@ const ReceiptCliResponseSchema = Type.Object({
 }, { additionalProperties: true });
 
 export const operations: readonly OperationContract[] = [
-  operation({ id: "capabilities", summary: "Discover operations available on the current surface.", request: Empty, response: Type.Object({ protocolVersion: Type.String(), currentProtocolVersion: Type.String(), selectedProtocolVersion: Type.String(), supportedProtocolVersions: StringArray, scopeEnforcement: Type.Boolean(), requestAuthority: Type.Boolean(), rowIsolation: Type.Boolean(), authorizationModel: Type.Enum(["scoped-credential", "credential-wide", "process-identity", "legacy-key"]), surface: Type.Enum(["mcp", "http", "cli"]), provider: Type.Enum(["local", "gateway", "legacy-supabase"]), grantedScopes: Type.Optional(StringArray), operations: Type.Array(Type.Object({ id: Type.String(), summary: Type.String(), requiredScopes: StringArray, mcp: Type.Optional(Type.Any()), http: Type.Optional(Type.Any()), cli: Type.Optional(Type.Any()) }, { additionalProperties: true })) }, { additionalProperties: true }), scopes: [], providers: ALL_PROVIDERS, mcp: { name: "capabilities" }, http: { method: "GET", path: "/v2/capabilities" }, cli: { command: "capabilities", options: [] } }),
+  operation({ id: "capabilities", summary: "Discover operations available on the current surface.", request: Empty, response: Type.Object({ protocolVersion: Type.String(), currentProtocolVersion: Type.String(), selectedProtocolVersion: Type.String(), supportedProtocolVersions: StringArray, scopeEnforcement: Type.Boolean(), requestAuthority: Type.Boolean(), rowIsolation: Type.Boolean(), authorizationModel: Type.Enum(["scoped-credential", "credential-wide", "process-identity"]), surface: Type.Enum(["mcp", "http", "cli"]), provider: Type.Enum(["local", "gateway"]), grantedScopes: Type.Optional(StringArray), operations: Type.Array(Type.Object({ id: Type.String(), summary: Type.String(), requiredScopes: StringArray, mcp: Type.Optional(Type.Any()), http: Type.Optional(Type.Any()), cli: Type.Optional(Type.Any()) }, { additionalProperties: true })) }, { additionalProperties: true }), scopes: [], providers: ALL_PROVIDERS, mcp: { name: "capabilities" }, http: { method: "GET", path: "/v2/capabilities" }, cli: { command: "capabilities", options: [] } }),
   operation({ id: "status", summary: "Read gateway delivery diagnostics.", request: Empty, response: DiagnosticsSchema, scopes: ["status:read"], providers: ALL_PROVIDERS, http: { method: "GET", path: "/v2/status" } }),
   operation({ id: "issue_endpoint_migration_challenge", summary: "Issue a short-lived endpoint migration challenge commitment.", request: Type.Object({ challenge: Type.String({ pattern: "^[0-9a-f]{64}$" }), expectedGatewayAuthorityId: Type.String({ pattern: UUID_PATTERN }), verifierCredentialId: Type.String({ pattern: UUID_PATTERN }) }, { additionalProperties: false }), response: Type.Object({ gatewayAuthorityId: Type.String(), issuerCredentialId: Type.String(), verifierCredentialId: Type.String(), expiresAt: Type.String() }, { additionalProperties: false }), scopes: [], providers: GATEWAY_PROVIDER, http: { method: "POST", path: "/v2/endpoint-migration-challenges" } }),
   operation({ id: "consume_endpoint_migration_challenge", summary: "Consume a short-lived endpoint migration challenge commitment.", request: Type.Object({ challenge: Type.String({ pattern: "^[0-9a-f]{64}$" }), expectedGatewayAuthorityId: Type.String({ pattern: UUID_PATTERN }), issuerCredentialId: Type.String({ pattern: UUID_PATTERN }) }, { additionalProperties: false }), response: Type.Object({ gatewayAuthorityId: Type.String(), issuerCredentialId: Type.String(), verifierCredentialId: Type.String(), expiresAt: Type.Union([Type.String(), Type.Null()]), consumed: Type.Boolean() }, { additionalProperties: false }), scopes: [], providers: GATEWAY_PROVIDER, http: { method: "POST", path: "/v2/endpoint-migration-challenges/consume" } }),
@@ -583,9 +583,7 @@ export function capabilityDocument(context: { surface: ContractSurface; provider
     rowIsolation: context.provider === "gateway" && context.requestAuthority === true && context.rowIsolation === true,
     authorizationModel: context.provider === "gateway"
       ? "scoped-credential"
-      : context.provider === "local"
-        ? "process-identity"
-        : "legacy-key",
+      : "process-identity",
     surface: context.surface,
     provider: context.provider,
     operations: availableOperations(context).map(({ request: _request, response, providers: _providers, scopes, cli, ...entry }) => ({

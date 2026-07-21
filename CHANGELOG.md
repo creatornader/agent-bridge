@@ -4,13 +4,27 @@ All notable changes to agent-bridge are documented in this file.
 
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and the project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
+## [0.6.0] - 2026-07-21
 
 ### Added
 
 - Add `agent-bridge send --queue-only` for an explicit gateway outbox write that
   makes no network request. A later manual or automatic sync publishes the same
   immutable message from its original endpoint, workspace, and principal scope.
+
+### Changed
+
+- Describe Agent Bridge as messaging and work delivery across tools, sessions, and
+  machines. The npm package remains `@creatornader/agent-bridge`; npm rejects the
+  unscoped `agentbridge` name as confusingly similar to another package.
+- Limit runtime providers and generated capability contracts to local SQLite and the
+  authenticated gateway.
+
+### Removed
+
+- Remove the direct Supabase PostgREST runtime provider and its publishable-key
+  authorization model. Historical schema, migration 006 import, and the reconciliation
+  command remain available for upgrades.
 
 ### Fixed
 
@@ -24,6 +38,9 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and 
   ordinary GitHub job identifiers cannot cause false leak reports. Permit GitHub to
   reuse the sender host for the fresh-edge verifier while still requiring distinct
   sender and receiver host evidence.
+- Preserve only Agent Bridge roles and relevant default privileges in PostgreSQL native
+  DR backups when a managed provider gives the schema owner privileges in unrelated
+  schemas.
 
 ## [0.5.2] - 2026-07-20
 

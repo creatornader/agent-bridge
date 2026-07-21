@@ -4,7 +4,7 @@ import { homedir } from "node:os";
 import { join } from "node:path";
 import type { BridgePrincipal } from "./bridge-domain.js";
 
-export type ClientProvider = "local" | "gateway" | "legacy-supabase";
+export type ClientProvider = "local" | "gateway";
 
 export interface ClientEnvironment extends NodeJS.ProcessEnv {
   AGENT_BRIDGE_PROVIDER?: string;
@@ -67,9 +67,12 @@ export function resolveClientConfig(
   const configPath = clean(env.AGENT_BRIDGE_CONFIG) ?? join(home, ".agent-bridge", "config");
   const file = readClientConfigFile(configPath);
   const value = (key: keyof ClientEnvironment) => clean(env[key]) ?? clean(file[key]);
-  const rawProvider = value("AGENT_BRIDGE_PROVIDER") ?? (value("AGENT_BRIDGE_TOKEN") ? "gateway" : value("AGENT_BRIDGE_URL") ? "legacy-supabase" : "local");
-  const provider = rawProvider === "legacy" || rawProvider === "supabase" ? "legacy-supabase" : rawProvider;
-  if (!(["local", "gateway", "legacy-supabase"] as string[]).includes(provider)) throw new Error(`Unsupported AGENT_BRIDGE_PROVIDER: ${rawProvider}`);
+  const rawProvider = value("AGENT_BRIDGE_PROVIDER") ?? (value("AGENT_BRIDGE_TOKEN") ? "gateway" : value("AGENT_BRIDGE_KEY") ? "legacy-supabase" : "local");
+  if (["legacy", "supabase", "legacy-supabase"].includes(rawProvider)) {
+    throw new Error("The legacy Supabase provider was removed in Agent Bridge 0.6.0; configure local or gateway mode");
+  }
+  if (!(["local", "gateway"] as string[]).includes(rawProvider)) throw new Error(`Unsupported AGENT_BRIDGE_PROVIDER: ${rawProvider}`);
+  const provider = rawProvider as ClientProvider;
   // Identity belongs to the active client process. A shared config file must
   // never make one runtime impersonate the client that initialized the bridge.
   const configuredAgent = clean(env.AGENT_BRIDGE_AGENT);
@@ -80,11 +83,9 @@ export function resolveClientConfig(
   const agent = requestedAgent ?? configuredAgent;
   if (!agent) throw new Error("AGENT_BRIDGE_AGENT is required");
   const url = value("AGENT_BRIDGE_URL");
-  const credential = provider === "gateway" ? value("AGENT_BRIDGE_TOKEN") : value("AGENT_BRIDGE_KEY");
-  if (provider !== "local" && (!url || !credential)) throw new Error(`${provider} requires AGENT_BRIDGE_URL and ${provider === "gateway" ? "AGENT_BRIDGE_TOKEN" : "AGENT_BRIDGE_KEY"}`);
-  const workspace = provider === "legacy-supabase"
-    ? "*"
-    : value("AGENT_BRIDGE_WORKSPACE") ?? "default";
+  const credential = provider === "gateway" ? value("AGENT_BRIDGE_TOKEN") : undefined;
+  if (provider === "gateway" && (!url || !credential)) throw new Error("gateway requires AGENT_BRIDGE_URL and AGENT_BRIDGE_TOKEN");
+  const workspace = value("AGENT_BRIDGE_WORKSPACE") ?? "default";
   const instance = clean(env.AGENT_BRIDGE_INSTANCE);
   const databasePath = value("AGENT_BRIDGE_DB") ?? join(home, ".agent-bridge", "bridge.sqlite3");
   const edgeDatabasePath = value("AGENT_BRIDGE_EDGE_DB") ?? join(home, ".agent-bridge", "edge.sqlite3");
@@ -93,7 +94,7 @@ export function resolveClientConfig(
     .digest("hex")
     .slice(0, 16);
   return {
-    provider: provider as ClientProvider,
+    provider,
     principal: { workspace, agent, instance },
     url,
     credential,

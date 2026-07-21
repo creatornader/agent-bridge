@@ -621,7 +621,7 @@ describe("agent-bridge CLI", () => {
     expect(claudeConfig.status).toBe(1);
     expect(claudeConfig.stderr).toContain("--config-path is only valid for the claude-desktop runtime");
   });
-  it("does not load SQLite for a legacy provider command", () => {
+  it("prints help before reading a retired provider config", () => {
     const result = run(["help"], {
       AGENT_BRIDGE_PROVIDER: "legacy-supabase",
       AGENT_BRIDGE_URL: "https://supabase.test",
@@ -958,31 +958,6 @@ describe("agent-bridge CLI", () => {
       await new Promise<void>((resolve, reject) => server.close((error) => error ? reject(error) : resolve()));
     }
   });
-  it("does not contact a legacy provider while reading passive status", async () => {
-    const home = mkdtempSync(join(tmpdir(), "agent-bridge-cli-")); homes.push(home);
-    let requests = 0;
-    const server = createServer((_request, response) => {
-      requests += 1;
-      response.end(JSON.stringify([]));
-    });
-    await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
-    const address = server.address();
-    if (!address || typeof address === "string") throw new Error("test legacy provider did not bind TCP");
-    try {
-      const result = await runAtAsync(home, ["status"], {
-        AGENT_BRIDGE_PROVIDER: "legacy-supabase",
-        AGENT_BRIDGE_URL: `http://127.0.0.1:${address.port}`,
-        AGENT_BRIDGE_KEY: "test-key",
-        AGENT_BRIDGE_WORKSPACE: "acme",
-        AGENT_BRIDGE_AGENT: "worker",
-      });
-      expect(result.status).toBe(0);
-      expect(JSON.parse(result.stdout)).toMatchObject({ status: "unknown", connected: false });
-      expect(requests).toBe(0);
-    } finally {
-      await new Promise<void>((resolve, reject) => server.close((error) => error ? reject(error) : resolve()));
-    }
-  });
   it("degrades doctor when the status probe returns a retryable failure", async () => {
     const home = mkdtempSync(join(tmpdir(), "agent-bridge-cli-")); homes.push(home);
     let statusRequests = 0;
@@ -1183,7 +1158,7 @@ describe("agent-bridge CLI", () => {
       expect.objectContaining({ workspace: "project-workspace", content: "isolated" }),
     ]);
   });
-  it("rejects a legacy workspace override because v1 has no tenant boundary", () => {
+  it("rejects a retired legacy provider before network access", () => {
     const result = run(["doctor", "--as", "worker", "--workspace", "project-workspace"], {
       AGENT_BRIDGE_PROVIDER: "legacy-supabase",
       AGENT_BRIDGE_URL: "http://127.0.0.1:1",
@@ -1192,9 +1167,7 @@ describe("agent-bridge CLI", () => {
       AGENT_BRIDGE_WORKSPACE: "*",
     });
     expect(result.status).toBe(1);
-    expect(result.stderr).toContain(
-      "--workspace is not supported by the global legacy Supabase schema",
-    );
+    expect(result.stderr).toContain("legacy Supabase provider was removed");
     expect(result.stderr).not.toContain("network_error");
   });
   it("rejects a mismatched gateway workspace before network access", () => {

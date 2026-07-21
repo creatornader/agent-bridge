@@ -26,7 +26,11 @@ Compatibility runs in the other direction. An upgraded gateway continues to serv
 
 The OpenAPI paths require protocol 2.1. The `x-agent-bridge-protocol-2.0` and `x-agent-bridge-schemas-2.0` vendor extensions provide limited metadata and frozen schemas for the released compatibility contract. They do not define a second set of paths or a separate OpenAPI description.
 
-Capability documents are filtered by surface and provider. HTTP capability discovery requires a valid credential but has no named scope. The exact scope names are reserved metadata until a later security migration. Gateway credentials grant access as a whole, local mode uses process identity, and legacy mode uses its configured key. Capability documents and OpenAPI set `scopeEnforcement` to false.
+Capability documents are filtered by surface and provider. HTTP capability discovery
+requires a valid credential but no named scope. Gateway operations enforce the scopes
+declared by the registry, while local mode uses process identity and reports scope
+enforcement as false. [ADR-0005](0005-retire-direct-supabase-runtime.md) removed the
+legacy runtime provider from this contract.
 
 Package version, MCP implementation version, Agent Bridge protocol version, and migration version remain independent. The MCP server reports the explicit `MCP_IMPLEMENTATION_VERSION` constant instead of the npm package version.
 
@@ -42,5 +46,6 @@ Package version, MCP implementation version, Agent Bridge protocol version, and 
 ## Related
 
 - [ADR-0001](0001-protocol-layers-and-acknowledgment-semantics.md) defines the protocol layers and acknowledgment meanings.
+- [ADR-0005](0005-retire-direct-supabase-runtime.md) removes the direct Supabase runtime provider.
 - [Architecture v2](../architecture-v2.md) describes the system that follows these decisions.
 - The [README](../../README.md) documents public setup and upgrade behavior.

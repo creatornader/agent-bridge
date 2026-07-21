@@ -5,7 +5,6 @@ import type { BridgeStore } from "./bridge-store.js";
 import { HttpBridgeStore } from "./http-bridge-store.js";
 import { type EdgeDrainLease, SQLiteEdgeStore } from "./sqlite-edge-store.js";
 import { SyncingBridgeStore } from "./syncing-bridge-store.js";
-import { LegacySupabaseRestStore } from "./legacy-supabase-store.js";
 import { SQLiteBridgeStore } from "./sqlite-bridge-store.js";
 import type { ClientConfig } from "./client-config.js";
 import { securePrivatePath } from "./private-path.js";
@@ -29,16 +28,13 @@ export function createStore(config: ClientConfig, options: ClientRuntimeOptions 
     if (config.databasePath !== ":memory:") prepareStoreDirectory(config.databasePath);
     return new SQLiteBridgeStore(config.databasePath);
   }
-  if (config.provider === "gateway") {
-    prepareStoreDirectory(config.edgeDatabasePath);
-    const remote = new HttpBridgeStore({ baseUrl: config.url!, token: config.credential!, principal: config.principal });
-    const edge = new SQLiteEdgeStore(config.edgeDatabasePath, { endpoint: config.url!, principal: config.principal });
-    return new SyncingBridgeStore(edge, remote, config.principal, {
-      autoSync: options.autoSync,
-      edgeDrainLease: options.edgeDrainLease,
-    });
-  }
-  return new LegacySupabaseRestStore(config.url!, config.credential!);
+  prepareStoreDirectory(config.edgeDatabasePath);
+  const remote = new HttpBridgeStore({ baseUrl: config.url!, token: config.credential!, principal: config.principal });
+  const edge = new SQLiteEdgeStore(config.edgeDatabasePath, { endpoint: config.url!, principal: config.principal });
+  return new SyncingBridgeStore(edge, remote, config.principal, {
+    autoSync: options.autoSync,
+    edgeDrainLease: options.edgeDrainLease,
+  });
 }
 
 export async function createClientRuntime(config: ClientConfig, options: ClientRuntimeOptions = {}): Promise<ClientRuntime> {

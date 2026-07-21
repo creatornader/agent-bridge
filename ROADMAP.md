@@ -124,7 +124,23 @@ The published npm version is the authority for whether this package line has shi
 - `/healthz` reports process liveness without database work. `/readyz` remains the
   database, migration, role, and protected-catalog readiness gate.
 
-### Post-release validation and adoption
+### 0.6.0 package contents
+
+- `send --queue-only` records an immutable gateway publication in the local outbox
+  without making a network request.
+- The production proof uses the configured edge scope, an explicit stable message ID,
+  and a real Fly stop and start cycle. Separate sender and receiver runners prove
+  offline replay, idempotency, exact claim and settlement, and recovery from a fresh
+  receiver edge.
+- PostgreSQL native DR supports managed-provider role graphs without importing
+  unrelated provider roles or default privileges from schemas outside Agent Bridge.
+- The direct Supabase runtime provider is removed. Historical schema, import, and
+  reconciliation paths remain for upgrades. Runtime contracts now expose only local
+  and gateway providers.
+- Public package language leads with cross-tool, cross-session, and cross-machine
+  messaging and work handoff.
+
+### Production validation and adoption
 
 Completed against the published 0.5.2 package:
 
@@ -140,18 +156,20 @@ Completed against the published 0.5.2 package:
   outbox, and empty delivery-queue checks. Fresh MCP launches exposed 17 tools for each
   supported adapter. A client process started before cutover keeps its old backend until
   that host restarts.
-- Stopped normal managed-client traffic from using the legacy adapter. The adapter and
-  frozen data remain available for compatibility and operator-controlled recovery.
 - Verified the published npm version, provenance, immutable GitHub release, package
   contents, and public repository metadata.
+- Ran the approval-protected production workflow with distinct sender and receiver
+  runners, an offline sender outbox, a real Fly machine cycle, and a fresh verifier
+  edge. The retained receipts prove replay, exact idempotency, claim, settlement, and
+  recovery after restart.
+- Took and verified a canonical native PostgreSQL backup after the proof. Removed the
+  obsolete public v1 table and receipt function from the live database without changing
+  the canonical PostgreSQL authority.
+- Moved the shared config to the gateway and rechecked the Codex, Claude Code, and
+  Claude Desktop managed backends. All three passed active gateway diagnostics.
 
-Still required:
-
-- Run the approval-protected production workflow with separate sender and receiver
-  runners, forced offline outbox replay, a Fly machine cycle, and a fresh verifier edge.
-  The live gateway proof above covered delivery and client restarts, but it did not
-  satisfy this two-runner restart contract.
-- Retain the workflow receipts and use them as the public cross-machine recovery proof.
+Publication of 0.6.0 remains the release boundary for the package changes listed
+above.
 
 ## Near-term work
 

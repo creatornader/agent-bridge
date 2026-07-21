@@ -1,9 +1,9 @@
 # Agent Bridge in the agent ecosystem
 
-Agent Bridge is a durable mailbox and work-delivery control plane for agent runtimes
-that may disconnect, restart, or move between machines. It stores immutable messages,
-read receipts, delivery claims, leases, retries, and replay state. It does not own the
-full agent stack.
+Agent Bridge lets agents exchange messages and hand off work across tools, sessions,
+and machines. It preserves each inbox through disconnections and restarts. It stores
+immutable messages, read receipts, delivery claims, leases, retries, and replay state.
+It does not own the full agent stack.
 
 ## System boundaries
 
@@ -21,6 +21,8 @@ defines the protocol boundary and the separate meanings of read receipts, delive
 settlement, and external task completion.
 [ADR-0003](decisions/0003-host-adapters-and-consumer-instance-keys.md) defines
 the host layers and consumer instance-key contract.
+[ADR-0005](decisions/0005-retire-direct-supabase-runtime.md) keeps Supabase as a
+PostgreSQL hosting option while removing its direct runtime adapter.
 
 ## Harnesses, hosts, adapters, and access
 
