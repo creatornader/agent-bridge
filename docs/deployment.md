@@ -264,14 +264,17 @@ sender credential needs `messages:write` and `messages:read`. The receiver needs
 
 Run the workflow only when the Fly app has exactly one gateway machine. The cycle job
 restarts that machine and queries the Fly Machines API before and after. It fails
-unless the machine ID stays fixed, the runtime `instance_id` changes, the machine
-returns to `started`, and `/readyz` succeeds. This changes production compute and
-requires environment approval. It does not migrate the database or change secrets.
+unless the machine ID stays fixed, a later successful `start` event appears, the
+machine returns to `started`, and `/readyz` succeeds. Fly documents `instance_id` as a
+version changed by machine updates; a plain restart need not change it. This operation
+changes production compute and requires environment approval. It does not migrate the
+database or change secrets.
 
-The sender first uses an unreachable loopback origin to force a leased publication
-into its private SQLite outbox. It then synchronizes that row to the supplied gateway
-and repeats the publication with the same idempotency key. A separate host finds the
-exact message through `proof-receiver`, claims its delivery, and acknowledges it.
+The sender first writes a leased publication to its private SQLite outbox without a
+network request. It then synchronizes that row to the supplied gateway and repeats the
+publication with the same idempotency key. The gateway origin, workspace, and principal
+scope stay unchanged. A separate host finds the exact message through `proof-receiver`,
+claims its delivery, and acknowledges it.
 After the Fly machine cycle, the verifier uses a fresh instance key, edge database,
 and cursor. It reads the immutable message and confirms that the prior delivery is
 still `acked`.
@@ -280,9 +283,9 @@ Each phase writes an `agent-bridge-production-proof-v1` receipt. The runner reje
 unknown fields at the phase boundary and checks every receipt before use. Receipts may
 record IDs, timestamps, principal and workspace labels, the gateway origin, boolean
 checks, and salted SHA-256 host evidence. They never record bearer values, database
-URLs, environment values, message content, lease tokens, cursor files, or edge
-databases. Download all four workflow artifacts for the operator record. A passing
-repository test still does not replace a completed external workflow run.
+URLs, secret-bearing environment values, message content, lease tokens, cursor files,
+or edge databases. Download all four workflow artifacts for the operator record. A
+passing repository test still does not replace a completed external workflow run.
 
 ### Persistent data and backup
 
