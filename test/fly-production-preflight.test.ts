@@ -85,15 +85,19 @@ describe("Fly production preflight", () => {
         '  path = "/readyz"',
       ].join("\n"));
       if (command === "machine list") return result(0, '[{"state":"started"}]');
-      if (command === "secrets list") return result(0, '[{"Name":"AGENT_BRIDGE_RUNTIME_DATABASE_URL","Value":"do-not-print-me"}]');
+      if (command === "secrets list") return result(0, '[{"Name":"AGENT_BRIDGE_RUNTIME_DATABASE_URL","Value":"do-not-print-me"},{"Name":"AGENT_BRIDGE_RUNTIME_DATABASE_CA_BASE64","Value":"also-do-not-print-me"}]');
       return result(2);
     };
 
     const report = createPreflightReport({ config: configPath, app: "contract-app" }, execute);
 
     expect(report.ok).toBe(true);
-    expect(report.observations?.secretNames).toEqual(["AGENT_BRIDGE_RUNTIME_DATABASE_URL"]);
+    expect(report.observations?.secretNames).toEqual([
+      "AGENT_BRIDGE_RUNTIME_DATABASE_CA_BASE64",
+      "AGENT_BRIDGE_RUNTIME_DATABASE_URL",
+    ]);
     expect(JSON.stringify(report)).not.toContain("do-not-print-me");
+    expect(JSON.stringify(report)).not.toContain("also-do-not-print-me");
     expect(calls).toContain("config show --local --app agent-bridge-contract-check --config " + configPath);
     expect(calls).toContain("auth whoami --json");
     expect(calls).toContain("status --app contract-app --json");
@@ -101,6 +105,31 @@ describe("Fly production preflight", () => {
     expect(calls).toContain("machine list --app contract-app --json");
     expect(calls).toContain("secrets list --app contract-app --json");
     expect(calls.join("\n")).not.toMatch(/^(?:deploy|scale|set|unset|restart|update)\b/mu);
+  });
+
+  it("fails when the runtime URL exists without the CA secret", () => {
+    const execute = (args: string[]) => {
+      const command = args.slice(0, 2).join(" ");
+      if (command === "config show" && args.includes("--local")) return result(0);
+      if (command === "auth whoami") return result(0, '{"email":"operator@example.test"}');
+      if (command === "status --app") return result(0, '{"Name":"contract-app"}');
+      if (command === "config show") return result(0, [
+        "[http_service]",
+        "  internal_port = 8787",
+        "[[http_service.checks]]",
+        '  path = "/readyz"',
+      ].join("\n"));
+      if (command === "machine list") return result(0, '[{"state":"started"}]');
+      if (command === "secrets list") {
+        return result(0, '[{"Name":"AGENT_BRIDGE_RUNTIME_DATABASE_URL"}]');
+      }
+      return result(2);
+    };
+
+    const report = createPreflightReport({ config: configPath, app: "contract-app" }, execute);
+
+    expect(report.ok).toBe(false);
+    expect(report.checks.find((entry: { name: string }) => entry.name === "fly.runtime_secret")?.ok).toBe(false);
   });
 
   it("reports an undeployed app through named remote checks", () => {

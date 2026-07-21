@@ -6,6 +6,17 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and 
 
 ## [Unreleased]
 
+## [0.5.1] - 2026-07-20
+
+### Fixed
+
+- Let a production gateway receive its PostgreSQL CA bundle through the separate
+  `AGENT_BRIDGE_RUNTIME_DATABASE_CA_BASE64` secret. The gateway decodes the bundle in
+  memory, forces certificate and hostname verification, and removes file-based TLS
+  CA parameters from the runtime URL. It rejects the ambiguous `ssl` parameter and
+  client-certificate file parameters instead of discarding them. The Fly preflight now
+  requires both runtime secrets.
+
 ## [0.5.0] - 2026-07-20
 
 ### Added
@@ -355,7 +366,8 @@ First tagged release. Marks the point where agent-bridge has shipped its initial
 - Narrative-leak detection in CI + on commit via `creatornader/textleaks@v0.2.0` (renamed from leakguard).
 
 [0.1.0]: https://github.com/creatornader/agent-bridge/releases/tag/v0.1.0
-[Unreleased]: https://github.com/creatornader/agent-bridge/compare/v0.5.0...HEAD
+[Unreleased]: https://github.com/creatornader/agent-bridge/compare/v0.5.1...HEAD
+[0.5.1]: https://github.com/creatornader/agent-bridge/compare/v0.5.0...v0.5.1
 [0.5.0]: https://github.com/creatornader/agent-bridge/compare/v0.4.0...v0.5.0
 [0.4.0]: https://github.com/creatornader/agent-bridge/compare/v0.3.1...v0.4.0
 [0.3.1]: https://github.com/creatornader/agent-bridge/compare/v0.3.0...v0.3.1

@@ -175,11 +175,25 @@ names and check results but never environment-variable values. A passing local c
 does not prove that an external resource exists or that deployment is safe.
 
 The long-running Fly machine may receive only the restricted
-`AGENT_BRIDGE_RUNTIME_DATABASE_URL` database authority. Do not give it
+`AGENT_BRIDGE_RUNTIME_DATABASE_URL` database authority and the public CA bundle in
+`AGENT_BRIDGE_RUNTIME_DATABASE_CA_BASE64`. The gateway decodes the CA in memory,
+removes `sslmode` and `sslrootcert` from the URL, and enables certificate and hostname
+verification. It rejects the `ssl` parameter and client-certificate file parameters.
+Do not give it
 `AGENT_BRIDGE_DATABASE_URL`, `AGENT_BRIDGE_OPERATOR_DATABASE_URL`,
 `AGENT_BRIDGE_RUNTIME_PASSWORD`, a client bearer token, or a Supabase client key. The
 preflight rejects those names. Keep schema-owner, control-operator, archive, and DR
 authority in separate operator jobs.
+
+Import both runtime secrets through stdin so neither value appears in command
+arguments or a temporary file:
+
+```bash
+{
+  printf 'AGENT_BRIDGE_RUNTIME_DATABASE_URL=%s\n' "$(tr -d '\r\n' < runtime-url)"
+  printf 'AGENT_BRIDGE_RUNTIME_DATABASE_CA_BASE64=%s\n' "$(base64 < database-ca.pem | tr -d '\r\n')"
+} | fly secrets import --stage --app <app>
+```
 
 ### Operator order and gates
 
@@ -213,9 +227,8 @@ repository does not perform them:
    runtime password to that job only. The bootstrap is transactional and changes an
    existing login only when its attributes, ownership, and membership graph already
    match the recorded runtime contract. It never adopts a restored `NOLOGIN` shell.
-6. Construct the restricted runtime URL, set only
-   `AGENT_BRIDGE_RUNTIME_DATABASE_URL` on the Fly app, and run the app-aware read-only
-   preflight.
+6. Construct the restricted runtime URL. Import it and the base64-encoded PostgreSQL CA
+   as the two runtime secrets shown above, then run the app-aware read-only preflight.
 7. Deploy the immutable image with `fly deploy --config deploy/fly.toml --app <app>`.
    Require `/readyz` before routing clients.
 8. Run authenticated capability and status probes, then publish, pull, claim, and

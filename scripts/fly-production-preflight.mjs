@@ -6,7 +6,10 @@ import { fileURLToPath } from "node:url";
 const REPOSITORY_ROOT = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const DEFAULT_CONFIG = resolve(REPOSITORY_ROOT, "deploy/fly.toml");
 const LOCAL_PARSE_APP = "agent-bridge-contract-check";
-const REQUIRED_RUNTIME_NAMES = ["AGENT_BRIDGE_RUNTIME_DATABASE_URL"];
+const REQUIRED_RUNTIME_NAMES = [
+  "AGENT_BRIDGE_RUNTIME_DATABASE_URL",
+  "AGENT_BRIDGE_RUNTIME_DATABASE_CA_BASE64",
+];
 const FORBIDDEN_NAMES = [
   "AGENT_BRIDGE_DATABASE_URL",
   "AGENT_BRIDGE_OPERATOR_DATABASE_URL",
@@ -148,7 +151,7 @@ function remoteChecks(app, execute) {
       check("fly.account", Boolean(account.email ?? account.Email ?? account.name ?? account.Name), "authenticated Fly account observed"),
       check("fly.app", observedName === app, "requested app observed"),
       check("fly.remote_config", config !== undefined && /8787/u.test(config) && /readyz/u.test(config), "remote config exposes the maintained service and readiness path"),
-      check("fly.runtime_secret", REQUIRED_RUNTIME_NAMES.every((name) => secretNameList.includes(name)), "restricted runtime database authority is configured as a secret"),
+      check("fly.runtime_secret", REQUIRED_RUNTIME_NAMES.every((name) => secretNameList.includes(name)), "restricted runtime database authority and TLS CA are configured as secrets"),
       check("fly.forbidden_secrets", FORBIDDEN_NAMES.every((name) => !names.includes(name)) && !names.some((name) => /(?:BEARER|TOKEN)/u.test(name)), "privileged and client credential names are absent"),
       check("fly.running_machine", machines.some((machine) => ["started", "running"].includes(String(machine.state ?? machine.State).toLowerCase())), "at least one machine is running"),
     ],

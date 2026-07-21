@@ -74,6 +74,13 @@ Keep the schema-owner, runtime, operator, archive, backup, and restore database
 authorities separate. Do not copy one client's token or backend file into another
 client's configuration.
 
+When a gateway receives `AGENT_BRIDGE_RUNTIME_DATABASE_CA_BASE64`, it decodes the PEM
+bundle in memory and forces PostgreSQL certificate and hostname verification. The
+gateway removes `sslmode` and `sslrootcert` before it opens the pool. It rejects URL
+parameters for `ssl`, a client certificate, client key, or key password. Keep the
+restricted database URL in a separate secret. Do not put either value in the image,
+source tree, command arguments, or deployment logs.
+
 Managed PostgreSQL may expose a schema-owner administrator with `CREATEROLE` instead
 of true superuser authority. That capability is sufficient for migrations. Native backup
 requires the schema owner to be a true superuser or hold `BYPASSRLS`, because the source
