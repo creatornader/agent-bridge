@@ -122,18 +122,15 @@ describe("canonical v2 contract registry", () => {
 
   it("filters capabilities by surface and provider", () => {
     for (const surface of ["mcp", "http", "cli"] as const) {
-      for (const provider of ["local", "gateway", "legacy-supabase"] as const) {
+      for (const provider of ["local", "gateway"] as const) {
         const document = capabilityDocument({ surface, provider });
         expect(document.scopeEnforcement).toBe(provider === "gateway");
-        expect(document.authorizationModel).toBe(provider === "gateway" ? "scoped-credential" : provider === "local" ? "process-identity" : "legacy-key");
+        expect(document.authorizationModel).toBe(provider === "gateway" ? "scoped-credential" : "process-identity");
         expect(document.operations.map((entry) => entry.id)).toEqual(
           availableOperations({ surface, provider }).map((entry) => entry.id),
         );
       }
     }
-    expect(capabilityDocument({ surface: "mcp", provider: "legacy-supabase" }).operations.map((entry) => entry.id)).toEqual([
-      "capabilities", "publish_message", "history",
-    ]);
     expect(capabilityDocument({ surface: "http", provider: "gateway" }).operations.some((entry) => entry.id === "sync")).toBe(false);
     expect(capabilityDocument({ surface: "http", provider: "gateway" }).requestAuthority).toBe(false);
     expect(capabilityDocument({ surface: "http", provider: "gateway", requestAuthority: true }).requestAuthority).toBe(true);
@@ -207,7 +204,6 @@ describe("generated contract artifacts", () => {
     expect(schema.scopeEnforcementByProvider).toEqual({
       local: false,
       gateway: true,
-      "legacy-supabase": false,
     });
     expect(mcp.scopeEnforcementByProvider).toEqual(schema.scopeEnforcementByProvider);
     expect(schema).not.toHaveProperty("scopeEnforcement");

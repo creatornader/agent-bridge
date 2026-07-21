@@ -16,7 +16,8 @@ Agent Bridge needs to serve agents across clients, sessions, processes, and mach
 
 ## Decision
 
-Agent Bridge is the durable, pull-first mailbox and work-delivery control plane for intermittently connected agent runtimes.
+Agent Bridge provides messaging and work delivery for intermittently connected agent
+runtimes across tools, sessions, and machines.
 
 Its protocol owns:
 

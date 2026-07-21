@@ -70,8 +70,7 @@
               "enum": [
                 "scoped-credential",
                 "credential-wide",
-                "process-identity",
-                "legacy-key"
+                "process-identity"
               ]
             },
             "surface": {
@@ -84,8 +83,7 @@
             "provider": {
               "enum": [
                 "local",
-                "gateway",
-                "legacy-supabase"
+                "gateway"
               ]
             },
             "grantedScopes": {

@@ -5,8 +5,7 @@
   "protocolVersion": "2.1",
   "scopeEnforcementByProvider": {
     "local": false,
-    "gateway": true,
-    "legacy-supabase": false
+    "gateway": true
   },
   "$defs": {
     "ErrorEnvelope": {
@@ -320,8 +319,7 @@
           "enum": [
             "scoped-credential",
             "credential-wide",
-            "process-identity",
-            "legacy-key"
+            "process-identity"
           ]
         },
         "surface": {
@@ -334,8 +332,7 @@
         "provider": {
           "enum": [
             "local",
-            "gateway",
-            "legacy-supabase"
+            "gateway"
           ]
         },
         "grantedScopes": {
@@ -420,8 +417,7 @@
           "enum": [
             "scoped-credential",
             "credential-wide",
-            "process-identity",
-            "legacy-key"
+            "process-identity"
           ]
         },
         "surface": {
@@ -434,8 +430,7 @@
         "provider": {
           "enum": [
             "local",
-            "gateway",
-            "legacy-supabase"
+            "gateway"
           ]
         },
         "grantedScopes": {
@@ -495,8 +490,7 @@
         "schemaVersion": {
           "enum": [
             "local-v2",
-            "postgres-v2",
-            "legacy-v1"
+            "postgres-v2"
           ]
         },
         "deliverySupported": {
@@ -780,8 +774,7 @@
         "provider": {
           "enum": [
             "local",
-            "gateway",
-            "legacy-supabase"
+            "gateway"
           ]
         },
         "workspace": {
@@ -803,8 +796,7 @@
         "schemaVersion": {
           "enum": [
             "local-v2",
-            "postgres-v2",
-            "legacy-v1"
+            "postgres-v2"
           ]
         },
         "endpoint": {
@@ -854,8 +846,7 @@
             "schemaVersion": {
               "enum": [
                 "local-v2",
-                "postgres-v2",
-                "legacy-v1"
+                "postgres-v2"
               ]
             },
             "deliverySupported": {
@@ -1161,8 +1152,7 @@
         "provider": {
           "enum": [
             "local",
-            "gateway",
-            "legacy-supabase"
+            "gateway"
           ]
         },
         "workspace": {
@@ -1184,8 +1174,7 @@
         "schemaVersion": {
           "enum": [
             "local-v2",
-            "postgres-v2",
-            "legacy-v1"
+            "postgres-v2"
           ]
         },
         "endpoint": {
@@ -1235,8 +1224,7 @@
             "schemaVersion": {
               "enum": [
                 "local-v2",
-                "postgres-v2",
-                "legacy-v1"
+                "postgres-v2"
               ]
             },
             "deliverySupported": {

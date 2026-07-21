@@ -4,7 +4,7 @@ import { dirname, join } from "node:path";
 import { afterEach, describe, expect } from "vitest";
 import { adoptClient } from "../src/client-lifecycle.js";
 import {
-  cutoverClientMigration, finalizeClientMigration, resumeClientMigrationCutover,
+  cutoverClientMigration, edgeIdentitiesAlias, finalizeClientMigration, resumeClientMigrationCutover,
 } from "../src/client-migration-cutover.js";
 import {
   acquireClientOperationLock, hasClientOperationLock, listClientOperations, readClientOperation,
@@ -273,6 +273,21 @@ function createRecoverableClientLock(state: ReturnType<typeof fixture>) {
 }
 
 describe("client endpoint migration cutover", () => {
+  it("handles unavailable Windows file IDs without weakening hardlink refusal", () => {
+    expect(edgeIdentitiesAlias(
+      { dev: 0, ino: 0, nlink: 1 },
+      { dev: 0, ino: 0, nlink: 1 },
+    )).toBe(false);
+    expect(() => edgeIdentitiesAlias(
+      { dev: 0, ino: 0, nlink: 2 },
+      { dev: 0, ino: 0, nlink: 2 },
+    )).toThrow("identity is ambiguous");
+    expect(edgeIdentitiesAlias(
+      { dev: 42, ino: 7, nlink: 2 },
+      { dev: 42, ino: 7, nlink: 2 },
+    )).toBe(true);
+  });
+
   it("keeps dry-run read-only and does not contact either gateway", async () => {
     const state = fixture(); const staged = await stage(state);
     const metadataBefore = readFileSync(state.adopted.metadataPath, "utf8");

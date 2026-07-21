@@ -200,9 +200,7 @@ function writeClientBackendConfig(
   const inferredGateway = !configuredProvider && Boolean(
     env.AGENT_BRIDGE_TOKEN?.trim() || shared.AGENT_BRIDGE_TOKEN?.trim(),
   );
-  const provider = configuredProvider === "legacy" || configuredProvider === "supabase"
-    ? "legacy-supabase"
-    : configuredProvider ?? (inferredGateway ? "gateway" : undefined);
+  const provider = configuredProvider ?? (inferredGateway ? "gateway" : undefined);
   const clientToken = options.token?.trim() || env.AGENT_BRIDGE_CLIENT_TOKEN?.trim();
   if (provider === "gateway" && !clientToken) {
     throw new Error(
@@ -232,7 +230,6 @@ function writeClientBackendConfig(
     AGENT_BRIDGE_WORKSPACE: resolved.principal.workspace,
     AGENT_BRIDGE_URL: resolved.url,
     AGENT_BRIDGE_TOKEN: resolved.provider === "gateway" ? resolved.credential : undefined,
-    AGENT_BRIDGE_KEY: resolved.provider === "legacy-supabase" ? resolved.credential : undefined,
     AGENT_BRIDGE_DB: resolved.provider === "local" ? resolved.databasePath : undefined,
     AGENT_BRIDGE_EDGE_DB: resolved.provider === "gateway" ? resolved.edgeDatabasePath : undefined,
     AGENT_BRIDGE_CREDENTIAL_ID: options.binding?.credentialId,

@@ -120,12 +120,13 @@ stores a domain-separated SHA-256 commitment, never the raw challenge, and exclu
 live challenge rows from native DR data dumps. The challenge proves an active direct
 credential replacement on one authority. It does not authorize endpoint cutover.
 
-### Legacy Supabase mode
+### Historical Supabase migrations
 
-The legacy adapter keeps existing v1 deployments working, but its publishable key can
-call the underlying PostgREST table and receipt RPC directly. Adapter checks therefore
-provide cooperative behavior, not the same workspace and principal isolation as the
-authenticated gateway. Do not use legacy mode as a hostile multi-tenant boundary.
+Agent Bridge 0.6.0 removed the direct Supabase runtime adapter. The checked-in v1
+schema and migration 006 remain so trusted operators can import historical deployments
+into the private PostgreSQL schema. Back up the source first, run the migration with
+schema-owner authority, and move clients to local or gateway mode. The permissive v1
+row policies are not a supported runtime security boundary.
 
 ### Archives and disaster recovery
 

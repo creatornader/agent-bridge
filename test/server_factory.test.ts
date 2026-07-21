@@ -9,223 +9,8 @@ import { createAgentBridgeServer, configFromEnv } from "../src/server.js";
 import { privateTestDirectory } from "./private-test-path.js";
 
 describe("createAgentBridgeServer", () => {
-  it("rejects plaintext non-loopback legacy providers without a configured agent", () => {
-    expect(() => createAgentBridgeServer({
-      supabaseUrl: "http://bridge.example.test",
-      supabaseKey: "secret",
-    })).toThrow("requires HTTPS");
-  });
-
   afterEach(() => {
     vi.restoreAllMocks();
-  });
-
-  it(
-    "creates an importable MCP server without reading process env",
-    async () => {
-      const calls: Array<{ url: string; init?: RequestInit }> = [];
-      vi.spyOn(globalThis, "fetch").mockImplementation(async (url, init) => {
-        calls.push({ url: String(url), init });
-        return new Response(JSON.stringify([{ id: 1, source: "codex" }]), {
-          status: 200,
-        });
-      });
-
-      const server = createAgentBridgeServer({
-        supabaseUrl: "https://bridge.example.test/",
-        supabaseKey: "anon-key",
-        agent: "codex",
-      });
-      const client = new Client({ name: "factory-test", version: "0.0.0" });
-      const [clientTransport, serverTransport] =
-        InMemoryTransport.createLinkedPair();
-      await Promise.all([
-        server.connect(serverTransport),
-        client.connect(clientTransport),
-      ]);
-
-      try {
-        const result = await client.callTool({
-          name: "post_context",
-          arguments: {
-            source: "codex",
-            category: "goal-update",
-            content: "factory path works",
-          },
-        });
-
-        expect(result.content[0]?.text).toContain('"source": "codex"');
-        expect(calls).toHaveLength(1);
-        expect(calls[0]?.url).toBe(
-          "https://bridge.example.test/rest/v1/shared_context",
-        );
-        expect(JSON.parse(String(calls[0]?.init?.body))).toMatchObject({
-          source: "codex",
-          category: "goal-update",
-          content: "factory path works",
-        });
-      } finally {
-        await client.close();
-        await server.close();
-      }
-    },
-    15_000,
-  );
-
-  it("normalizes legacy post_context project labels and rejects blank content before fetch", async () => {
-    const fetchSpy = vi.spyOn(globalThis, "fetch").mockImplementation(async (_url, init) => {
-      const body = JSON.parse(String(init?.body));
-      return Response.json([{
-        id: 1,
-        ...body,
-        acked_by: [],
-        created_at: "2026-07-14T00:00:00.000Z",
-      }]);
-    });
-    const server = createAgentBridgeServer({
-      supabaseUrl: "https://bridge.example.test",
-      supabaseKey: "anon-key",
-      agent: "codex",
-    });
-    const client = new Client({ name: "factory-test", version: "0.0.0" });
-    const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
-    await Promise.all([server.connect(serverTransport), client.connect(clientTransport)]);
-    try {
-      await expect(client.callTool({
-        name: "post_context",
-        arguments: {
-          category: "goal-update",
-          content: "   ",
-          project: "project-alpha",
-        },
-      })).rejects.toMatchObject({ code: ErrorCode.InvalidParams });
-      expect(fetchSpy).not.toHaveBeenCalled();
-
-      await client.callTool({
-        name: "post_context",
-        arguments: {
-          category: "goal-update",
-          content: "valid context",
-          project: " alpha ",
-        },
-      });
-      expect(fetchSpy).toHaveBeenCalledTimes(1);
-      expect(JSON.parse(String(fetchSpy.mock.calls[0]?.[1]?.body))).toMatchObject({
-        content: "valid context",
-        project: "alpha",
-        metadata: { message_envelope: { project: "alpha" } },
-      });
-    } finally {
-      await client.close();
-      await server.close();
-    }
-  });
-
-  it("returns schema-conforming legacy context without a configured identity", async () => {
-    vi.spyOn(globalThis, "fetch").mockResolvedValue(Response.json([
-      { id: 7, source: "codex", category: "work", content: "ready" },
-    ]));
-    const server = createAgentBridgeServer({
-      supabaseUrl: "https://bridge.example.test/", supabaseKey: "anon-key",
-    });
-    const client = new Client({ name: "factory-test", version: "0.0.0" });
-    const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
-    await Promise.all([server.connect(serverTransport), client.connect(clientTransport)]);
-    try {
-      const result = await client.callTool({ name: "get_context", arguments: {} });
-      const entries = [{ id: 7, source: "codex", category: "work", content: "ready" }];
-      expect(result.structuredContent).toEqual({ entries });
-      expect(JSON.parse(String(result.content[0]?.text))).toEqual(entries);
-    } finally {
-      await client.close();
-      await server.close();
-    }
-  });
-
-  it(
-    "defaults the configured identity across MCP tools without advertising it as required",
-    async () => {
-      const calls: Array<{ url: string; init?: RequestInit }> = [];
-      vi.spyOn(globalThis, "fetch").mockImplementation(async (url, init) => {
-        const requestUrl = String(url);
-        calls.push({ url: requestUrl, init });
-        const response = requestUrl.includes("/rpc/")
-          ? 1
-          : requestUrl.includes("id=in.(7)")
-            ? [{ id: 7, source: "sender", metadata: {} }]
-            : [];
-        return new Response(JSON.stringify(response), {
-          status: 200,
-        });
-      });
-
-      const server = createAgentBridgeServer({
-        supabaseUrl: "https://bridge.example.test/",
-        supabaseKey: "anon-key",
-        agent: "codex",
-      });
-      const client = new Client({ name: "factory-test", version: "0.0.0" });
-      const [clientTransport, serverTransport] =
-        InMemoryTransport.createLinkedPair();
-      await Promise.all([
-        server.connect(serverTransport),
-        client.connect(clientTransport),
-      ]);
-
-      try {
-        const tools = await client.listTools();
-        const postContext = tools.tools.find((tool) => tool.name === "post_context");
-        const ackContext = tools.tools.find((tool) => tool.name === "ack_context");
-
-        expect(postContext?.inputSchema.required).toEqual(["category", "content"]);
-        expect(ackContext?.inputSchema.required).toEqual(["ids"]);
-
-        await client.callTool({
-          name: "post_context",
-          arguments: { category: "goal-update", content: "defaults source" },
-        });
-        await client.callTool({ name: "get_context", arguments: {} });
-        await client.callTool({ name: "ack_context", arguments: { ids: [7] } });
-
-        expect(JSON.parse(String(calls[0]?.init?.body))).toMatchObject({
-          source: "codex",
-        });
-        expect(calls[1]?.url).toContain("acked_by=not.cs.%7Bcodex%7D");
-        const receiptCall = calls.find((call) => call.url.includes("/rpc/ack_context"));
-        expect(JSON.parse(String(receiptCall?.init?.body))).toEqual({
-          entry_ids: ["7"],
-          agent_name: "codex",
-        });
-      } finally {
-        await client.close();
-        await server.close();
-      }
-    },
-    15_000,
-  );
-
-  it("does not advertise v2 delivery tools on the legacy provider", async () => {
-    vi.spyOn(globalThis, "fetch").mockResolvedValue(new Response("[]", { status: 200 }));
-    const server = createAgentBridgeServer({
-      supabaseUrl: "https://bridge.example.test",
-      supabaseKey: "anon-key",
-      agent: "codex",
-      provider: "legacy-supabase",
-      workspace: "*",
-      instance: undefined,
-    });
-    const client = new Client({ name: "factory-test", version: "0.0.0" });
-    const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
-    await Promise.all([server.connect(serverTransport), client.connect(clientTransport)]);
-    try {
-      const names = (await client.listTools()).tools.map((tool) => tool.name);
-      expect(names).toEqual(["post_context", "get_context", "ack_context", "capabilities", "send", "history"]);
-      expect(names).not.toContain("claim");
-      expect(names).not.toContain("negative_acknowledge");
-    } finally {
-      await client.close();
-      await server.close();
-    }
   });
 
   it("exposes manual gateway sync through MCP while offline", async () => {
@@ -587,10 +372,6 @@ describe("createAgentBridgeServer", () => {
 });
 
 describe("configFromEnv", () => {
-  afterEach(() => {
-    vi.restoreAllMocks();
-  });
-
   function withBridgeConfig(contents: string): string {
     const home = mkdtempSync(join(tmpdir(), "agent-bridge-home-"));
     const configDir = join(home, ".agent-bridge");
@@ -599,161 +380,95 @@ describe("configFromEnv", () => {
     return home;
   }
 
-  it("normalizes agent bridge env without exiting the process", () => {
-    expect(
-      configFromEnv({
-        AGENT_BRIDGE_URL: "https://bridge.example.test",
-        AGENT_BRIDGE_KEY: "anon-key",
-        AGENT_BRIDGE_AGENT: " codex ",
-      }),
-    ).toEqual({
-      supabaseUrl: "https://bridge.example.test",
-      supabaseKey: "anon-key",
+  it("normalizes gateway environment values", () => {
+    expect(configFromEnv({
+      AGENT_BRIDGE_PROVIDER: "gateway",
+      AGENT_BRIDGE_URL: "https://bridge.example.test",
+      AGENT_BRIDGE_TOKEN: "bound-token",
+      AGENT_BRIDGE_AGENT: " codex ",
+      AGENT_BRIDGE_WORKSPACE: "workspace-a",
+      AGENT_BRIDGE_INSTANCE: "desktop-a",
+    })).toMatchObject({
+      provider: "gateway",
+      gatewayUrl: "https://bridge.example.test",
+      gatewayToken: "bound-token",
       agent: "codex",
-      provider: "legacy-supabase",
-      workspace: "*",
-      instance: undefined,
+      workspace: "workspace-a",
+      instance: "desktop-a",
     });
   });
 
-  it("rejects a provider typo instead of falling back to legacy mode", () => {
+  it("combines a tokenless shared gateway config with process authority", () => {
+    const home = withBridgeConfig([
+      "AGENT_BRIDGE_PROVIDER=gateway",
+      "AGENT_BRIDGE_URL=\"https://bridge.example.test\"",
+      "AGENT_BRIDGE_WORKSPACE='workspace-a'",
+      "AGENT_BRIDGE_AGENT=stale-agent",
+      "AGENT_BRIDGE_INSTANCE=stale-instance",
+      "",
+    ].join("\n"));
+    try {
+      expect(configFromEnv({
+        HOME: home,
+        AGENT_BRIDGE_AGENT: "codex",
+        AGENT_BRIDGE_INSTANCE: "desktop-a",
+        AGENT_BRIDGE_TOKEN: "bound-token",
+      })).toMatchObject({
+        provider: "gateway",
+        gatewayUrl: "https://bridge.example.test",
+        gatewayToken: "bound-token",
+        agent: "codex",
+        workspace: "workspace-a",
+        instance: "desktop-a",
+      });
+    } finally {
+      rmSync(home, { recursive: true, force: true });
+    }
+  });
+
+  it("rejects retired legacy provider names and key-only configs", () => {
+    for (const provider of ["legacy", "supabase", "legacy-supabase"]) {
+      expect(() => configFromEnv({
+        AGENT_BRIDGE_PROVIDER: provider,
+        AGENT_BRIDGE_URL: "https://bridge.example.test",
+        AGENT_BRIDGE_KEY: "publishable-key",
+        AGENT_BRIDGE_AGENT: "codex",
+      })).toThrow("legacy Supabase provider was removed");
+    }
+    const home = withBridgeConfig("");
+    try {
+      expect(() => configFromEnv({
+        HOME: home,
+        AGENT_BRIDGE_URL: "https://bridge.example.test",
+        AGENT_BRIDGE_KEY: "publishable-key",
+        AGENT_BRIDGE_AGENT: "codex",
+      })).toThrow("legacy Supabase provider was removed");
+    } finally {
+      rmSync(home, { recursive: true, force: true });
+    }
+  });
+
+  it("rejects provider typos and incomplete gateway configuration", () => {
     expect(() => configFromEnv({
       AGENT_BRIDGE_PROVIDER: "gatewy",
-      AGENT_BRIDGE_URL: "https://bridge.example.test",
-      AGENT_BRIDGE_KEY: "legacy-key",
       AGENT_BRIDGE_AGENT: "codex",
     })).toThrow("Unsupported AGENT_BRIDGE_PROVIDER: gatewy");
+    expect(() => configFromEnv({
+      AGENT_BRIDGE_PROVIDER: "gateway",
+      AGENT_BRIDGE_AGENT: "codex",
+    })).toThrow("gateway requires AGENT_BRIDGE_URL and AGENT_BRIDGE_TOKEN");
   });
 
-  it("reads credentials from the shared config file when env is unset", () => {
-    const home = withBridgeConfig(`
-      # Shared by the CLI and MCP server
-      AGENT_BRIDGE_URL=https://bridge.example.test
-      AGENT_BRIDGE_KEY=anon-key
-    `);
-
-    try {
-      expect(
-        configFromEnv({
-          HOME: home,
-          AGENT_BRIDGE_AGENT: "codex",
-        }),
-      ).toEqual({
-        supabaseUrl: "https://bridge.example.test",
-        supabaseKey: "anon-key",
-        agent: "codex",
-        provider: "legacy-supabase",
-        workspace: "*",
-        instance: undefined,
-      });
-    } finally {
-      rmSync(home, { recursive: true, force: true });
-    }
-  });
-
-  it("ignores a legacy identity stored in the shared config file", () => {
-    const home = withBridgeConfig(`
-      AGENT_BRIDGE_URL=https://bridge.example.test
-      AGENT_BRIDGE_KEY=anon-key
-      AGENT_BRIDGE_AGENT=codex
-    `);
-    try {
-      expect(configFromEnv({ HOME: home })).toEqual({
-        supabaseUrl: "https://bridge.example.test",
-        supabaseKey: "anon-key",
-        agent: undefined,
-        provider: "legacy-supabase",
-        workspace: "*",
-        instance: undefined,
-      });
-    } finally {
-      rmSync(home, { recursive: true, force: true });
-    }
-  });
-
-  it("keeps explicit env credentials ahead of the config file", () => {
-    const home = withBridgeConfig(`
-      AGENT_BRIDGE_URL=https://file.example.test
-      AGENT_BRIDGE_KEY=file-key
-    `);
-
-    try {
-      expect(
-        configFromEnv({
-          HOME: home,
-          AGENT_BRIDGE_URL: "https://env.example.test",
-          AGENT_BRIDGE_KEY: "env-key",
-        }),
-      ).toEqual({
-        supabaseUrl: "https://env.example.test",
-        supabaseKey: "env-key",
-        agent: undefined,
-        provider: "legacy-supabase",
-        workspace: "*",
-        instance: undefined,
-      });
-    } finally {
-      rmSync(home, { recursive: true, force: true });
-    }
-  });
-
-  it("handles quoted values in the shared config file", () => {
-    const home = withBridgeConfig(`
-      AGENT_BRIDGE_URL="https://bridge.example.test"
-      AGENT_BRIDGE_KEY='anon-key'
-    `);
-
-    try {
-      expect(configFromEnv({ HOME: home })).toEqual({
-        supabaseUrl: "https://bridge.example.test",
-        supabaseKey: "anon-key",
-        agent: undefined,
-        provider: "legacy-supabase",
-        workspace: "*",
-        instance: undefined,
-      });
-    } finally {
-      rmSync(home, { recursive: true, force: true });
-    }
-  });
-
-  it("throws a normal error when credentials are missing", () => {
-    const home = mkdtempSync(join(tmpdir(), "agent-bridge-home-"));
-
-    try {
-      expect(() => configFromEnv({ HOME: home })).toThrow(
-        "Missing AGENT_BRIDGE_URL or AGENT_BRIDGE_KEY environment variables or ~/.agent-bridge/config",
-      );
-    } finally {
-      rmSync(home, { recursive: true, force: true });
-    }
-  });
-
-  it("supports an explicit config file path", () => {
+  it("supports an explicit local config path", () => {
     const home = mkdtempSync(join(tmpdir(), "agent-bridge-home-"));
     const configPath = join(home, "bridge.env");
-    writeFileSync(
-      configPath,
-      `
-        AGENT_BRIDGE_URL=https://explicit.example.test
-        AGENT_BRIDGE_KEY=explicit-key
-      `,
-    );
-
+    writeFileSync(configPath, "AGENT_BRIDGE_PROVIDER=local\nAGENT_BRIDGE_WORKSPACE=workspace-a\n");
     try {
-      expect(
-        configFromEnv({
-          AGENT_BRIDGE_CONFIG: configPath,
-          HOME: join(home, "unused"),
-        }),
-      ).toEqual({
-        supabaseUrl: "https://explicit.example.test",
-        supabaseKey: "explicit-key",
-        agent: undefined,
-        provider: "legacy-supabase",
-        workspace: "*",
-        instance: undefined,
-      });
+      expect(configFromEnv({
+        AGENT_BRIDGE_CONFIG: configPath,
+        AGENT_BRIDGE_AGENT: "codex",
+        HOME: join(home, "unused"),
+      })).toMatchObject({ provider: "local", agent: "codex", workspace: "workspace-a" });
     } finally {
       rmSync(home, { recursive: true, force: true });
     }

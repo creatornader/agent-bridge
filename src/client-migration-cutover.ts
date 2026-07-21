@@ -312,12 +312,23 @@ function targetCurrent(
   return retained;
 }
 
-function edgeIdentity(path: string): { dev: number; ino: number } | null {
+interface EdgeIdentity { dev: number; ino: number; nlink: number }
+
+function edgeIdentity(path: string): EdgeIdentity | null {
   if (!existsSync(path)) return null;
   verifyPrivatePathAccess(path, "file");
   const details = lstatSync(path);
   if (!details.isFile() || details.isSymbolicLink()) fail("EDGE_ALIAS", "edge database is not a private regular file");
-  return { dev: details.dev, ino: details.ino };
+  return { dev: details.dev, ino: details.ino, nlink: details.nlink };
+}
+export function edgeIdentitiesAlias(left: EdgeIdentity, right: EdgeIdentity): boolean {
+  const leftHasFileId = left.dev !== 0 || left.ino !== 0;
+  const rightHasFileId = right.dev !== 0 || right.ino !== 0;
+  if (leftHasFileId && rightHasFileId) return left.dev === right.dev && left.ino === right.ino;
+  if (left.nlink > 1 && right.nlink > 1) {
+    fail("EDGE_ALIAS", "edge file identity is ambiguous on this platform");
+  }
+  return false;
 }
 function managedEdgeCohort(
   metadata: ManagedClientMetadata,
@@ -343,7 +354,7 @@ function managedEdgeCohort(
       const candidateIdentity = edgeIdentity(candidateProjection.edgeDatabasePath);
       const samePath = resolve(candidateProjection.edgeDatabasePath) === resolve(edgePath);
       const sameFile = edgePathIdentity !== null && candidateIdentity !== null
-        && edgePathIdentity.dev === candidateIdentity.dev && edgePathIdentity.ino === candidateIdentity.ino;
+        && edgeIdentitiesAlias(edgePathIdentity, candidateIdentity);
       if (samePath || sameFile) matches.push(candidate.backendConfigPath);
     } catch { fail("SHARED_EDGE_COHORT", "managed edge cohort could not be inspected"); }
   }
@@ -540,7 +551,7 @@ function assertDistinctEdges(sourcePath: string, targetPath: string, requirePres
   const source = edgeIdentity(sourcePath);
   const target = edgeIdentity(targetPath);
   if (requirePresent && (!source || !target)) fail("EDGE_ALIAS", "source and target edge paths must be initialized before mutation");
-  if (source && target && source.dev === target.dev && source.ino === target.ino) {
+  if (source && target && edgeIdentitiesAlias(source, target)) {
     fail("EDGE_ALIAS", "source and target edges must not alias the same file");
   }
 }

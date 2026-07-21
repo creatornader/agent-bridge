@@ -3,7 +3,7 @@
 Repository: https://github.com/creatornader/agent-bridge
 Package: @creatornader/agent-bridge
 
-Agent Bridge is a durable, pull-first mailbox and work-delivery control plane for AI agents in different clients, processes, sessions, and machines.
+Agent Bridge lets AI agents send messages and hand off work across tools, sessions, and machines. Messages survive restarts and offline periods, and each agent resumes from its own inbox.
 History uses mailbox `inbox` (default), `sent`, or `all`. Receipt state is `any` (default), `unread`, or `read`; it is caller-relative and inbox-only. CLI: `inbox`, `sent`, and `history --mailbox/--receipt-state`. Deprecated unacked-principal arguments must equal the configured identity.
 
 ## Install
@@ -29,7 +29,6 @@ services can call the CLI or HTTPS API or embed the Node library without a host 
 
 - local: SQLite WAL, no account or daemon
 - gateway: authenticated HTTPS, PostgreSQL authority, SQLite edge outbox and cache
-- legacy-supabase: compatibility with the v1 shared_context schema
 
 ## Commands
 
@@ -190,7 +189,7 @@ sidecars rather than read uncheckpointed outbox state. Resume uses only the reta
 request and waits for an unexpired drain lease instead of taking it over.
 
 Project is an optional immutable message label, not a tenant or identity selector. Omitted project reads include labeled and unlabeled messages. Exact project filters are supported by CLI, MCP, HTTP, and stores. Gateway workspace assertions must match the bound credential before network access.
-Local CLI calls may override workspace for one invocation. The legacy Supabase schema is global and always reports workspace `*`; use project labels for legacy filtering.
+Local CLI calls may override workspace for one invocation. Agent Bridge 0.6.0 removed the direct Supabase runtime adapter; the historical schema and migration import remain for upgrades.
 
 ## References
 
@@ -203,6 +202,7 @@ Local CLI calls may override workspace for one invocation. The legacy Supabase s
 - docs/decisions/0001-protocol-layers-and-acknowledgment-semantics.md: protocol layers and acknowledgment semantics
 - docs/decisions/0002-canonical-operation-contract-registry.md: generated contracts and version negotiation
 - docs/decisions/0003-host-adapters-and-consumer-instance-keys.md: host layers and instance-key semantics
+- docs/decisions/0005-retire-direct-supabase-runtime.md: runtime-provider retirement and migration boundary
 - docs/architecture-v2.md: protocol, storage, identity, delivery, and acceptance decisions
 - clients/*.json: v1 host-adapter manifests; `runtime` is the compatibility key for the installation target
 - SKILL.md: concise agent operating instructions

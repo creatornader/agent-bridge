@@ -35,7 +35,6 @@ function objectWithout(schema: Record<string, any>, excluded: ReadonlySet<string
 const scopeEnforcementByProvider = {
   local: false,
   gateway: SCOPE_ENFORCEMENT,
-  "legacy-supabase": false,
 };
 
 const schemas = {

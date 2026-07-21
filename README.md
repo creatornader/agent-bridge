@@ -4,21 +4,23 @@
 [![test](https://github.com/creatornader/agent-bridge/actions/workflows/test.yml/badge.svg)](https://github.com/creatornader/agent-bridge/actions/workflows/test.yml)
 [![license](https://img.shields.io/github/license/creatornader/agent-bridge)](LICENSE)
 
-Agent Bridge is a durable, pull-first mailbox and work-delivery control plane for AI
-agents across runtimes, sessions, and machines. It gives coding agents, desktop agents,
-always-on workers, and agent frameworks a shared inbox that survives disconnection and
-restart. Start locally with SQLite, then use an operator-owned PostgreSQL gateway when
-agents need to communicate across machines.
+Agent Bridge lets AI agents send messages and hand off work across tools, sessions, and
+machines. Messages survive restarts and offline periods, and each agent resumes from
+its own inbox.
 
-It supports three operating modes:
+Use it through MCP, a CLI, a Node library, or an authenticated HTTPS gateway. Start
+locally with SQLite. Use PostgreSQL when agents need to communicate across machines.
+
+It supports two operating modes:
 
 | Mode | Store | Use case |
 | --- | --- | --- |
 | Local | SQLite WAL | One machine, no service or account |
 | Gateway | PostgreSQL plus a local SQLite edge store | Cross-machine messaging, offline sends, claims, retries, and presence |
-| Legacy Supabase | Existing `shared_context` table through PostgREST | Compatibility while a v1 deployment migrates |
 
-PostgreSQL remains the authority in gateway mode. SQLite holds local-only messages or gateway edge state. Supabase is one way to host PostgreSQL, not a protocol dependency.
+PostgreSQL is the authority in gateway mode. SQLite holds local-only messages or
+gateway edge state. Supabase can host PostgreSQL, but Agent Bridge does not depend on
+its client APIs. The direct Supabase runtime adapter was removed in 0.6.0.
 
 ## Quick start
 
@@ -138,7 +140,7 @@ Protocol 2.1 uses a gateway-first rollout. An upgraded gateway continues to serv
 
 Two gateway-only HTTP 2.1 operations establish a short-lived endpoint-migration challenge. Initial preflight uses a direct predecessor and successor. After a cutover journal exists, the same active successor credential can issue at the retained source URL and consume at the target URL. Both calls require active transaction-bound authority and use the canonical credential and operation rate buckets. PostgreSQL stores only a domain-separated SHA-256 commitment. A challenge expires within 60 seconds and does not authorize endpoint cutover. Authenticated HTTP 2.1 capabilities include the credential's `grantedScopes`.
 
-The OpenAPI paths describe protocol 2.1. The embedded `x-agent-bridge-protocol-2.0` and `x-agent-bridge-schemas-2.0` vendor extensions contain frozen compatibility schema metadata for released 2.0 clients. They are not a second OpenAPI description. Gateway credentials enforce the operation scopes declared by the canonical registry. Local mode uses process identity, and legacy mode uses its configured key. Provider-neutral artifacts report this difference instead of claiming one authorization model for every backend.
+The OpenAPI paths describe protocol 2.1. The embedded `x-agent-bridge-protocol-2.0` and `x-agent-bridge-schemas-2.0` vendor extensions contain frozen compatibility schema metadata for released 2.0 clients. They are not a second OpenAPI description. Gateway credentials enforce the operation scopes declared by the canonical registry. Local mode uses process identity. Provider-neutral artifacts report this difference instead of claiming one authorization model for every backend.
 
 ## Architecture
 
@@ -230,7 +232,7 @@ for its relationship to MCP, A2A, agmsg, brokers, and agent runtimes.
 
 Use the source install for development. The normal installation path is the published
 `@creatornader/agent-bridge` package shown in the quick start. The unscoped npm name
-belongs to another project.
+belongs to another project, and npm rejects `agentbridge` as confusingly similar.
 
 ```bash
 git clone https://github.com/creatornader/agent-bridge.git
@@ -945,7 +947,7 @@ agent-bridge watch
 dispatches a command. They are safe to use after a command name, including `archive`
 and `dr` commands.
 
-`--project` adds an optional immutable label to a message. It never selects a workspace or changes the active identity. Omit it on reads to include every project and unlabeled messages in the credential-bound workspace. Pass it to `get`, `inbox`, `history`, `pending`, or `watch` for an exact label match. Gateway callers may use `--workspace` only as an assertion. The CLI rejects a mismatch before sending a request. Local mode permits a per-command workspace override. The global legacy Supabase schema has no tenant workspace, so legacy mode fixes workspace to `*` and rejects other `--workspace` values.
+`--project` adds an optional immutable label to a message. It never selects a workspace or changes the active identity. Omit it on reads to include every project and unlabeled messages in the credential-bound workspace. Pass it to `get`, `inbox`, `history`, `pending`, or `watch` for an exact label match. Gateway callers may use `--workspace` only as an assertion. The CLI rejects a mismatch before sending a request. Local mode permits a per-command workspace override.
 
 History defaults to mailbox `inbox`: broadcasts plus messages targeted to the configured principal, exactly as prior releases did. `sent` selects messages whose source is that principal, and `all` is the union. `--receipt-state any|unread|read` is caller-relative and valid only with `inbox`. The deprecated `--unacked-by` option remains an identity assertion. The CLI rejects a mismatch before opening storage or contacting a gateway. Server surfaces reject it before querying message storage. Cursors bind workspace, principal, mailbox, and normalized filters. Version 1 cursors are temporarily accepted, while all new cursors are version 2.
 
@@ -957,24 +959,22 @@ recipient-visible delivery. The filter also scopes lease-expiry and exhaustion
 maintenance performed by that claim. Released HTTP 2.0 request shapes remain frozen
 and reject the field.
 
-The legacy Supabase adapter applies mailbox and receipt rules cooperatively. A holder of the legacy publishable key can bypass the adapter through PostgREST or its receipt RPC. Use the authenticated v2 gateway when the authorization boundary must be enforced.
-
 `agent-bridge pending` is a cheap shell gate for agent startup. It exits 0 when unread candidates or due delivery work are visible, 1 only for an authoritative empty result, and 2 when an empty remote state cannot be confirmed. Its JSON result separates unread context from executable delivery work and labels the state as `available`, `empty`, or `unknown`.
 
-`watch` runs until interrupted unless `--polls` sets an explicit bound. Empty polls use capped backoff and jitter. Gateway and legacy network failures retry when the error is transient. Authentication and validation errors stop the watcher.
+`watch` runs until interrupted unless `--polls` sets an explicit bound. Empty polls use capped backoff and jitter. Gateway network failures retry when the error is transient. Authentication and validation errors stop the watcher.
 Each exact project filter gets its own local watch checkpoint. Switching between a filtered and unfiltered watch cannot advance the other checkpoint.
 
 Unknown flags and missing option values fail before a message can be sent. This prevents a misspelled target flag from becoming a broadcast.
 
 ## MCP tools
 
-All providers expose the v1 compatibility tools:
+Both providers expose the v1 compatibility tools:
 
 - `post_context`
 - `get_context`
 - `ack_context`
 
-Local and gateway providers also expose:
+They also expose:
 
 - `send`
 - `history`
@@ -988,8 +988,6 @@ Local and gateway providers also expose:
 - `requeue_delivery`
 - `heartbeat`
 - `presence`
-
-Legacy Supabase does not advertise delivery or presence tools because its schema cannot enforce those operations.
 
 The acknowledgment names depend on the interface. MCP `ack_context` and CLI `acknowledge` write read receipts. MCP `acknowledge` and CLI `ack` settle claimed deliveries. A receipt never settles delivery work, and delivery settlement never creates a receipt.
 
@@ -1024,23 +1022,20 @@ The acknowledgment names depend on the interface. MCP `ack_context` and CLI `ack
 - Errors expose stable codes without database URLs, tokens, or provider response bodies.
 - Delivery work is at least once, not exactly once. Consumers must make external side effects idempotent.
 
-## Legacy Supabase compatibility
+## Upgrading historical Supabase deployments
 
-Existing deployments can continue using:
-
-```text
-AGENT_BRIDGE_PROVIDER=legacy-supabase
-AGENT_BRIDGE_URL=https://your-project.supabase.co
-AGENT_BRIDGE_KEY=<publishable key>
-```
-
-Legacy mode keeps the v1 `shared_context` and `ack_context` RPC behavior. It adds bounded network calls, HTTPS enforcement, UUID mapping across CLI processes, newest-first reads, and the complete compatibility envelope. It cannot provide secure principal binding, delivery leases, presence, or an offline outbox. Use gateway mode for those features.
+Agent Bridge 0.6.0 removed the direct `legacy-supabase` runtime provider. Old provider
+names and key-only configurations now fail with a migration message instead of opening
+PostgREST. Configure local or gateway mode before upgrading a running client.
 
 When gateway migrations run in the same PostgreSQL database as `public.shared_context`, migration 006 imports legacy rows and receipts into the private v2 schema. It preserves valid envelope UUIDs, keeps the existing synthetic UUID mapping for ordinary numeric IDs, assigns deterministic UUIDs to larger IDs, maps projects to workspaces, rejects ID collisions, and verifies the imported count. It does not create executable deliveries for historical targeted rows because an upgrade must not replay old work.
 
 Migration 008 adds the optional project label without changing migration 006. A schema owner can preview correction of migration 006 rows into the canonical `agent-bridge` workspace with `agent-bridge reconcile-legacy-projects`. The command defaults to a dry run. Pass `--apply` to make the change in one transaction. The canonical workspace must already exist. Reconciliation preserves message IDs, timestamps, receipts, and total row counts. It creates no deliveries and is safe to repeat. It refuses changed source data, invalid labels, project or idempotency conflicts, and imported messages that already have a delivery.
 
-The original v1 schema remains in [`sql/setup.sql`](sql/setup.sql). Ordered gateway migrations live in [`sql/migrations/`](sql/migrations/).
+The original v1 schema remains in [`sql/setup.sql`](sql/setup.sql) as a migration
+fixture. Ordered gateway migrations live in [`sql/migrations/`](sql/migrations/).
+The retirement decision is recorded in
+[ADR-0005](docs/decisions/0005-retire-direct-supabase-runtime.md).
 
 ## Health and operations
 
@@ -1149,6 +1144,8 @@ durability behavior has not yet been proved on a dedicated Windows host.
 - [ADR-0001](docs/decisions/0001-protocol-layers-and-acknowledgment-semantics.md): protocol layers and acknowledgment semantics.
 - [ADR-0002](docs/decisions/0002-canonical-operation-contract-registry.md): canonical contracts, generated artifacts, discovery, and version negotiation.
 - [ADR-0003](docs/decisions/0003-host-adapters-and-consumer-instance-keys.md): host layers and consumer instance-key semantics.
+- [ADR-0004](docs/decisions/0004-client-lifecycle-and-endpoint-migration.md): managed client ownership and endpoint migration.
+- [ADR-0005](docs/decisions/0005-retire-direct-supabase-runtime.md): direct Supabase runtime retirement and historical migration support.
 - [docs/architecture-v2.md](docs/architecture-v2.md): protocol and storage decisions.
 - [SKILL.md](SKILL.md): runtime-neutral agent operating instructions.
 - [llms.txt](llms.txt): compact machine-readable project map.

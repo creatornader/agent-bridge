@@ -6,15 +6,13 @@ import { resolveClientConfig } from "../src/client-config.js";
 import { createStore } from "../src/client-runtime.js";
 import { SQLiteBridgeStore } from "../src/sqlite-bridge-store.js";
 import { SyncingBridgeStore } from "../src/syncing-bridge-store.js";
-import { LegacySupabaseRestStore } from "../src/legacy-supabase-store.js";
 import { HttpBridgeStore } from "../src/http-bridge-store.js";
 
 describe("client runtime", () => {
-  it("selects all provider-neutral stores", () => {
+  it("selects both runtime stores", () => {
     const base = { principal: { workspace: "w", agent: "a" }, databasePath: ":memory:", edgeDatabasePath: ":memory:", cursorPath: "", configPath: "" };
     expect(createStore({ ...base, provider: "local" })).toBeInstanceOf(SQLiteBridgeStore);
     expect(createStore({ ...base, provider: "gateway", url: "https://bridge.test", credential: "token" })).toBeInstanceOf(SyncingBridgeStore);
-    expect(createStore({ ...base, provider: "legacy-supabase", url: "https://supabase.test", credential: "key" })).toBeInstanceOf(LegacySupabaseRestStore);
   });
 
   it("cancels an active gateway request when the store closes", async () => {
@@ -62,14 +60,22 @@ describe("client runtime", () => {
     }, "claude-code")).toThrow("source must match AGENT_BRIDGE_AGENT (codex)");
   });
 
-  it("keeps legacy Supabase unscoped unless a workspace is configured", () => {
-    expect(resolveClientConfig({
+  it("rejects retired legacy provider names and key-only configs", () => {
+    for (const provider of ["legacy", "supabase", "legacy-supabase"]) {
+      expect(() => resolveClientConfig({
+        HOME: "/unused",
+        AGENT_BRIDGE_PROVIDER: provider,
+        AGENT_BRIDGE_AGENT: "codex",
+        AGENT_BRIDGE_URL: "https://bridge.test",
+        AGENT_BRIDGE_KEY: "key",
+      })).toThrow("legacy Supabase provider was removed");
+    }
+    expect(() => resolveClientConfig({
       HOME: "/unused",
-      AGENT_BRIDGE_PROVIDER: "legacy-supabase",
       AGENT_BRIDGE_AGENT: "codex",
       AGENT_BRIDGE_URL: "https://bridge.test",
       AGENT_BRIDGE_KEY: "key",
-    }).principal.workspace).toBe("*");
+    })).toThrow("legacy Supabase provider was removed");
   });
 
   it("scopes cursors by provider endpoint and principal", () => {
