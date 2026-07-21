@@ -153,7 +153,7 @@ The published npm version is the authority for whether this package line has shi
 
 ### Production validation and adoption
 
-Completed through the published and deployed 0.6.0 package:
+Completed through the published and deployed 0.6.1 package:
 
 - Migrated the project authority from the legacy Supabase schema to the canonical
   PostgreSQL schema after a write freeze, exact-major backup, and restore drill. The
@@ -181,7 +181,7 @@ Completed through the published and deployed 0.6.0 package:
 
 The production proof is repeatable release evidence, not a permanent certification.
 Every gateway release must match its package version and source revision before the
-workflow runs with disposable credentials.
+workflow runs with disposable credentials in a release-specific proof workspace.
 
 ## Near-term work
 

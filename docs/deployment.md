@@ -275,9 +275,12 @@ The manual `gateway production proof` GitHub Actions workflow runs this acceptan
 proof against an existing HTTPS gateway. GitHub restricts it to `main`, and every job
 uses the approval-protected `agent-bridge-production-proof` environment. Configure
 `PROOF_SENDER_TOKEN`, `PROOF_RECEIVER_TOKEN`, `PROOF_HOST_SALT`, and `FLY_API_TOKEN` as
-environment secrets. The sender and receiver credentials must bind the requested
-workspace to the dedicated `proof-sender` and `proof-receiver` principals. The
-sender credential needs `messages:write` and `messages:read`. The receiver needs
+environment secrets. Use a release-specific proof workspace for every run. Owner
+provisioning refuses a second agent with the same principal in one workspace, and a
+revoked credential cannot serve as a rotation predecessor. The sender and receiver
+credentials must bind the requested workspace to the dedicated `proof-sender` and
+`proof-receiver` principals. The sender credential needs `messages:write` and
+`messages:read`. The receiver needs
 `messages:read`, `deliveries:claim`, `deliveries:settle`, and `deliveries:read`.
 
 Run the workflow only when the Fly app has exactly one gateway machine. The cycle job

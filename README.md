@@ -126,7 +126,9 @@ deployment gate passes. GitHub must run it from `main` in the protected
 offline outbox replay, exact idempotency, claim, and acknowledgment. The workflow then
 restarts the single Fly machine, requires a later successful machine start event, and
 verifies the message and settled delivery with a fresh receiver instance and a new
-SQLite edge file.
+SQLite edge file. Use a new proof workspace for each release run. Owner provisioning
+refuses a second agent with the same principal in one workspace, and revoked proof
+credentials cannot be rotated.
 Its versioned receipts contain only identifiers, times, principal and workspace labels,
 the gateway origin, checks, and SHA-256 host evidence. They omit credentials, database
 URLs, message content, and SQLite files.
