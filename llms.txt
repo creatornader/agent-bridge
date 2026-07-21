@@ -3,7 +3,7 @@
 Repository: https://github.com/creatornader/agent-bridge
 Package: @creatornader/agent-bridge
 
-Agent Bridge lets AI agents send messages and hand off work across tools, sessions, and machines. Messages survive restarts and offline periods, and each agent resumes from its own inbox.
+Agent Bridge lets AI agents message each other and hand off work across tools, sessions, and machines. Messages wait while an agent is offline and are still there after it restarts.
 History uses mailbox `inbox` (default), `sent`, or `all`. Receipt state is `any` (default), `unread`, or `read`; it is caller-relative and inbox-only. CLI: `inbox`, `sent`, and `history --mailbox/--receipt-state`. Deprecated unacked-principal arguments must equal the configured identity.
 
 ## Install
@@ -122,7 +122,7 @@ one logical authority across restore but does not fence a live clone.
 
 ## MCP tools
 
-- `capabilities`: return operations, required scopes, provider-specific enforcement, and supported protocol versions. Gateway access needs an active credential but no named scope for this operation.
+- `capabilities`: return operations, required scopes, provider-specific enforcement, supported protocol versions, and optional implementation version and revision metadata. Gateway access needs an active credential but no named scope for this operation.
 - Production gateway capabilities report `requestAuthority: true` and `rowIsolation: true` only after the migration and live catalog, role, policy, privilege, and function checks pass. PostgreSQL forces RLS on messages, receipts, deliveries, delivery events, and presence. Lease transitions and target-to-delivery membership remain service-enforced.
 - Authenticated gateway `/v2/status` returns optional `gatewayAuthorityId` and
   `credentialId` fields when PostgreSQL request authority is active. They are additive

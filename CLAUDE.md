@@ -1,6 +1,7 @@
 ## Project: Agent Bridge
 
-Provider-neutral MCP server, CLI, and HTTPS gateway for messaging between AI agents.
+Messaging and work handoff for AI agents across tools, sessions, and machines. MCP,
+CLI, Node, and HTTPS interfaces provide access.
 
 ### Key files
 
@@ -121,6 +122,7 @@ Sync triggers:
 - Upgraded gateways preserve released 2.0 clients. New 2.1 clients require complete, consistent 2.1 negotiation before mutation and reject headerless or selected 2.0 gateways instead of downgrading. Upgrade the gateway before 2.1 clients.
 - OpenAPI paths describe protocol 2.1. The embedded 2.0 vendor extensions contain limited compatibility schema metadata, not a second OpenAPI description.
 - Gateway credentials enforce the canonical operation scopes. Capabilities requires an active credential but no named scope. Local mode reports scope enforcement as false.
+- Authenticated gateway capabilities report the running package version and, when the image was built for deployment, its Git revision. Production proof must reject a deployed version or revision that differs from the intended release.
 - For requests with bodies, the gateway validates media type, size, and JSON before opening the request transaction. Every authorized operation then consumes a credential-wide rate bucket and an operation bucket through narrow security-definer functions. Scope and rate denials append secret-free security events before domain work begins.
 - Production request authority, security accounting, and domain work use one checked-out client and one explicit outer transaction. Readiness uses a separate one-connection pool. Node hashes the bearer credential before PostgreSQL receives it. Migration 012 matches that hash and derives canonical workspace, principal, and scopes on the request backend. Migration 013 forces RLS on the five domain tables and records a protected catalog attestation. Gateway capabilities report row isolation only after live readiness checks pass. Lease transitions and target-to-delivery membership remain application-enforced.
 - Migration 017 adds one immutable PostgreSQL authority UUID. The released request-authority opener remains available with its original return shape. Production requests use a bound opener and authenticated status adds optional `gatewayAuthorityId` and `credentialId` fields without changing HTTP protocol 2.1. Runtime readiness verifies the singleton row, immutable trigger coverage and catalog, and runtime or public table and column privileges. Native DR preserves the UUID as logical authority continuity only. It does not fence a live clone. Drain old gateways before this migration because a running old process can still serve normal traffic after its readiness probe fails.

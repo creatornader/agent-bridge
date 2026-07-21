@@ -93,8 +93,13 @@ describe("canonical v2 contract registry", () => {
       protocolVersion: "2.1", currentProtocolVersion: "2.1", selectedProtocolVersion: "2.1",
       supportedProtocolVersions: ["2.0", "2.1"], scopeEnforcement: true, requestAuthority: true,
       rowIsolation: true, authorizationModel: "scoped-credential", surface: "http", provider: "gateway",
+      implementationVersion: "0.6.1", implementationRevision: "a".repeat(40),
       grantedScopes: ["status:read", "messages:write"], operations: [],
-    })).toMatchObject({ grantedScopes: ["status:read", "messages:write"] });
+    })).toMatchObject({
+      implementationVersion: "0.6.1",
+      implementationRevision: "a".repeat(40),
+      grantedScopes: ["status:read", "messages:write"],
+    });
   });
 
   it("negotiates only versions the gateway serves", () => {
@@ -245,6 +250,7 @@ describe("generated contract artifacts", () => {
       "schemas/agent-bridge-v2.mcp.json",
       "schemas/agent-bridge-v2.capabilities.json",
       "openapi/agent-bridge-v2.openapi.json",
+      "scripts/gateway-release-check.mjs",
     ]) expect(files.has(path)).toBe(true);
   }, 30_000);
 });

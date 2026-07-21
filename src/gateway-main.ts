@@ -12,6 +12,7 @@ import {
 import { PostgresBridgeStore } from "./postgres-bridge-store.js";
 import { PostgresRequestAuthority } from "./postgres-request-authority.js";
 import { runtimePostgresConnectionConfig } from "./postgres-runtime-connection.js";
+import { buildRevision, packageVersion } from "./package-metadata.js";
 
 function integer(value: string | undefined, fallback: number, name: string): number {
   if (value === undefined) return fallback;
@@ -44,6 +45,10 @@ async function main(): Promise<void> {
   if (!databaseUrl) {
     throw new Error("AGENT_BRIDGE_RUNTIME_DATABASE_URL is required for the gateway");
   }
+  const implementation = {
+    version: packageVersion(),
+    revision: buildRevision(process.env.AGENT_BRIDGE_BUILD_REVISION),
+  };
 
   const deadline = integer(process.env.AGENT_BRIDGE_REQUEST_DEADLINE_MS, 10_000, "request deadline");
   const databaseTimeout = integer(
@@ -125,6 +130,7 @@ async function main(): Promise<void> {
     allowedOrigins,
     bodyLimitBytes,
     requestDeadlineMs: deadline,
+    implementation,
     ready: schemaReady,
     rowIsolationReady: schemaReady,
   });

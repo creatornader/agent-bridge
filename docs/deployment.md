@@ -229,11 +229,29 @@ repository does not perform them:
    match the recorded runtime contract. It never adopts a restored `NOLOGIN` shell.
 6. Construct the restricted runtime URL. Import it and the base64-encoded PostgreSQL CA
    as the two runtime secrets shown above, then run the app-aware read-only preflight.
-7. Deploy the immutable image with `fly deploy --config deploy/fly.toml --app <app>`.
+7. Deploy the immutable image with its source revision:
+
+   ```bash
+   fly deploy --config deploy/fly.toml --app <app> \
+     --build-arg AGENT_BRIDGE_BUILD_REVISION="$(git rev-parse HEAD)"
+   ```
+
    Require `/readyz` before routing clients.
-8. Run authenticated capability and status probes, then publish, pull, claim, and
+8. Check the running package and source revision with a principal-bound credential:
+
+   ```bash
+   AGENT_BRIDGE_URL="https://<app>.fly.dev" AGENT_BRIDGE_TOKEN="..." \
+     npm run verify:gateway:release -- \
+     --version "$(node -p "require('./package.json').version")" \
+     --revision "$(git rev-parse HEAD)"
+   ```
+
+   The check also requires protocol 2.1, request authority, and row isolation. It
+   fails if the deployed image omits its revision or differs from the intended
+   release.
+9. Run authenticated status, publication, pull, claim, and
    settle a disposable targeted delivery.
-9. Move clients only after the gateway proof passes. Preserve every source edge store
+10. Move clients only after the gateway proof passes. Preserve every source edge store
    until its outbox is empty.
 
 App creation, database provisioning, secret writes, migration, bootstrap, deployment,
@@ -318,8 +336,9 @@ owner-control state, or security events.
 5. Stop schema-changing jobs other than the selected migration job.
 6. Run the new image's migration command once with schema-owner authority.
 7. Run the runtime bootstrap with separate runtime-login credentials.
-8. Start the new gateway and require `/readyz`, an authenticated capability probe, and
-   an authenticated status probe.
+8. Start the new gateway and require `/readyz`. Run
+   `npm run verify:gateway:release` against the expected package version and Git
+   revision, then run an authenticated status probe.
 9. Send, read, claim, and settle a disposable targeted delivery.
 10. Roll clients forward only after the gateway proof passes.
 11. Keep the previous authority available but inactive until the observation window

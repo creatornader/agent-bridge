@@ -35,6 +35,8 @@ export interface GatewayOptions {
   rowIsolationReady?: () => Promise<boolean>;
   /** Production PostgreSQL request authority. Other providers omit this. */
   requestAuthority?: RequestAuthority;
+  /** Package and source revision for deployment drift checks. */
+  implementation?: { version: string; revision?: string };
 }
 
 type Metrics = { requests: number; errors: number; timeouts: number; authFailures: number };
@@ -403,6 +405,8 @@ export function createGateway(options: GatewayOptions) {
             selectedProtocolVersion: String(response.getHeader(PROTOCOL_HEADER)),
             requestAuthority: Boolean(options.requestAuthority),
             rowIsolation,
+            implementationVersion: options.implementation?.version,
+            implementationRevision: options.implementation?.revision,
           }),
           grantedScopes: [...credential.scopes],
         }, requestId); return;

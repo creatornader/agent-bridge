@@ -4,9 +4,9 @@
 [![test](https://github.com/creatornader/agent-bridge/actions/workflows/test.yml/badge.svg)](https://github.com/creatornader/agent-bridge/actions/workflows/test.yml)
 [![license](https://img.shields.io/github/license/creatornader/agent-bridge)](LICENSE)
 
-Agent Bridge lets AI agents send messages and hand off work across tools, sessions, and
-machines. Messages survive restarts and offline periods, and each agent resumes from
-its own inbox.
+Agent Bridge lets AI agents message each other and hand off work across tools,
+sessions, and machines. Messages wait while an agent is offline and are still there
+after it restarts.
 
 Use it through MCP, a CLI, a Node library, or an authenticated HTTPS gateway. Start
 locally with SQLite. Use PostgreSQL when agents need to communicate across machines.
@@ -65,7 +65,8 @@ a production TLS deployment. Read [the deployment guide](docs/deployment.md) bef
 exposing a gateway, changing network bindings, upgrading the schema, or relying on the
 named volume for persistent data.
 
-The repository also maintains a provider-neutral Fly.io reference at
+The repository also maintains a Fly.io reference that does not depend on a specific
+database host. It lives at
 [`deploy/fly.toml`](deploy/fly.toml). It deliberately omits an app name and release
 command. Check the local contract before creating or changing any Fly resource:
 
@@ -103,8 +104,24 @@ The Fly gateway expects two secrets: the restricted runtime database URL and a
 base64-encoded PostgreSQL CA bundle. It decodes the CA in memory and verifies both the
 certificate chain and database hostname. It never needs a CA file inside the image.
 
-The manual `gateway production proof` workflow tests an existing gateway after its
-deployment gate has passed. GitHub must run it from `main` in the protected
+Build the production image with its source revision, then confirm the running gateway
+before moving clients or starting the full proof:
+
+```bash
+fly deploy --config deploy/fly.toml --app <app> \
+  --build-arg AGENT_BRIDGE_BUILD_REVISION="$(git rev-parse HEAD)"
+AGENT_BRIDGE_URL="https://<app>.fly.dev" AGENT_BRIDGE_TOKEN="..." \
+  npm run verify:gateway:release -- \
+  --version "$(node -p "require('./package.json').version")" \
+  --revision "$(git rev-parse HEAD)"
+```
+
+The authenticated check compares the running package and Git revision with the
+intended release. It also requires protocol 2.1, request authority, and row isolation.
+It prints no credential. A missing or different revision stops the rollout.
+
+The manual `gateway production proof` workflow tests an existing gateway after this
+deployment gate passes. GitHub must run it from `main` in the protected
 `agent-bridge-production-proof` environment. Separate sender and receiver jobs prove
 offline outbox replay, exact idempotency, claim, and acknowledgment. The workflow then
 restarts the single Fly machine, requires a later successful machine start event, and
@@ -135,6 +152,11 @@ URLs, message content, and SQLite files.
 The accepted protocol and storage decisions live in [docs/architecture-v2.md](docs/architecture-v2.md).
 
 The canonical v2 operation registry generates [JSON Schema](schemas/agent-bridge-v2.schema.json), [OpenAPI 3.1.2](openapi/agent-bridge-v2.openapi.json), and the [MCP manifest](schemas/agent-bridge-v2.mcp.json). Use `GET /v2/capabilities`, MCP `capabilities`, or CLI `agent-bridge capabilities` to discover the operations for that surface and provider. Capabilities distinguish the current, selected, and supported protocol versions.
+
+Authenticated gateway capabilities also report `implementationVersion`. Production
+images report `implementationRevision` when the operator supplies the Git revision at
+build time. These fields identify deployed code. They do not change protocol version
+negotiation.
 
 Protocol 2.1 uses a gateway-first rollout. An upgraded gateway continues to serve released 2.0 clients, including headerless requests and their direct or null delivery results. A 2.1 client probes before mutation and proceeds only when complete, consistent response headers select 2.1 and advertise 2.1 support. It rejects mutation against a headerless or 2.0 gateway instead of downgrading. Upgrade the gateway before installing or starting 2.1 clients.
 

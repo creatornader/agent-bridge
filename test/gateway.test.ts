@@ -312,7 +312,9 @@ describe("authenticated v2 gateway", () => {
   });
 
   it("discovers capabilities and negotiates protocol versions", async () => {
-    const base = await gateway();
+    const base = await gateway(undefined, {
+      implementation: { version: "0.6.1", revision: "a".repeat(40) },
+    });
     const capabilities = await fetch(`${base}/v2/capabilities`, { headers: auth() });
     expect(capabilities.status).toBe(200);
     expect(capabilities.headers.get("x-agent-bridge-protocol-version")).toBe("2.1");
@@ -320,6 +322,7 @@ describe("authenticated v2 gateway", () => {
     expect(await capabilities.json()).toMatchObject({
       protocolVersion: "2.1", supportedProtocolVersions: ["2.0", "2.1"],
       scopeEnforcement: true, authorizationModel: "scoped-credential", grantedScopes: AUTHORIZATION_SCOPES,
+      implementationVersion: "0.6.1", implementationRevision: "a".repeat(40),
     });
 
     const legacy = await fetch(`${base}/v2/capabilities`, { headers: { authorization: "Bearer good" } });

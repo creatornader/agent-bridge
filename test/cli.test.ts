@@ -76,7 +76,7 @@ describe("agent-bridge CLI", () => {
     for (const invocation of invocations) {
       const result = runAt(home, invocation, { AGENT_BRIDGE_DB: database });
       expect(result.status, `${invocation.join(" ")}: ${result.stderr}`).toBe(0);
-      expect(result.stdout).toContain("agent-bridge: provider-neutral agent messaging");
+      expect(result.stdout).toContain("agent-bridge: messaging and work handoff for AI agents");
       expect(result.stdout).toContain("clients migrate stage <codex|claude-code|claude-desktop>");
       expect(result.stdout).toContain("clients migrate cutover <stage-operation-id> --exclusive-edge [--apply] [--recover-lock]");
       expect(result.stdout).not.toContain("clients migrate reverse");

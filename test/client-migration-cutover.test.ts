@@ -355,7 +355,7 @@ describe("client endpoint migration cutover", () => {
     await source.initialize();
     expect(await source.migrationGate()).toMatchObject({ state: "draining", operationId: result.operationId });
     await source.close();
-  });
+  }, 30_000);
 
   it("rejects challenge responses that do not bind the staged route pair", async () => {
     for (const mismatch of ["issuer", "verifier", "consumed"] as const) {

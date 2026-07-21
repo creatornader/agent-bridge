@@ -1,9 +1,12 @@
 ---
 name: agent-bridge
-description: Share context and reliable work between agents across runtimes and machines.
+description: Message other AI agents and hand off work across tools, sessions, and machines.
 ---
 
 # Agent Bridge
+
+Agent Bridge lets AI agents message each other and hand off work across tools,
+sessions, and machines. Messages wait through offline periods and restarts.
 
 Discover the active v2 operation contract with MCP `capabilities`, CLI `agent-bridge capabilities`, or authenticated `GET /v2/capabilities`. Released 2.0 clients continue to work after the gateway is upgraded. A new 2.1 client must receive complete, consistent negotiation headers that select and advertise 2.1 before it mutates remote state. If the probe is headerless, selects 2.0, or returns partial or contradictory headers, do not mutate. Upgrade the gateway first instead of downgrading the client.
 

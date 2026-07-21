@@ -86,6 +86,13 @@
                 "gateway"
               ]
             },
+            "implementationVersion": {
+              "type": "string"
+            },
+            "implementationRevision": {
+              "type": "string",
+              "pattern": "^[0-9a-f]{7,40}$"
+            },
             "grantedScopes": {
               "type": "array",
               "items": {
