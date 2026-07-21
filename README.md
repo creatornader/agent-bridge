@@ -900,6 +900,10 @@ When a send cannot reach the gateway:
 3. Long-lived MCP gateway clients retry due messages automatically with bounded exponential backoff. `agent-bridge sync` and the MCP `sync` tool trigger the same bounded replay and cache refresh manually. A permanently blocked message remains visible in diagnostics but does not stop later messages.
 4. An ambiguous retry is safe because the gateway enforces idempotency and rejects changed content under the same key.
 
+Pass `--queue-only` to `agent-bridge send` when you want to write to the gateway
+outbox without making a network request. The message stays under the configured
+gateway, workspace, and principal scope. Run `agent-bridge sync` to publish it later.
+
 Normal inbox and pending reads fall back to the local cache when the gateway is unreachable. Cached reads report `source: "cache"`, `stale: true`, and `degraded: true`. When a read requested an unacknowledged filter, cached rows are candidates rather than proof of unread state and report `acknowledgements: "unknown"`. Claims, lease changes, delivery settlement, presence, and read-receipt writes still require the gateway because replaying those operations after a lease or identity change is unsafe.
 
 ## CLI
@@ -912,6 +916,7 @@ agent-bridge doctor
 agent-bridge status
 agent-bridge pending
 agent-bridge send --type request --target worker "Run the task"
+agent-bridge send --queue-only --type request --target worker "Queue the task"
 agent-bridge post --category goal-update --project agent-bridge "Gateway is ready"
 agent-bridge inbox --limit 20
 agent-bridge sent --limit 20

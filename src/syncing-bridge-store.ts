@@ -406,6 +406,19 @@ export class SyncingBridgeStore implements BridgeStore {
     };
   }
 
+  async enqueueMessage(message: PendingMessage): Promise<SyncInsertResult & { disposition: "queued"; authoritative: false }> {
+    this.assertHealthy();
+    this.assertPrincipal({ workspace: message.workspace, agent: message.source }, false);
+    await this.edge.assertScopeActive();
+    const queued = await this.edge.enqueue(message, this.now());
+    return {
+      message: provisional(queued.draft, this.now().toISOString()),
+      created: queued.created,
+      disposition: "queued",
+      authoritative: false,
+    };
+  }
+
   private async pull(maxPages: number, signal?: AbortSignal): Promise<{
     online: boolean;
     pulled: number;

@@ -219,7 +219,8 @@
           "retry-max-ms",
           "retry-jitter",
           "not-before",
-          "message-id"
+          "message-id",
+          "queue-only"
         ],
         "outputSchema": {
           "type": "object",

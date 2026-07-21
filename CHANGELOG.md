@@ -6,6 +6,19 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and 
 
 ## [Unreleased]
 
+### Added
+
+- Add `agent-bridge send --queue-only` for an explicit gateway outbox write that
+  makes no network request. A later manual or automatic sync publishes the same
+  immutable message from its original endpoint, workspace, and principal scope.
+
+### Fixed
+
+- Make the production proof use the real gateway edge scope during its offline
+  phase. The proof now carries the configured workspace, uses an explicit stable
+  message ID for replay, and waits for rate-limited replays to deduplicate before
+  continuing.
+
 ## [0.5.2] - 2026-07-20
 
 ### Fixed

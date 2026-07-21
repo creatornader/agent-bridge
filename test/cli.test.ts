@@ -795,6 +795,22 @@ describe("agent-bridge CLI", () => {
     expect(result.status, result.stderr).toBe(0);
     expect(JSON.parse(result.stdout)).toMatchObject({ online: false, pushed: 0 });
   });
+  it("queues a gateway publication without contacting the endpoint", () => {
+    const result = run(["send", "queued work", "--target", "worker", "--queue-only"], {
+      AGENT_BRIDGE_PROVIDER: "gateway",
+      AGENT_BRIDGE_URL: "http://127.0.0.1:1",
+      AGENT_BRIDGE_TOKEN: "test-token",
+      AGENT_BRIDGE_AGENT: "sender",
+      AGENT_BRIDGE_WORKSPACE: "acme",
+    });
+    expect(result.status, result.stderr).toBe(0);
+    expect(JSON.parse(result.stdout)).toMatchObject({
+      created: true,
+      disposition: "queued",
+      authoritative: false,
+      message: { workspace: "acme", source: "sender", targets: ["worker"] },
+    });
+  });
   it("rejects a missing target value instead of routing to a true literal", () => {
     const result = run(["post", "--source", "codex", "--target-agent", "--category", "request", "secret"]);
     expect(result.status).toBe(1);

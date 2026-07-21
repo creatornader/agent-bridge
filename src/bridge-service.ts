@@ -117,14 +117,22 @@ export class BridgeService {
   async publish(
     principalInput: BridgePrincipal,
     draftInput: MessageDraft,
+    options: { queueOnly?: boolean } = {},
   ): Promise<InsertMessageResult> {
     const principal = validatePrincipal(principalInput);
     const draft = validateMessageDraft(draftInput);
-    return this.store.insertMessage({
+    const message = {
       ...draft,
       workspace: principal.workspace,
       source: principal.agent,
-    });
+    };
+    if (options.queueOnly) {
+      if (!this.store.enqueueMessage) {
+        throw new BridgeValidationError("queue-only publication requires the gateway provider");
+      }
+      return this.store.enqueueMessage(message);
+    }
+    return this.store.insertMessage(message);
   }
 
   async history(

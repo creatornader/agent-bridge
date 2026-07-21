@@ -52,6 +52,7 @@ export interface DeliveryEventPage { events: BridgeDeliveryEvent[]; cursor?: str
 export interface BridgeStore {
   initialize(options?: { signal?: AbortSignal; mode?: "active" | "passive" }): Promise<void>;
   insertMessage(message: Omit<BridgeMessage, "sequence" | "createdAt">, options?: { signal?: AbortSignal }): Promise<InsertMessageResult>;
+  enqueueMessage?(message: Omit<BridgeMessage, "sequence" | "createdAt">): Promise<InsertMessageResult & { disposition: "queued"; authoritative: false }>;
   listMessages(principal: BridgePrincipal, query?: MessageQuery, options?: { signal?: AbortSignal }): Promise<MessagePage>;
   recordReceipt(principal: BridgePrincipal, messageIds: string[], readAt?: Date): Promise<number>;
   recordLegacyReceipt?(legacyIds: string[], principal: string): Promise<number>;
