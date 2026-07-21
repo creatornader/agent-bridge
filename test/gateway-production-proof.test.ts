@@ -30,6 +30,7 @@ function result(value: unknown) {
 const env = {
   AGENT_BRIDGE_TOKEN: "secret-bearer-value",
   AGENT_BRIDGE_PROOF_HOST_SALT: "test-host-salt-value",
+  GITHUB_JOB: "receiver",
 };
 
 describe("gateway production proof", () => {
