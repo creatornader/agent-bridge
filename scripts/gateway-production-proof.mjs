@@ -17,6 +17,7 @@ const PHASE_FIELDS = {
 };
 const COMMON_FIELDS = new Set(["schema", "version", "phase", "workspace", "principal", "gatewayOrigin", "instance", "hostEvidence", "checks"]);
 const SHA256 = /^[0-9a-f]{64}$/u;
+const SENSITIVE_ENV_NAME = /(?:^|_)(?:TOKEN|PASSWORD|SECRET|DATABASE_URL|PRIVATE_KEY|API_KEY|KEY|CREDENTIAL|CA_BASE64|SALT)(?:$|_)/u;
 
 function fail(message) {
   throw new Error(message);
@@ -193,7 +194,7 @@ function assertSafeReceipt(receipt, env = process.env) {
     receipt.publisherPrincipal,
   ].filter((value) => typeof value === "string"));
   for (const [name, value] of Object.entries(env)) {
-    if (typeof value !== "string" || value.length < 8 || allowedValues.has(value) || name === "AGENT_BRIDGE_PROOF_HOST_SALT") continue;
+    if (!SENSITIVE_ENV_NAME.test(name) || typeof value !== "string" || value.length < 8 || allowedValues.has(value)) continue;
     if (serialized.includes(value)) fail(`receipt contains an environment value from ${name}`);
   }
 }
