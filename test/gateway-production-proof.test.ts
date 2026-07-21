@@ -99,11 +99,11 @@ describe("gateway production proof", () => {
     };
     writeFileSync(publisherPath, JSON.stringify({
       ...common, phase: "publisher", principal: "proof-sender", instance: "sender-instance", receiverPrincipal: "proof-receiver",
-      hostEvidence: { algorithm: "sha256", digest: "a".repeat(64) }, queuedAt: new Date().toISOString(), synchronizedAt: new Date().toISOString(),
+      hostEvidence: proof.hostEvidence(env), queuedAt: new Date().toISOString(), synchronizedAt: new Date().toISOString(),
     }));
     writeFileSync(consumerPath, JSON.stringify({
       ...common, phase: "consumer", principal: "proof-receiver", instance: "consumer-instance", publisherPrincipal: "proof-sender",
-      hostEvidence: { algorithm: "sha256", digest: "b".repeat(64) }, publisherHostEvidence: { algorithm: "sha256", digest: "a".repeat(64) },
+      hostEvidence: { algorithm: "sha256", digest: "b".repeat(64) }, publisherHostEvidence: proof.hostEvidence(env),
       deliveryId: "delivery-3", claimedAt: new Date().toISOString(), acknowledgedAt: new Date().toISOString(),
     }));
     writeFileSync(cyclePath, JSON.stringify({

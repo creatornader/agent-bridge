@@ -277,7 +277,9 @@ scope stay unchanged. A separate host finds the exact message through `proof-rec
 claims its delivery, and acknowledges it.
 After the Fly machine cycle, the verifier uses a fresh instance key, edge database,
 and cursor. It reads the immutable message and confirms that the prior delivery is
-still `acked`.
+still `acked`. The sender and receiver host evidence must differ. GitHub may reuse the
+sender's hosted runner for the verifier, so the verifier proves fresh local state rather
+than requiring a third physical host.
 
 Each phase writes an `agent-bridge-production-proof-v1` receipt. The runner rejects
 unknown fields at the phase boundary and checks every receipt before use. Receipts may
