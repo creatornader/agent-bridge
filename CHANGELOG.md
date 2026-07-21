@@ -21,7 +21,9 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and 
 - Verify a Fly restart through a later successful machine `start` event instead of
   requiring `instance_id` to change. Fly may retain that identifier across a plain
   restart. Limit receipt value scanning to secret-bearing environment variables so
-  ordinary GitHub job identifiers cannot cause false leak reports.
+  ordinary GitHub job identifiers cannot cause false leak reports. Permit GitHub to
+  reuse the sender host for the fresh-edge verifier while still requiring distinct
+  sender and receiver host evidence.
 
 ## [0.5.2] - 2026-07-20
 

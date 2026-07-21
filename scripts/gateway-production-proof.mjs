@@ -124,8 +124,8 @@ export function validateReceipt(value, expectedPhase) {
     validateHostEvidence(value.publisherHostEvidence, "publisherHostEvidence");
     validateHostEvidence(value.consumerHostEvidence, "consumerHostEvidence");
     validateMachineCycle(value.machineCycle);
-    if (sameHostEvidence(value.hostEvidence, value.publisherHostEvidence) || sameHostEvidence(value.hostEvidence, value.consumerHostEvidence)) {
-      fail("verifier host evidence must differ from publisher and consumer evidence");
+    if (sameHostEvidence(value.hostEvidence, value.consumerHostEvidence)) {
+      fail("verifier host evidence must differ from consumer evidence");
     }
   }
   return value;
@@ -286,7 +286,7 @@ export function runVerifier(options, env = process.env, execute = cli) {
   if (options.instance === consumer.instance) fail("verifier instance must be fresh");
   if (existsSync(resolve(options.edge)) || existsSync(resolve(options.cursor))) fail("verifier edge and cursor paths must not exist before verification");
   const verifierHostEvidence = hostEvidence(env);
-  if (sameHostEvidence(verifierHostEvidence, publisher.hostEvidence) || sameHostEvidence(verifierHostEvidence, consumer.hostEvidence)) fail("verifier host evidence must differ from publisher and consumer evidence");
+  if (sameHostEvidence(verifierHostEvidence, consumer.hostEvidence)) fail("verifier host evidence must differ from consumer evidence");
   const common = { workspace: options.workspace, principal: options.principal, instance: options.instance, edge: options.edge, cursor: options.cursor, gatewayOrigin };
   const history = execute(["inbox", "--source", publisher.principal, "--limit", "100"], proofEnv(common, env));
   if (!history.messages?.some((message) => message.id === publisher.messageId)) fail("immutable message was not readable after machine cycle");
