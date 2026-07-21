@@ -1054,7 +1054,9 @@ Client-local outbox and synchronization fields appear only in CLI status output.
 
 In-process `SyncingBridgeStore` diagnostics also expose the current loop state and a sanitized loop error. Standalone CLI health commands omit those fields because their short-lived diagnostic runtime is not the long-lived MCP client.
 
-The gateway exposes unauthenticated `/readyz`. `/v2/status` and `/metrics` require a valid credential.
+The gateway exposes two unauthenticated probes. `/healthz` reports HTTP process
+liveness without querying PostgreSQL. `/readyz` checks database and schema readiness.
+`/v2/status` and `/metrics` require a valid credential.
 
 Each gateway operation checks the scopes in the canonical registry. `capabilities` needs an active credential but no named scope. For requests with bodies, the gateway validates media type, size, and JSON before it opens the request transaction. It then audits scope denials and applies both a credential-wide token bucket and an operation bucket before domain work begins. Missing policy state or a failed denial audit closes the request with `security_unavailable`. Rate denials return the same rounded delay in `Retry-After` and `error.details.retryAfterSeconds`.
 

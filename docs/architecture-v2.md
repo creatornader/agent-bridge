@@ -606,7 +606,13 @@ Limits apply to content bytes, payload bytes, metadata depth, target count, batc
 
 The CLI provides `init`, `doctor`, `status`, `demo`, `send`, `inbox`, `history`, `claim`, `ack`, `nack`, `watch`, `sync`, portable archive, and migration commands. Existing `post` and `get` aliases remain available.
 
-`/readyz` reports storage and schema readiness. Authenticated HTTP status reports the bound principal, provider schema, delivery counts, and the oldest due delivery. When production request authority is active, it also returns additive `gatewayAuthorityId` and `credentialId` fields. They are optional in HTTP 2.1. CLI `doctor` and `status` use a separate client-status contract that also reports local edge state and remote gateway reachability.
+`/healthz` reports HTTP process liveness without querying PostgreSQL. `/readyz` reports
+storage and schema readiness. Both probes are unauthenticated. Authenticated HTTP status
+reports the bound principal, provider schema, delivery counts, and the oldest due
+delivery. When production request authority is active, it also returns additive
+`gatewayAuthorityId` and `credentialId` fields. They are optional in HTTP 2.1. CLI
+`doctor` and `status` use a separate client-status contract that also reports local edge
+state and remote gateway reachability.
 
 Gateway responses carry a request ID, including stable error envelopes. Scope failures return required scopes under `error.details`. Rate failures return a rounded retry delay in both the HTTP header and error details. Authenticated Prometheus output counts requests, errors, timeouts, and authentication failures. Responses, metrics, and append-only security events exclude bearer tokens, hashes, database URLs, payload bodies, arbitrary metadata, and credential material.
 

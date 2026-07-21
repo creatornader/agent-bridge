@@ -837,6 +837,13 @@ describe("authenticated v2 gateway", () => {
     expect(await response.text()).toContain("agent_bridge_gateway_requests_total");
   });
 
+  it("reports process liveness without authentication or database work", async () => {
+    const base = await gateway(undefined, { ready: async () => { throw new Error("database down"); } });
+    const response = await fetch(`${base}/healthz`);
+    expect(response.status).toBe(200);
+    expect(await response.json()).toEqual({ status: "alive" });
+  });
+
   it("reports readiness failures as unavailable", async () => {
     const base = await gateway(undefined, { ready: async () => { throw new Error("database down"); } });
     const response = await fetch(`${base}/readyz`);

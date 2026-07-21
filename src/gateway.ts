@@ -274,6 +274,10 @@ export function createGateway(options: GatewayOptions) {
 
     const dispatch = async (authority?: RequestAuthorityContext, response: ResponseWriter = res): Promise<void> => {
       const url = new URL(req.url ?? "/", "http://gateway.invalid");
+      if (req.method === "GET" && url.pathname === "/healthz") {
+        send(response, 200, { status: "alive" }, requestId);
+        return;
+      }
       if (req.method === "GET" && url.pathname === "/readyz") {
         let ready = false;
         try {
