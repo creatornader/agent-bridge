@@ -279,6 +279,7 @@ describe("PostgreSQL native DR role inventory", () => {
     const roles = inventory.roles.map((role) => ({ ...role }));
     const client = new FakePostgresDrClient((sql) => {
       if (sql.includes("WITH derived_names")) return roles;
+      if (sql.includes("ORDER BY granted.rolname,member.rolname LIMIT 10")) return [];
       if (sql.includes("SELECT granted.rolname AS role")) {
         return [{
           role: "agent_bridge_data_owner_12fce09c58ce487d",
@@ -288,7 +289,6 @@ describe("PostgreSQL native DR role inventory", () => {
           setOption: true,
         }];
       }
-      if (sql.includes("SELECT 1 AS found FROM pg_catalog.pg_auth_members")) return [];
       if (sql.includes("FROM pg_catalog.pg_default_acl defaults")) return [];
       throw new Error(`unexpected inventory query: ${sql}`);
     });
@@ -310,6 +310,34 @@ describe("PostgreSQL native DR role inventory", () => {
     expect(buildPostgresMembershipStatements(collected, 17)).toEqual([
       'GRANT "agent_bridge_data_owner_12fce09c58ce487d" TO "bridge_schema_owner" WITH ADMIN OPTION, INHERIT TRUE, SET TRUE;',
     ]);
+    const roleQuery = client.statements.find(({ sql }) => sql.includes("WITH derived_names"))!.sql;
+    expect(roleQuery).toContain("canonical_base_roles WHERE kind<>'schema-owner'");
+    const boundaryQuery = client.statements.find(({ sql }) =>
+      sql.includes("FROM pg_catalog.pg_auth_members membership")
+        && sql.includes("ORDER BY granted.rolname,member.rolname LIMIT 10"))!;
+    expect(boundaryQuery.sql).toContain("granted.rolname=ANY($2::text[])");
+    expect(boundaryQuery.sql).toContain("member.rolname=ANY($2::text[])");
+    expect(boundaryQuery.values).toEqual([
+      roles.map((role) => role.name),
+      ["bridge_schema_owner"],
+    ]);
+  });
+
+  it("still rejects membership that escapes through a non-owner role", async () => {
+    const roles = inventory.roles.map((role) => ({ ...role }));
+    const client = new FakePostgresDrClient((sql) => {
+      if (sql.includes("WITH derived_names")) return roles;
+      if (sql.includes("ORDER BY granted.rolname,member.rolname LIMIT 10")) {
+        return [{ role: "nested_provider", member: "external_operator" }];
+      }
+      if (sql.includes("SELECT granted.rolname AS role")) return [];
+      throw new Error(`unexpected inventory query: ${sql}`);
+    });
+
+    await expect(collectPostgresRoleInventory(client, "agent_bridge")).rejects.toMatchObject({
+      code: "TRANSITIVE_ROLE_MEMBERSHIP_UNSUPPORTED",
+      details: { roleMemberships: [{ role: "nested_provider", member: "external_operator" }] },
+    });
   });
 
   it("restores global and schema-scoped default privileges without credentials", () => {

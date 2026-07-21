@@ -188,6 +188,8 @@ integration.each(matrix)("PostgreSQL $major native DR", ({ major, image, port })
       const currentSuffix = createHash("md5").update("agent_bridge").digest("hex").slice(0, 16);
       await source.query(`
         CREATE ROLE default_acl_reader NOLOGIN;
+        CREATE ROLE managed_provider_parent NOLOGIN;
+        CREATE ROLE managed_provider_child NOLOGIN;
         CREATE ROLE "PUBLIC" NOLOGIN;
         CREATE ROLE agent_bridge_control_owner_${currentSuffix} NOLOGIN;
         CREATE SCHEMA agent_bridge AUTHORIZATION source_admin;
@@ -199,6 +201,9 @@ integration.each(matrix)("PostgreSQL $major native DR", ({ major, image, port })
           REVOKE EXECUTE ON FUNCTIONS FROM PUBLIC;
         ALTER DEFAULT PRIVILEGES IN SCHEMA agent_bridge REVOKE ALL PRIVILEGES ON SEQUENCES FROM source_admin;
         ALTER DEFAULT PRIVILEGES IN SCHEMA agent_bridge GRANT SELECT ON TABLES TO default_acl_reader WITH GRANT OPTION;
+        ALTER DEFAULT PRIVILEGES IN SCHEMA public GRANT SELECT ON TABLES TO managed_provider_parent;
+        GRANT managed_provider_parent TO source_admin;
+        GRANT managed_provider_child TO managed_provider_parent;
       `);
       await expect(collectPostgresRoleInventory(source as unknown as PostgresDrClient, "agent_bridge"))
         .rejects.toThrow(/roles\[.*\]\.name is invalid/);
@@ -207,6 +212,7 @@ integration.each(matrix)("PostgreSQL $major native DR", ({ major, image, port })
         DROP ROLE "PUBLIC";
       `);
       inventory = await collectPostgresRoleInventory(source as unknown as PostgresDrClient, "agent_bridge");
+      expect(inventory.roles.some(({ name }) => name.startsWith("managed_provider_"))).toBe(false);
       expect(inventory.defaultAcls.some((acl) => acl.grants.some((grant) => grant.granteeKind === "public"))).toBe(true);
       expect(inventory.defaultAcls.some((acl) =>
         acl.owner === `agent_bridge_control_owner_${currentSuffix}` && acl.schema === null)).toBe(true);

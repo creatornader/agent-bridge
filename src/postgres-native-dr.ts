@@ -248,6 +248,7 @@ export class PostgresNativeDrError extends Error {
       restoreCompleted?: boolean;
       recoveryPaths?: string[];
       causeCode?: string;
+      roleMemberships?: Array<{ role: string; member: string }>;
     } = {},
   ) {
     super(message);
@@ -1132,21 +1133,24 @@ export async function collectPostgresRoleInventory(
         CROSS JOIN LATERAL pg_catalog.aclexplode(type.typacl) acl WHERE namespace.nspname='agent_bridge' AND acl.grantee<>0
       UNION SELECT defaults.defaclrole, 'object-role' FROM pg_catalog.pg_default_acl defaults
         LEFT JOIN pg_catalog.pg_namespace namespace ON namespace.oid=defaults.defaclnamespace
-        WHERE namespace.nspname='agent_bridge' OR defaults.defaclrole=(
-          SELECT nspowner FROM pg_catalog.pg_namespace WHERE nspname='agent_bridge')
+        WHERE namespace.nspname='agent_bridge' OR (
+          defaults.defaclnamespace=0 AND defaults.defaclrole=(
+            SELECT nspowner FROM pg_catalog.pg_namespace WHERE nspname='agent_bridge'))
           OR (defaults.defaclnamespace=0 AND defaults.defaclrole=(SELECT oid FROM pg_catalog.pg_roles
             WHERE rolname='agent_bridge_control_owner_'||substr(pg_catalog.md5(pg_catalog.current_database()),1,16)))
       UNION SELECT acl.grantor, 'object-role' FROM pg_catalog.pg_default_acl defaults
         LEFT JOIN pg_catalog.pg_namespace namespace ON namespace.oid=defaults.defaclnamespace
         CROSS JOIN LATERAL pg_catalog.aclexplode(defaults.defaclacl) acl WHERE namespace.nspname='agent_bridge'
-          OR defaults.defaclrole=(SELECT nspowner FROM pg_catalog.pg_namespace WHERE nspname='agent_bridge')
+          OR (defaults.defaclnamespace=0 AND defaults.defaclrole=(
+            SELECT nspowner FROM pg_catalog.pg_namespace WHERE nspname='agent_bridge'))
           OR (defaults.defaclnamespace=0 AND defaults.defaclrole=(SELECT oid FROM pg_catalog.pg_roles
             WHERE rolname='agent_bridge_control_owner_'||substr(pg_catalog.md5(pg_catalog.current_database()),1,16)))
       UNION SELECT acl.grantee, 'object-role' FROM pg_catalog.pg_default_acl defaults
         LEFT JOIN pg_catalog.pg_namespace namespace ON namespace.oid=defaults.defaclnamespace
         CROSS JOIN LATERAL pg_catalog.aclexplode(defaults.defaclacl) acl WHERE acl.grantee<>0 AND (
-          namespace.nspname='agent_bridge' OR defaults.defaclrole=(
-            SELECT nspowner FROM pg_catalog.pg_namespace WHERE nspname='agent_bridge')
+          namespace.nspname='agent_bridge' OR (
+            defaults.defaclnamespace=0 AND defaults.defaclrole=(
+              SELECT nspowner FROM pg_catalog.pg_namespace WHERE nspname='agent_bridge'))
           OR (defaults.defaclnamespace=0 AND defaults.defaclrole=(SELECT oid FROM pg_catalog.pg_roles
             WHERE rolname='agent_bridge_control_owner_'||substr(pg_catalog.md5(pg_catalog.current_database()),1,16))))
     ), base_roles AS (
@@ -1156,12 +1160,19 @@ export async function collectPostgresRoleInventory(
       UNION
       SELECT role.oid, 'derived' FROM pg_catalog.pg_roles role
       WHERE role.rolname IN (SELECT name FROM derived_names)
+    ), canonical_base_roles AS (
+      SELECT oid, CASE WHEN bool_or(kind='schema-owner') THEN 'schema-owner'
+        WHEN bool_or(kind='derived') THEN 'derived'
+        ELSE 'object-role' END AS kind
+      FROM base_roles GROUP BY oid
     ), related_roles AS (
-      SELECT oid, kind FROM base_roles
+      SELECT oid, kind FROM canonical_base_roles
       UNION SELECT membership.roleid, 'external-principal' FROM pg_catalog.pg_auth_members membership
-        WHERE membership.member IN (SELECT oid FROM base_roles)
+        WHERE membership.member IN (
+          SELECT oid FROM canonical_base_roles WHERE kind<>'schema-owner')
       UNION SELECT membership.member, 'external-principal' FROM pg_catalog.pg_auth_members membership
-        WHERE membership.roleid IN (SELECT oid FROM base_roles)
+        WHERE membership.roleid IN (
+          SELECT oid FROM canonical_base_roles WHERE kind<>'schema-owner')
     )
     SELECT role.rolname AS name,
       CASE WHEN bool_or(related.kind='schema-owner') THEN 'schema-owner'
@@ -1171,6 +1182,9 @@ export async function collectPostgresRoleInventory(
     FROM related_roles related JOIN pg_catalog.pg_roles role ON role.oid=related.oid
     GROUP BY role.rolname ORDER BY role.rolname`);
   const names = roleRows.rows.map((row) => row.name);
+  const schemaOwnerNames = roleRows.rows
+    .filter((row) => row.kind === "schema-owner")
+    .map((row) => row.name);
   const membershipRows = names.length === 0 ? { rows: [], rowCount: 0 } : await client.query<PostgresDrMembership>(`
     SELECT granted.rolname AS role, member.rolname AS member,
       bool_or(membership.admin_option) AS "adminOption",
@@ -1183,16 +1197,22 @@ export async function collectPostgresRoleInventory(
     GROUP BY granted.rolname,member.rolname
     ORDER BY granted.rolname,member.rolname`, [names]);
   if (names.length > 0) {
-    const boundary = await client.query<{ found: number }>(`
-      SELECT 1 AS found FROM pg_catalog.pg_auth_members membership
+    const boundary = await client.query<{ role: string; member: string }>(`
+      SELECT granted.rolname AS role, member.rolname AS member
+      FROM pg_catalog.pg_auth_members membership
       JOIN pg_catalog.pg_roles granted ON granted.oid=membership.roleid
       JOIN pg_catalog.pg_roles member ON member.oid=membership.member
       WHERE (granted.rolname=ANY($1::text[])) <> (member.rolname=ANY($1::text[]))
-      LIMIT 1`, [names]);
+        AND NOT (
+          granted.rolname=ANY($1::text[]) AND granted.rolname=ANY($2::text[])
+          OR member.rolname=ANY($1::text[]) AND member.rolname=ANY($2::text[])
+        )
+      ORDER BY granted.rolname,member.rolname LIMIT 10`, [names, schemaOwnerNames]);
     if (boundary.rows.length > 0) {
       throw new PostgresNativeDrError(
         "TRANSITIVE_ROLE_MEMBERSHIP_UNSUPPORTED",
         "PostgreSQL role inventory has a transitive external membership outside the bounded restore graph",
+        { roleMemberships: boundary.rows },
       );
     }
   }
@@ -1220,8 +1240,9 @@ export async function collectPostgresRoleInventory(
     LEFT JOIN LATERAL pg_catalog.aclexplode(defaults.defaclacl) acl ON true
     LEFT JOIN pg_catalog.pg_roles grantor ON grantor.oid=acl.grantor
     LEFT JOIN pg_catalog.pg_roles grantee ON grantee.oid=acl.grantee
-    WHERE namespace.nspname='agent_bridge' OR defaults.defaclrole=(
-      SELECT nspowner FROM pg_catalog.pg_namespace WHERE nspname='agent_bridge')
+    WHERE namespace.nspname='agent_bridge' OR (
+      defaults.defaclnamespace=0 AND defaults.defaclrole=(
+        SELECT nspowner FROM pg_catalog.pg_namespace WHERE nspname='agent_bridge'))
       OR (defaults.defaclnamespace=0 AND defaults.defaclrole=(SELECT oid FROM pg_catalog.pg_roles
         WHERE rolname='agent_bridge_control_owner_'||substr(pg_catalog.md5(pg_catalog.current_database()),1,16)))
     ORDER BY owner.rolname,namespace.nspname NULLS FIRST,defaults.defaclobjtype,
