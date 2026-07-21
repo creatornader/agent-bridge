@@ -50,9 +50,9 @@ const SUPPORTED_OPTIONS = new Set([
   "display-name", "enrollment-file",
   "credential-id", "gateway-url", "grace-until", "invalidate-immediately", "label",
   "reason", "request-id", "resume", "runtime-type", "recover-lock",
-  "scope-set", "workspace-name", "exclusive-edge",
+  "scope-set", "workspace-name", "exclusive-edge", "queue-only",
 ]);
-const BOOLEAN_OPTIONS = new Set(["apply", "dead", "force", "invalidate-immediately", "json", "latest", "recover-lock", "exclusive-edge"]);
+const BOOLEAN_OPTIONS = new Set(["apply", "dead", "force", "invalidate-immediately", "json", "latest", "recover-lock", "exclusive-edge", "queue-only"]);
 function parse(argv: string[]): { command: string; options: Options; positionals: string[] } {
   const command = argv[0] ?? "help"; const options: Options = {}; const positionals: string[] = [];
   for (let i = 1; i < argv.length; i++) {
@@ -556,8 +556,9 @@ export async function runCli(argv = process.argv.slice(2)): Promise<void> {
   }
   let runtime: Awaited<ReturnType<typeof createClientRuntime>>;
   try {
+    const queueOnly = command === "send" && boolean(options, "queue-only");
     runtime = await createClientRuntime(config, {
-      autoSync: command !== "doctor" && command !== "status",
+      autoSync: command !== "doctor" && command !== "status" && !queueOnly,
       initializationMode: command === "status" ? "passive" : "active",
     });
   } catch (error) {
@@ -670,7 +671,7 @@ export async function runCli(argv = process.argv.slice(2)): Promise<void> {
       if (!available) process.exitCode = authoritative ? 1 : 2;
       return;
     }
-    if (command === "send") { const message = draft(options, positionals); validateRequest("publish_message", { ...message, source: one(options, "source") }); cliOutput("publish_message", await runtime.service.publish(config.principal, message)); return; }
+    if (command === "send") { const message = draft(options, positionals); validateRequest("publish_message", { ...message, source: one(options, "source") }); cliOutput("publish_message", await runtime.service.publish(config.principal, message, { queueOnly: boolean(options, "queue-only") })); return; }
     if (command === "join") { const input = validateRequest("heartbeat", { leaseMs: integer(options, "lease-ms", 60_000), runtimeType: one(options, "runtime"), capabilities: list(options, "capability") }); cliOutput("heartbeat", await runtime.service.heartbeat(config.principal, input)); return; }
     if (command === "presence") { validateRequest("presence", {}); cliOutput("presence", { agents: await runtime.service.presence(config.principal) }); return; }
     if (command === "sync") {

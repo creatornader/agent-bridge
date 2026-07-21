@@ -35,34 +35,39 @@ const env = {
 describe("gateway production proof", () => {
   beforeEach(() => execute.mockReset());
 
-  it("queues offline, synchronizes, and replays one idempotency key", () => {
+  it("queues offline, synchronizes, and replays one idempotency key", async () => {
     const root = directory();
     const input = options(root, "publisher");
     execute
       .mockReturnValueOnce(result({ created: true, disposition: "queued", authoritative: false, message: { id: "message-1" } }))
-      .mockReturnValueOnce(result({ pending: 0, pushed: 1, deduplicated: 0 }))
+      .mockReturnValueOnce(result({ online: true, pending: 0, pushed: 1, deduplicated: 0 }))
       .mockReturnValueOnce(result({ created: false, disposition: "committed", authoritative: true, message: { id: "message-1" } }));
 
-    const receipt = proof.runPublisher(input, env, execute);
+    const receipt = await proof.runPublisher(input, env, execute);
 
     expect(receipt.checks.map((check: { name: string }) => check.name)).toEqual([
       "offline.queued", "sync.authoritative", "idempotency.same-message",
     ]);
     expect(execute.mock.calls[0][0]).toContain(receipt.idempotencyKey);
-    expect(execute.mock.calls[0][1].AGENT_BRIDGE_URL).toBe("https://127.0.0.1:1");
+    const messageIdIndex = execute.mock.calls[0][0].indexOf("--message-id");
+    expect(execute.mock.calls[2][0][messageIdIndex + 1]).toBe(execute.mock.calls[0][0][messageIdIndex + 1]);
+    expect(execute.mock.calls[0][0]).toContain("--queue-only");
+    expect(execute.mock.calls[0][1].AGENT_BRIDGE_URL).toBe(input.gateway);
+    expect(execute.mock.calls[0][1].AGENT_BRIDGE_WORKSPACE).toBe(input.workspace);
     expect(execute.mock.calls[1][1].AGENT_BRIDGE_URL).toBe(input.gateway);
+    expect(execute.mock.calls[1][1].AGENT_BRIDGE_WORKSPACE).toBe(input.workspace);
     expect(readFileSync(input.receipt, "utf8")).not.toContain("secret-bearer-value");
     expect(readFileSync(input.receipt, "utf8")).not.toContain(input.edge);
   });
 
-  it("requires a distinct host, exact message claim, and acknowledgment", () => {
+  it("requires a distinct host, exact message claim, and acknowledgment", async () => {
     const root = directory();
     const publisher = options(root, "publisher");
     execute
       .mockReturnValueOnce(result({ created: true, disposition: "queued", authoritative: false, message: { id: "message-2" } }))
-      .mockReturnValueOnce(result({ pending: 0, pushed: 0, deduplicated: 1 }))
-      .mockReturnValueOnce(result({ created: false, message: { id: "message-2" } }));
-    proof.runPublisher(publisher, env, execute);
+      .mockReturnValueOnce(result({ online: true, pending: 0, pushed: 0, deduplicated: 1 }))
+      .mockReturnValueOnce(result({ created: false, disposition: "committed", authoritative: true, message: { id: "message-2" } }));
+    await proof.runPublisher(publisher, env, execute);
     const publisherReceipt = JSON.parse(readFileSync(publisher.receipt, "utf8"));
     publisherReceipt.hostEvidence.digest = "a".repeat(64);
     writeFileSync(publisher.receipt, JSON.stringify(publisherReceipt));

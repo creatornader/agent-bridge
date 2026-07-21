@@ -1,8 +1,9 @@
-import { createHash, randomUUID } from "node:crypto";
+import { createHash, randomBytes, randomUUID } from "node:crypto";
 import { hostname, platform, arch } from "node:os";
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { dirname, resolve } from "node:path";
 import { spawnSync } from "node:child_process";
+import { setTimeout as delay } from "node:timers/promises";
 import { fileURLToPath } from "node:url";
 
 export const RECEIPT_SCHEMA = "agent-bridge-production-proof-v1";
@@ -19,6 +20,19 @@ const SHA256 = /^[0-9a-f]{64}$/u;
 
 function fail(message) {
   throw new Error(message);
+}
+
+function uuidv7(now = Date.now()) {
+  const bytes = randomBytes(16);
+  let timestamp = BigInt(now);
+  for (let index = 5; index >= 0; index -= 1) {
+    bytes[index] = Number(timestamp & 0xffn);
+    timestamp >>= 8n;
+  }
+  bytes[6] = (bytes[6] & 0x0f) | 0x70;
+  bytes[8] = (bytes[8] & 0x3f) | 0x80;
+  const hex = bytes.toString("hex");
+  return `${hex.slice(0, 8)}-${hex.slice(8, 12)}-${hex.slice(12, 16)}-${hex.slice(16, 20)}-${hex.slice(20)}`;
 }
 
 function string(value, name, pattern) {
@@ -135,15 +149,16 @@ function parseArgs(argv) {
   return options;
 }
 
-function proofEnv({ principal, instance, edge, cursor, gatewayOrigin, offline = false }, env = process.env) {
+function proofEnv({ workspace, principal, instance, edge, cursor, gatewayOrigin }, env = process.env) {
   return {
     ...env,
     AGENT_BRIDGE_PROVIDER: "gateway",
+    AGENT_BRIDGE_WORKSPACE: workspace,
     AGENT_BRIDGE_AGENT: principal,
     AGENT_BRIDGE_INSTANCE: instance,
     AGENT_BRIDGE_EDGE_DB: resolve(edge),
     AGENT_BRIDGE_CURSOR: resolve(cursor),
-    AGENT_BRIDGE_URL: offline ? "https://127.0.0.1:1" : gatewayOrigin,
+    AGENT_BRIDGE_URL: gatewayOrigin,
   };
 }
 
@@ -161,8 +176,8 @@ function readReceipt(path, phase) {
   return validateReceipt(JSON.parse(readFileSync(resolve(path), "utf8")), phase);
 }
 
-function publishArgs({ body, receiver, idempotencyKey }) {
-  return ["send", body, "--type", "production-proof", "--target", receiver, "--delivery-mode", "leased", "--idempotency-key", idempotencyKey];
+function publishArgs({ body, receiver, idempotencyKey, messageId }) {
+  return ["send", body, "--type", "production-proof", "--target", receiver, "--delivery-mode", "leased", "--idempotency-key", idempotencyKey, "--message-id", messageId];
 }
 
 function assertSafeReceipt(receipt, env = process.env) {
@@ -190,18 +205,38 @@ function writeReceipt(path, receipt) {
   writeFileSync(resolve(path), `${JSON.stringify(receipt, null, 2)}\n`, { mode: 0o600 });
 }
 
-export function runPublisher(options, env = process.env, execute = cli) {
+async function synchronizeQueued(common, env, execute, requireDeduplication) {
+  let report;
+  for (let attempt = 0; attempt < 6; attempt += 1) {
+    report = execute(["sync", "--max-push", "10", "--max-pages", "0"], proofEnv(common, env));
+    const synchronized = report.online === true && report.pending === 0
+      && Number.isInteger(report.pushed) && Number.isInteger(report.deduplicated)
+      && (requireDeduplication ? report.deduplicated >= 1 : report.pushed + report.deduplicated >= 1);
+    if (synchronized) return report;
+    await delay(Math.min(1_000 * 2 ** attempt, 8_000));
+  }
+  fail(`queued publication did not synchronize: ${String(report?.online)}/${String(report?.pushed)}/${String(report?.deduplicated)}/${String(report?.pending)}`);
+}
+
+export async function runPublisher(options, env = process.env, execute = cli) {
   const now = new Date().toISOString();
   const idempotencyKey = options["idempotency-key"] ?? `production-proof-${randomUUID()}`;
+  const messageId = uuidv7();
   const body = `Agent Bridge production proof ${idempotencyKey}`;
   const gatewayOrigin = normalizeGatewayOrigin(options.gateway, "--gateway");
-  const common = { principal: options.principal, instance: options.instance, edge: options.edge, cursor: options.cursor, gatewayOrigin };
-  const queued = execute(publishArgs({ body, receiver: options.receiver, idempotencyKey }), proofEnv({ ...common, offline: true }, env));
+  const common = { workspace: options.workspace, principal: options.principal, instance: options.instance, edge: options.edge, cursor: options.cursor, gatewayOrigin };
+  const queued = execute([...publishArgs({ body, receiver: options.receiver, idempotencyKey, messageId }), "--queue-only"], proofEnv(common, env));
   if (queued.disposition !== "queued" || queued.authoritative !== false) fail("offline publication was not queued locally");
-  const sync = execute(["sync", "--max-push", "10", "--max-pages", "1"], proofEnv(common, env));
-  if (sync.pending !== 0 || sync.pushed + sync.deduplicated < 1) fail("queued publication did not synchronize");
-  const replay = execute(publishArgs({ body, receiver: options.receiver, idempotencyKey }), proofEnv(common, env));
-  if (replay.created !== false || replay.message?.id !== queued.message?.id) fail("idempotent replay did not return the queued message");
+  await synchronizeQueued(common, env, execute, false);
+  const replay = execute(publishArgs({ body, receiver: options.receiver, idempotencyKey, messageId }), proofEnv(common, env));
+  if (replay.message?.id !== queued.message?.id) {
+    fail(`idempotent replay changed the message ID: queued=${String(queued.message?.id)}, replay=${String(replay.message?.id)}`);
+  }
+  if (replay.disposition === "queued" && replay.authoritative === false) {
+    await synchronizeQueued(common, env, execute, true);
+  } else if (replay.disposition !== "committed" || replay.authoritative !== true || replay.created !== false) {
+    fail(`idempotent replay was neither committed nor queued: ${String(replay.created)}/${String(replay.disposition)}/${String(replay.authoritative)}`);
+  }
   const receipt = {
     schema: RECEIPT_SCHEMA, version: RECEIPT_VERSION, phase: "publisher", workspace: options.workspace,
     principal: options.principal, gatewayOrigin, instance: options.instance, hostEvidence: hostEvidence(env),
@@ -218,7 +253,7 @@ export function runConsumer(options, env = process.env, execute = cli) {
   const publisher = readReceipt(options.publisher, "publisher");
   const gatewayOrigin = normalizeGatewayOrigin(options.gateway, "--gateway");
   if (publisher.workspace !== options.workspace || publisher.receiverPrincipal !== options.principal || publisher.gatewayOrigin !== gatewayOrigin) fail("publisher receipt does not match consumer boundary");
-  const common = { principal: options.principal, instance: options.instance, edge: options.edge, cursor: options.cursor, gatewayOrigin };
+  const common = { workspace: options.workspace, principal: options.principal, instance: options.instance, edge: options.edge, cursor: options.cursor, gatewayOrigin };
   const history = execute(["inbox", "--source", publisher.principal, "--limit", "100"], proofEnv(common, env));
   if (!history.messages?.some((message) => message.id === publisher.messageId)) fail("consumer could not read the exact proof message");
   const claimedAt = new Date().toISOString();
@@ -251,7 +286,7 @@ export function runVerifier(options, env = process.env, execute = cli) {
   if (existsSync(resolve(options.edge)) || existsSync(resolve(options.cursor))) fail("verifier edge and cursor paths must not exist before verification");
   const verifierHostEvidence = hostEvidence(env);
   if (sameHostEvidence(verifierHostEvidence, publisher.hostEvidence) || sameHostEvidence(verifierHostEvidence, consumer.hostEvidence)) fail("verifier host evidence must differ from publisher and consumer evidence");
-  const common = { principal: options.principal, instance: options.instance, edge: options.edge, cursor: options.cursor, gatewayOrigin };
+  const common = { workspace: options.workspace, principal: options.principal, instance: options.instance, edge: options.edge, cursor: options.cursor, gatewayOrigin };
   const history = execute(["inbox", "--source", publisher.principal, "--limit", "100"], proofEnv(common, env));
   if (!history.messages?.some((message) => message.id === publisher.messageId)) fail("immutable message was not readable after machine cycle");
   const deliveries = execute(["deliveries", "--message-id", publisher.messageId, "--state", "acked", "--limit", "10"], proofEnv(common, env));
@@ -268,7 +303,7 @@ export function runVerifier(options, env = process.env, execute = cli) {
   return receipt;
 }
 
-function main() {
+async function main() {
   const [phase, ...argv] = process.argv.slice(2);
   const options = parseArgs(argv);
   const required = ["workspace", "principal", "instance", "gateway", "edge", "cursor", "receipt"];
@@ -277,10 +312,10 @@ function main() {
   else if (phase === "verifier") required.push("publisher", "consumer", "cycle");
   else fail("phase must be publisher, consumer, or verifier");
   for (const key of required) string(options[key], `--${key}`);
-  const receipt = phase === "publisher" ? runPublisher(options) : phase === "consumer" ? runConsumer(options) : runVerifier(options);
+  const receipt = phase === "publisher" ? await runPublisher(options) : phase === "consumer" ? runConsumer(options) : runVerifier(options);
   process.stdout.write(`${JSON.stringify({ ok: true, phase: receipt.phase, receipt: resolve(options.receipt) })}\n`);
 }
 
 if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
-  try { main(); } catch (error) { process.stderr.write(`ERROR gateway-production-proof: ${error.message}\n`); process.exitCode = 1; }
+  main().catch((error) => { process.stderr.write(`ERROR gateway-production-proof: ${error.message}\n`); process.exitCode = 1; });
 }
