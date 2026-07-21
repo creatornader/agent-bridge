@@ -134,6 +134,8 @@ describe("gateway production proof", () => {
     expect(workflow.match(/environment: agent-bridge-production-proof/gu)).toHaveLength(4);
     expect(workflow).toContain("FLYCTL_VERSION: \"0.4.71\"");
     expect(workflow).toContain(".instance_id");
+    expect(workflow.match(/install -d -m 700 "\$RUNNER_TEMP\/agent-bridge-proof"/gu)).toHaveLength(4);
+    expect(workflow).not.toMatch(/--(?:edge|cursor) "\$RUNNER_TEMP\/(?!agent-bridge-proof\/)/u);
     expect(workflow).not.toContain("machine clone");
     expect(runBlocks).not.toContain("${{ inputs.");
     expect(runBlocks).not.toContain("--yes");
