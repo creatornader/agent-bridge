@@ -11,6 +11,7 @@ import {
 } from "./migrations.js";
 import { PostgresBridgeStore } from "./postgres-bridge-store.js";
 import { PostgresRequestAuthority } from "./postgres-request-authority.js";
+import { runtimePostgresConnectionConfig } from "./postgres-runtime-connection.js";
 
 function integer(value: string | undefined, fallback: number, name: string): number {
   if (value === undefined) return fallback;
@@ -63,8 +64,12 @@ async function main(): Promise<void> {
     .map((origin) => origin.trim())
     .filter(Boolean);
   const migrationPlan = await loadMigrationPlan(migrationsDirectory);
+  const runtimeConnection = runtimePostgresConnectionConfig(
+    databaseUrl,
+    process.env.AGENT_BRIDGE_RUNTIME_DATABASE_CA_BASE64,
+  );
   const pool = new pg.Pool({
-    connectionString: databaseUrl,
+    ...runtimeConnection,
     max: poolSize,
     connectionTimeoutMillis: databaseTimeout,
     query_timeout: databaseTimeout,
@@ -72,7 +77,7 @@ async function main(): Promise<void> {
     application_name: "agent-bridge-gateway",
   });
   const readinessPool = new pg.Pool({
-    connectionString: databaseUrl,
+    ...runtimeConnection,
     max: 1,
     connectionTimeoutMillis: databaseTimeout,
     query_timeout: databaseTimeout,

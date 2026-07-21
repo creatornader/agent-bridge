@@ -97,6 +97,9 @@ After an operator supplies an existing app, `npm run preflight:fly -- --app <app
 The command does not deploy, migrate, scale, restart, or print environment-variable
 values. The [Fly production procedure](docs/deployment.md#flyio-reference-hosting)
 keeps database migration and runtime-role bootstrap outside the gateway process.
+The Fly gateway expects two secrets: the restricted runtime database URL and a
+base64-encoded PostgreSQL CA bundle. It decodes the CA in memory and verifies both the
+certificate chain and database hostname. It never needs a CA file inside the image.
 
 The manual `gateway production proof` workflow tests an existing gateway after its
 deployment gate has passed. GitHub must run it from `main` in the protected
