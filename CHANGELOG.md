@@ -4,6 +4,18 @@ All notable changes to agent-bridge are documented in this file.
 
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and the project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.6.2] - 2026-07-21
+
+### Fixed
+
+- Compare endpoint-migration edge file identifiers as 64-bit integers so distinct
+  Windows files cannot alias after number precision loss.
+
+### Changed
+
+- Record the deployed 0.6.1 production proof and require a release-specific workspace
+  when the proof creates fresh sender and receiver principals.
+
 ## [0.6.1] - 2026-07-21
 
 ### Added

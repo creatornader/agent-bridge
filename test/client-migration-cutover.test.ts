@@ -1,7 +1,7 @@
 import { existsSync, linkSync, mkdirSync, readFileSync, readdirSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { hostname } from "node:os";
 import { dirname, join } from "node:path";
-import { afterEach, describe, expect } from "vitest";
+import { afterEach, describe, expect, type TestOptions } from "vitest";
 import { adoptClient } from "../src/client-lifecycle.js";
 import {
   cutoverClientMigration, edgeIdentitiesAlias, finalizeClientMigration, resumeClientMigrationCutover,
@@ -17,7 +17,9 @@ import { securePrivatePath } from "../src/private-path.js";
 import { privatePathIt } from "./private-path-policy.js";
 import { privateTestDirectory } from "./private-test-path.js";
 
-const it = privatePathIt;
+function it(name: string, handler: () => unknown, options: number | TestOptions = 30_000): void {
+  privatePathIt(name, handler, options);
+}
 const homes: string[] = [];
 afterEach(() => { for (const home of homes.splice(0)) rmSync(home, { recursive: true, force: true }); });
 
@@ -275,17 +277,21 @@ function createRecoverableClientLock(state: ReturnType<typeof fixture>) {
 describe("client endpoint migration cutover", () => {
   it("handles unavailable Windows file IDs without weakening hardlink refusal", () => {
     expect(edgeIdentitiesAlias(
-      { dev: 0, ino: 0, nlink: 1 },
-      { dev: 0, ino: 0, nlink: 1 },
+      { dev: 0n, ino: 0n, nlink: 1n },
+      { dev: 0n, ino: 0n, nlink: 1n },
     )).toBe(false);
     expect(() => edgeIdentitiesAlias(
-      { dev: 0, ino: 0, nlink: 2 },
-      { dev: 0, ino: 0, nlink: 2 },
+      { dev: 0n, ino: 0n, nlink: 2n },
+      { dev: 0n, ino: 0n, nlink: 2n },
     )).toThrow("identity is ambiguous");
     expect(edgeIdentitiesAlias(
-      { dev: 42, ino: 7, nlink: 2 },
-      { dev: 42, ino: 7, nlink: 2 },
+      { dev: 42n, ino: 7n, nlink: 2n },
+      { dev: 42n, ino: 7n, nlink: 2n },
     )).toBe(true);
+    expect(edgeIdentitiesAlias(
+      { dev: 42n, ino: 9_007_199_254_740_992n, nlink: 1n },
+      { dev: 42n, ino: 9_007_199_254_740_993n, nlink: 1n },
+    )).toBe(false);
   });
 
   it("keeps dry-run read-only and does not contact either gateway", async () => {

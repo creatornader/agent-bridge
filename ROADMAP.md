@@ -151,6 +151,13 @@ The published npm version is the authority for whether this package line has shi
 - Public descriptions explain what an agent can do before introducing protocol and
   storage terminology.
 
+### 0.6.2 package contents
+
+- Endpoint migration compares Windows edge file identifiers as 64-bit integers so
+  distinct SQLite files cannot alias after number precision loss.
+- Production proof guidance records the deployed 0.6.1 evidence and uses a
+  release-specific workspace for fresh proof principals.
+
 ### Production validation and adoption
 
 Completed through the published and deployed 0.6.1 package:

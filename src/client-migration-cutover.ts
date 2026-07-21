@@ -312,20 +312,20 @@ function targetCurrent(
   return retained;
 }
 
-interface EdgeIdentity { dev: number; ino: number; nlink: number }
+interface EdgeIdentity { dev: bigint; ino: bigint; nlink: bigint }
 
 function edgeIdentity(path: string): EdgeIdentity | null {
   if (!existsSync(path)) return null;
   verifyPrivatePathAccess(path, "file");
-  const details = lstatSync(path);
+  const details = lstatSync(path, { bigint: true });
   if (!details.isFile() || details.isSymbolicLink()) fail("EDGE_ALIAS", "edge database is not a private regular file");
   return { dev: details.dev, ino: details.ino, nlink: details.nlink };
 }
 export function edgeIdentitiesAlias(left: EdgeIdentity, right: EdgeIdentity): boolean {
-  const leftHasFileId = left.dev !== 0 || left.ino !== 0;
-  const rightHasFileId = right.dev !== 0 || right.ino !== 0;
+  const leftHasFileId = left.dev !== 0n || left.ino !== 0n;
+  const rightHasFileId = right.dev !== 0n || right.ino !== 0n;
   if (leftHasFileId && rightHasFileId) return left.dev === right.dev && left.ino === right.ino;
-  if (left.nlink > 1 && right.nlink > 1) {
+  if (left.nlink > 1n && right.nlink > 1n) {
     fail("EDGE_ALIAS", "edge file identity is ambiguous on this platform");
   }
   return false;
