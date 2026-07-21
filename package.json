@@ -87,7 +87,7 @@
     "pretest": "npm run build",
     "test": "vitest run",
     "test:built": "vitest run",
-    "test:postgres:contract": "vitest run test/postgres_integration.test.ts --maxWorkers=1 --hookTimeout=60000",
+    "test:postgres:contract": "vitest run test/postgres_integration.test.ts --maxWorkers=1 --testTimeout=30000 --hookTimeout=60000",
     "test:postgres:preflight": "node scripts/postgres-preflight.mjs",
     "test:postgres:preflight:full": "node scripts/postgres-preflight.mjs --full",
     "preflight:postgres:production": "npm run build --silent && node dist/postgres-production-preflight.js",
