@@ -5,7 +5,7 @@ import {
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect } from "vitest";
-import { adoptClient } from "../src/client-lifecycle.js";
+import { adoptClient, inspectClient } from "../src/client-lifecycle.js";
 import {
   repairManagedClient, resumeManagedClientOperation, rollbackManagedClient, uninstallManagedClient, updateManagedClient,
 } from "../src/client-maintenance.js";
@@ -347,6 +347,60 @@ describe("managed client repair and update", () => {
     });
     expect(updated).toMatchObject({ action: "update", applied: true });
     expect(JSON.parse(readFileSync(state.configPath, "utf8")).mcpServers["agent-bridge"].args).toEqual([]);
+  });
+
+  it("repairs safe Desktop wrapper drift back to the managed launch", () => {
+    const state = desktopFixture();
+    const wrapper = join(state.home, "bridge-wrapper.js");
+    writeFileSync(wrapper, "export {};\n");
+    const endpoint = "http://127.0.0.1:8791/mcp";
+    const config = JSON.parse(readFileSync(state.configPath, "utf8"));
+    config.mcpServers["agent-bridge"] = {
+      command: "node",
+      args: [wrapper, "--transport", "stdio-http-proxy", "--endpoint", endpoint],
+      env: {
+        AGENT_BRIDGE_AGENT: "desktop-work",
+        AGENT_BRIDGE_ATRIB_HTTP_ENDPOINT: endpoint,
+      },
+    };
+    writeFileSync(state.configPath, `${JSON.stringify(config)}\n`, { mode: 0o600 });
+
+    expect(inspectClient("claude-desktop", "desktop-work", {
+      instance: "desktop-existing", backendConfigPath: state.backendConfigPath,
+      command: state.oldCommand, configPath: state.configPath, env: { HOME: state.home },
+    }).state).toBe("drifted");
+    const repaired = repairManagedClient({
+      runtime: "claude-desktop", instance: "desktop-existing", identity: "desktop-work",
+      apply: true, env: { HOME: state.home },
+    });
+
+    expect(repaired).toMatchObject({
+      action: "repair",
+      applied: true,
+      steps: [{ target: "registration", action: "desktop-replace" }],
+    });
+    expect(JSON.parse(readFileSync(state.configPath, "utf8")).mcpServers["agent-bridge"]).toEqual({
+      command: state.oldCommand,
+      args: [],
+      env: {
+        AGENT_BRIDGE_AGENT: "desktop-work",
+        AGENT_BRIDGE_INSTANCE: "desktop-existing",
+        AGENT_BRIDGE_CONFIG: state.backendConfigPath,
+      },
+    });
+  }, 20_000);
+
+  it("refuses credential-like Desktop wrapper environment before journaling", () => {
+    const state = desktopFixture();
+    const config = JSON.parse(readFileSync(state.configPath, "utf8"));
+    config.mcpServers["agent-bridge"].env.AGENT_BRIDGE_TOKEN = "credential-sentinel-must-not-leak";
+    writeFileSync(state.configPath, `${JSON.stringify(config)}\n`, { mode: 0o600 });
+
+    expect(() => repairManagedClient({
+      runtime: "claude-desktop", instance: "desktop-existing", identity: "desktop-work",
+      apply: true, env: { HOME: state.home },
+    })).toThrow("cannot be represented safely");
+    expect(existsSync(join(state.home, ".agent-bridge", "operations"))).toBe(false);
   });
 
   it("rejects linked backend paths", () => {
