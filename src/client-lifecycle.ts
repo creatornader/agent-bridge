@@ -171,6 +171,7 @@ export interface ManagedRegistrationObservation {
     command: string;
     args: string[];
     env: RegistrationEnvironment;
+    extraSha256?: string;
   };
 }
 
@@ -242,6 +243,63 @@ function safeArgs(value: unknown, expected: string[], alternate: string[] = []):
     throw new Error("managed registration arguments cannot be represented safely");
   }
   return args;
+}
+
+function sensitiveArgument(args: string[], index: number): boolean {
+  const arg = args[index]!;
+  const previous = index > 0 ? args[index - 1]! : "";
+  const sensitiveFlag = /^--?(?:token|key|secret|password|authorization|credential)(?:=.*)?$/i;
+  return sensitiveFlag.test(arg)
+    || sensitiveFlag.test(previous)
+    || /\bBearer\s+\S+/i.test(arg)
+    || /^https?:\/\/\S*[?#]\S+/i.test(arg);
+}
+
+function safeDesktopArgs(value: unknown, expected: string[], alternate: string[] = []): string[] {
+  if (!Array.isArray(value) || value.length > 16) throw new Error("managed registration arguments are invalid");
+  const args = value.map((item) => strictText(item, "registration argument", 1024));
+  if (isDeepStrictEqual(args, expected) || isDeepStrictEqual(args, alternate)) return args;
+  if (args.some((_, index) => sensitiveArgument(args, index))) {
+    throw new Error("managed registration arguments cannot be represented safely");
+  }
+  return args;
+}
+
+function sensitiveEnvironmentEntry(key: string, value: string): boolean {
+  return /(?:TOKEN|KEY|SECRET|PASSWORD|AUTHORIZATION|CREDENTIAL)/i.test(key)
+    || /\bBearer\s+\S+/i.test(value)
+    || /^https?:\/\/\S*[?#]\S+/i.test(value);
+}
+
+function safeDesktopEnvironment(value: unknown): {
+  environment: RegistrationEnvironment;
+  extra: boolean;
+  extraSha256?: string;
+} {
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    throw new Error("managed registration environment is invalid");
+  }
+  const environment: RegistrationEnvironment = {};
+  const extraEntries: string[] = [];
+  for (const [key, item] of Object.entries(value as Record<string, unknown>)) {
+    const text = strictText(item, `registration ${key}`, 4096);
+    if (!REGISTRATION_ENV_KEYS.includes(key as (typeof REGISTRATION_ENV_KEYS)[number])) {
+      if (sensitiveEnvironmentEntry(key, text)) {
+        throw new Error("managed registration contains an unsupported environment key");
+      }
+      extraEntries.push(`${JSON.stringify(key)}=${JSON.stringify(text)}`);
+      continue;
+    }
+    if (key === "AGENT_BRIDGE_CONFIG") environment.AGENT_BRIDGE_CONFIG = strictAbsolutePath(text, "registration config");
+    else environment[key as "AGENT_BRIDGE_AGENT" | "AGENT_BRIDGE_INSTANCE"] = strictText(text, `registration ${key}`, 128);
+  }
+  return {
+    environment,
+    extra: extraEntries.length > 0,
+    extraSha256: extraEntries.length
+      ? createHash("sha256").update(extraEntries.sort().join("\n")).digest("hex")
+      : undefined,
+  };
 }
 
 function commandContext(
@@ -429,12 +487,12 @@ function observeDesktop(
       throw new Error("Claude Desktop MCP registration cannot be represented safely");
     }
     const entry = server as Record<string, unknown>;
-    const command = strictAbsolutePath(entry.command, "Claude Desktop MCP command");
-    const args = safeArgs(entry.args, expected.launch.args, alternateArgs);
-    const environment = safeEnvironment(entry.env);
+    const command = safeNativeExecutableContract(entry.command, "Claude Desktop MCP command");
+    const args = safeDesktopArgs(entry.args, expected.launch.args, alternateArgs);
+    const { environment, extra, extraSha256 } = safeDesktopEnvironment(entry.env);
     return {
-      state: exactRegistration(expected, command, args, environment) ? "exact" : "inexact",
-      target: registrationTarget(expected), observed: { state: "present", command, args, env: environment },
+      state: !extra && exactRegistration(expected, command, args, environment) ? "exact" : "inexact",
+      target: registrationTarget(expected), observed: { state: "present", command, args, env: environment, ...(extraSha256 ? { extraSha256 } : {}) },
     };
   } catch {
     throw new Error("Claude Desktop MCP registration cannot be represented safely");
