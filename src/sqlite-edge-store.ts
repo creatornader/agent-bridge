@@ -31,9 +31,6 @@ function openReadOnlyDatabase(path: string): Database {
 const MAX_SEQUENCE = 9_223_372_036_854_775_807n;
 
 const schema = `
-PRAGMA journal_mode = WAL;
-PRAGMA synchronous = FULL;
-PRAGMA foreign_keys = ON;
 CREATE TABLE IF NOT EXISTS edge_scopes (
   scope_key TEXT PRIMARY KEY,
   endpoint_hash TEXT NOT NULL,
@@ -115,12 +112,8 @@ CREATE INDEX IF NOT EXISTS edge_inbox_thread
   ON edge_inbox(scope_key, thread_id, sequence_key);
 CREATE INDEX IF NOT EXISTS edge_inbox_created
   ON edge_inbox(scope_key, created_at, sequence_key);
-CREATE TABLE IF NOT EXISTS edge_write_gates (
-  gate_key TEXT PRIMARY KEY,
-  lease_token TEXT,
-  lease_expires_at TEXT
-);
 `;
+const writeGateSchema = "CREATE TABLE IF NOT EXISTS edge_write_gates (gate_key TEXT PRIMARY KEY, lease_token TEXT, lease_expires_at TEXT)";
 
 type Row = Record<string, unknown>;
 export type PendingMessage = Omit<BridgeMessage, "sequence" | "createdAt">;
@@ -402,16 +395,38 @@ export class SQLiteEdgeStore {
       await new Promise((resolve) => setTimeout(resolve, pause));
       pause = Math.min(Math.ceil(pause * 1.7), 25);
     }
-    try { return await work(); }
-    finally {
-      await retrySqliteBusy(() => {
-        this.db.exec("BEGIN IMMEDIATE");
-        try {
-          this.db.prepare("UPDATE edge_write_gates SET lease_token=NULL,lease_expires_at=NULL WHERE gate_key='edge' AND lease_token=?").run(token);
-          this.db.exec("COMMIT");
-        } catch (error) { this.db.exec("ROLLBACK"); throw error; }
-      }, Math.max(1, Math.trunc(this.writeGateWaitMs)));
+    let completed = false;
+    let result: T;
+    try {
+      result = await work();
+      completed = true;
     }
+    finally {
+      try {
+        await retrySqliteBusy(() => {
+          this.db.exec("BEGIN IMMEDIATE");
+          try {
+            this.db.prepare("UPDATE edge_write_gates SET lease_token=NULL,lease_expires_at=NULL WHERE gate_key='edge' AND lease_token=?").run(token);
+            this.db.exec("COMMIT");
+          } catch (error) { this.db.exec("ROLLBACK"); throw error; }
+        }, Math.max(1, Math.trunc(this.writeGateWaitMs)));
+      } catch (error) {
+        if (!completed) throw error;
+      }
+    }
+    return result!;
+  }
+
+  private async bootstrapWriteGate(timeoutMs: number): Promise<void> {
+    await retrySqliteBusy(() => this.db.exec("PRAGMA journal_mode = WAL"), timeoutMs);
+    const exists = () => Boolean(this.db.prepare("SELECT 1 FROM sqlite_master WHERE type='table' AND name='edge_write_gates'").get());
+    if (exists()) return;
+    await retrySqliteBusy(() => {
+      if (exists()) return;
+      this.db.exec("BEGIN IMMEDIATE");
+      try { if (!exists()) this.db.exec(writeGateSchema); this.db.exec("COMMIT"); }
+      catch (error) { this.db.exec("ROLLBACK"); throw error; }
+    }, timeoutMs);
   }
 
   private restrictFiles(includeSidecars = true): void {
@@ -502,10 +517,12 @@ export class SQLiteEdgeStore {
   private async initializeOnce(): Promise<void> {
     assertEdgeUpgradeCandidate(this.db);
     const initializationTimeoutMs = Math.max(this.busyTimeoutMs, SQLITE_INITIALIZATION_BUSY_TIMEOUT_MS);
-    await retrySqliteBusy(() => this.db.exec(schema), initializationTimeoutMs);
+    await this.bootstrapWriteGate(initializationTimeoutMs);
+    this.db.exec("PRAGMA synchronous = FULL; PRAGMA foreign_keys = ON");
     await this.write(async () => {
       await retrySqliteBusy(() => this.db.exec("BEGIN IMMEDIATE"), initializationTimeoutMs);
       try {
+      this.db.exec(schema);
       const scopeColumns = this.db.prepare("PRAGMA table_info(edge_scopes)").all() as Row[];
       if (!scopeColumns.some((column) => column.name === "cache_contract")) {
         this.db.exec("ALTER TABLE edge_scopes ADD COLUMN cache_contract INTEGER NOT NULL DEFAULT 0");

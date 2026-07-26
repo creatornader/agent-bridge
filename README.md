@@ -246,8 +246,9 @@ for its relationship to MCP, A2A, agmsg, brokers, and agent runtimes.
 
 - Node.js 22.23.1 or newer.
 - SQLite 3.51.3 or newer for local and edge storage. The supported Node version includes it.
-- Concurrent local and edge initialization may wait up to 15 seconds for schema work;
-  normal database operations retain their configured busy timeout.
+- Concurrent local and edge initialization may wait up to 15 seconds for schema work.
+  File-backed local and edge stores serialize mutations with a durable token-checked
+  lease, so independently launched MCP clients do not contend as SQLite writers.
 - PostgreSQL 15, 16, 17, or 18 for gateway mode. New PostgreSQL majors fail the
   migration prerequisite and live readiness checks until their catalog digest is
   certified.

@@ -16,9 +16,6 @@ function openDatabase(path: string): Database {
   return new DatabaseSync(path);
 }
 const schema = `
-PRAGMA journal_mode = WAL;
-PRAGMA synchronous = FULL;
-PRAGMA foreign_keys = ON;
 CREATE TABLE IF NOT EXISTS bridge_messages (
  sequence INTEGER PRIMARY KEY AUTOINCREMENT, id TEXT NOT NULL UNIQUE, workspace TEXT NOT NULL, project TEXT, source TEXT NOT NULL,
  type TEXT NOT NULL, content TEXT NOT NULL, content_type TEXT NOT NULL, data TEXT, targets TEXT NOT NULL DEFAULT '[]',
@@ -83,6 +80,7 @@ CREATE INDEX IF NOT EXISTS bridge_presence_active ON bridge_presence(workspace, 
 CREATE TRIGGER IF NOT EXISTS bridge_messages_no_update BEFORE UPDATE ON bridge_messages BEGIN SELECT RAISE(ABORT, 'bridge messages are immutable'); END;
 CREATE TRIGGER IF NOT EXISTS bridge_messages_no_delete BEFORE DELETE ON bridge_messages BEGIN SELECT RAISE(ABORT, 'bridge messages are immutable'); END;
 `;
+const writeGateSchema = "CREATE TABLE IF NOT EXISTS bridge_write_gates (gate_key TEXT PRIMARY KEY, lease_token TEXT, lease_expires_at TEXT)";
 
 function stringify(value: unknown): string | null { return value === undefined ? null : JSON.stringify(value); }
 function parse(value: unknown): any { return typeof value === "string" ? JSON.parse(value) : undefined; }
@@ -112,6 +110,62 @@ export class SQLiteBridgeStore implements BridgeStore {
         if (after.dev !== before.dev || after.ino !== before.ino) throw new Error("SQLite database path identity changed while opening");
       }
     } catch (error) { this.db.close(); throw error; }
+  }
+  private async write<T>(work: () => T | Promise<T>): Promise<T> {
+    if (this.databasePath === ":memory:") return work();
+    const token = randomUUID();
+    const waitMs = process.platform === "win32" ? 60_000 : SQLITE_INITIALIZATION_BUSY_TIMEOUT_MS;
+    const deadline = Date.now() + waitMs;
+    let pause = 2;
+    while (true) {
+      const now = new Date();
+      const claimed = await retrySqliteBusy(() => {
+        this.db.exec("BEGIN IMMEDIATE");
+        try {
+          this.db.prepare("INSERT INTO bridge_write_gates (gate_key,lease_token,lease_expires_at) VALUES ('local',NULL,NULL) ON CONFLICT(gate_key) DO NOTHING").run();
+          const result = this.db.prepare("UPDATE bridge_write_gates SET lease_token=?,lease_expires_at=? WHERE gate_key='local' AND (lease_token IS NULL OR lease_expires_at<=?)")
+            .run(token, new Date(now.getTime() + 30_000).toISOString(), now.toISOString());
+          this.db.exec("COMMIT");
+          return result.changes === 1;
+        } catch (error) { this.db.exec("ROLLBACK"); throw error; }
+      }, Math.max(1, deadline - Date.now()));
+      if (claimed) break;
+      if (Date.now() >= deadline) throw new Error("local write coordinator remained busy");
+      await new Promise((resolve) => setTimeout(resolve, pause));
+      pause = Math.min(Math.ceil(pause * 1.7), 25);
+    }
+    let completed = false;
+    let result: T;
+    try {
+      result = await work();
+      completed = true;
+    }
+    finally {
+      try {
+        await retrySqliteBusy(() => {
+          this.db.exec("BEGIN IMMEDIATE");
+          try {
+            this.db.prepare("UPDATE bridge_write_gates SET lease_token=NULL,lease_expires_at=NULL WHERE gate_key='local' AND lease_token=?").run(token);
+            this.db.exec("COMMIT");
+          } catch (error) { this.db.exec("ROLLBACK"); throw error; }
+        }, waitMs);
+      } catch (error) {
+        if (!completed) throw error;
+      }
+    }
+    return result!;
+  }
+
+  private async bootstrapWriteGate(timeoutMs: number): Promise<void> {
+    await retrySqliteBusy(() => this.db.exec("PRAGMA journal_mode = WAL"), timeoutMs);
+    const exists = () => Boolean(this.db.prepare("SELECT 1 FROM sqlite_master WHERE type='table' AND name='bridge_write_gates'").get());
+    if (exists()) return;
+    await retrySqliteBusy(() => {
+      if (exists()) return;
+      this.db.exec("BEGIN IMMEDIATE");
+      try { if (!exists()) this.db.exec(writeGateSchema); this.db.exec("COMMIT"); }
+      catch (error) { this.db.exec("ROLLBACK"); throw error; }
+    }, timeoutMs);
   }
   private restrictFiles(includeSidecars = true): void {
     if (this.databasePath === ":memory:") return;
@@ -145,9 +199,12 @@ export class SQLiteBridgeStore implements BridgeStore {
     if (encoded < 3_051_003) throw new Error("SQLite 3.51.3 or newer is required");
     assertLocalUpgradeCandidate(this.db);
     const initializationTimeoutMs = Math.max(this.busyTimeoutMs, SQLITE_INITIALIZATION_BUSY_TIMEOUT_MS);
-    await retrySqliteBusy(() => this.db.exec(schema), initializationTimeoutMs);
+    await this.bootstrapWriteGate(initializationTimeoutMs);
+    this.db.exec("PRAGMA synchronous = FULL; PRAGMA foreign_keys = ON");
+    await this.write(async () => {
     await retrySqliteBusy(() => this.db.exec("BEGIN IMMEDIATE"), initializationTimeoutMs);
     try {
+      this.db.exec(schema);
       const columns = this.db.prepare("PRAGMA table_info(bridge_messages)").all() as Row[];
       if (!columns.some((column) => column.name === "project")) {
         this.db.exec("ALTER TABLE bridge_messages ADD COLUMN project TEXT");
@@ -306,11 +363,12 @@ export class SQLiteBridgeStore implements BridgeStore {
       throw error;
     }
     this.restrictFiles();
+    });
   }
   private async ready() { await this.initialize(); }
   async insertMessage(input: Omit<BridgeMessage, "sequence" | "createdAt">): Promise<InsertMessageResult> {
     await this.ready(); const createdAt = new Date().toISOString(); const storedPolicy = input.deliveryPolicy ?? (input.targets.length ? { mode: "leased" as const, maxAttempts: 5, retryBaseDelayMs: 1_000, retryMaxDelayMs: 60_000, retryJitterRatio: 0.2 } : { mode: "mailbox" as const });
-    this.db.exec("BEGIN IMMEDIATE");
+    return this.write(() => { this.db.exec("BEGIN IMMEDIATE");
     try {
       if (input.idempotencyKey) { const existing = this.db.prepare("SELECT * FROM bridge_messages WHERE workspace = ? AND source = ? AND idempotency_key = ?").get(input.workspace, input.source, input.idempotencyKey) as Row | undefined; if (existing) { const replay = message(existing); assertIdempotentReplay(replay, input); this.db.exec("COMMIT"); return { message: replay, created: false }; } }
       this.db.prepare(`INSERT INTO bridge_messages (id,workspace,project,source,type,content,content_type,data,targets,thread_id,reply_to_id,correlation_id,causation_id,priority,expires_at,idempotency_key,atrib_receipt_id,informed_by,metadata,delivery_policy,created_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`).run(input.id,input.workspace,input.project ?? null,input.source,input.type,input.content,input.contentType,stringify(input.data),JSON.stringify(input.targets),input.threadId ?? null,input.replyToId ?? null,input.correlationId ?? null,input.causationId ?? null,input.priority,input.expiresAt ?? null,input.idempotencyKey ?? null,input.atribReceiptId ?? null,stringify(input.informedBy),stringify(input.metadata),JSON.stringify(storedPolicy),createdAt);
@@ -323,7 +381,7 @@ export class SQLiteBridgeStore implements BridgeStore {
         }
       }
       const row = this.db.prepare("SELECT * FROM bridge_messages WHERE id = ?").get(input.id) as Row; this.db.exec("COMMIT"); return { message: message(row), created: true };
-    } catch (error) { this.db.exec("ROLLBACK"); throw error; }
+    } catch (error) { this.db.exec("ROLLBACK"); throw error; } });
   }
   async listMessages(principal: BridgePrincipal, query: MessageQuery = {}): Promise<MessagePage> {
     await this.ready(); const scope = cursorScope(principal, query); const cursor = decodeCursor(query.cursor, scope); const limit = Math.min(Math.max(Math.trunc(query.limit ?? 50), 1), 200); const now = new Date().toISOString();
@@ -350,10 +408,10 @@ export class SQLiteBridgeStore implements BridgeStore {
     if (messages.length === limit) return { messages, cursor: encodeCursor(last!.sequence, scope) };
     return { messages, cursor: highWater ? encodeCursor(highWater, scope) : query.cursor };
   }
-  async recordReceipt(principal: BridgePrincipal, messageIds: string[], readAt = new Date()): Promise<number> { await this.ready(); const stmt = this.db.prepare("INSERT OR IGNORE INTO bridge_receipts (workspace,message_id,principal,read_at) SELECT workspace,id,?,? FROM bridge_messages WHERE workspace=? AND id=? AND (targets='[]' OR EXISTS (SELECT 1 FROM json_each(targets) WHERE value=?))"); let changed = 0; this.db.exec("BEGIN IMMEDIATE"); try { for (const id of messageIds) changed += Number(stmt.run(principal.agent,readAt.toISOString(),principal.workspace,id,principal.agent).changes); this.db.exec("COMMIT"); return changed; } catch (e) { this.db.exec("ROLLBACK"); throw e; } }
+  async recordReceipt(principal: BridgePrincipal, messageIds: string[], readAt = new Date()): Promise<number> { await this.ready(); return this.write(() => { const stmt = this.db.prepare("INSERT OR IGNORE INTO bridge_receipts (workspace,message_id,principal,read_at) SELECT workspace,id,?,? FROM bridge_messages WHERE workspace=? AND id=? AND (targets='[]' OR EXISTS (SELECT 1 FROM json_each(targets) WHERE value=?))"); let changed = 0; this.db.exec("BEGIN IMMEDIATE"); try { for (const id of messageIds) changed += Number(stmt.run(principal.agent,readAt.toISOString(),principal.workspace,id,principal.agent).changes); this.db.exec("COMMIT"); return changed; } catch (e) { this.db.exec("ROLLBACK"); throw e; } }); }
   async claimDelivery(principal: BridgePrincipal, options: ClaimOptions): Promise<BridgeDelivery | null> {
     await this.ready(); const now = options.now ?? new Date(); const nowText = now.toISOString(); const expires = new Date(now.getTime() + options.leaseMs).toISOString(); const owner = principal.instance ?? principal.agent;
-    this.db.exec("BEGIN IMMEDIATE"); try {
+    return this.write(() => { this.db.exec("BEGIN IMMEDIATE"); try {
       this.db.prepare("UPDATE bridge_deliveries SET state='dead',last_error='message expired',lease_token=NULL,lease_owner=NULL,lease_expires_at=NULL,last_actor='agent-bridge',last_action='message_expired' WHERE workspace=? AND recipient=? AND (? IS NULL OR message_id=?) AND state IN ('pending','retrying','claimed') AND EXISTS (SELECT 1 FROM bridge_messages message WHERE message.workspace=bridge_deliveries.workspace AND message.id=bridge_deliveries.message_id AND message.expires_at IS NOT NULL AND message.expires_at<=?)").run(principal.workspace,principal.agent,options.messageId ?? null,options.messageId ?? null,nowText);
       this.db.prepare("UPDATE bridge_deliveries SET state='dead',last_error='maximum attempts reached',lease_token=NULL,lease_owner=NULL,lease_expires_at=NULL,last_actor='agent-bridge',last_action='attempts_exhausted' WHERE workspace=? AND recipient=? AND (? IS NULL OR message_id=?) AND cycle_attempt>=(SELECT json_extract(delivery_policy,'$.maxAttempts') FROM bridge_messages WHERE workspace=bridge_deliveries.workspace AND id=bridge_deliveries.message_id) AND (state IN ('pending','retrying') OR (state='claimed' AND lease_expires_at<=?))").run(principal.workspace,principal.agent,options.messageId ?? null,options.messageId ?? null,nowText);
       this.db.prepare("UPDATE bridge_deliveries SET state='retrying',available_at=?,last_error='lease expired',lease_token=NULL,lease_owner=NULL,lease_expires_at=NULL,last_actor='agent-bridge',last_action='lease_expired' WHERE workspace=? AND recipient=? AND (? IS NULL OR message_id=?) AND state='claimed' AND lease_expires_at<=? AND cycle_attempt<(SELECT json_extract(delivery_policy,'$.maxAttempts') FROM bridge_messages WHERE workspace=bridge_deliveries.workspace AND id=bridge_deliveries.message_id)").run(nowText,principal.workspace,principal.agent,options.messageId ?? null,options.messageId ?? null,nowText);
@@ -362,12 +420,12 @@ export class SQLiteBridgeStore implements BridgeStore {
       const candidateId = String(candidate.id);
       const token = randomUUID(); this.db.prepare("UPDATE bridge_deliveries SET state='claimed',attempt=attempt+1,cycle_attempt=cycle_attempt+1,lease_token=?,lease_owner=?,lease_expires_at=?,last_error=NULL,last_actor=?,last_action='claim' WHERE id=?").run(token,owner,expires,principal.agent,candidateId);
       const claimed = this.db.prepare("SELECT * FROM bridge_deliveries WHERE id=?").get(candidateId) as Row; this.db.exec("COMMIT"); return delivery(claimed);
-    } catch (e) { this.db.exec("ROLLBACK"); throw e; }
+    } catch (e) { this.db.exec("ROLLBACK"); throw e; } });
   }
-  async renewDelivery(principal: BridgePrincipal, id: string, token: string, leaseMs: number): Promise<BridgeDelivery | null> { await this.ready(); const now = new Date(); const expires = new Date(now.getTime() + leaseMs).toISOString(); const owner = principal.instance ?? principal.agent; const result = this.db.prepare("UPDATE bridge_deliveries SET lease_expires_at=? WHERE workspace=? AND recipient=? AND lease_owner=? AND id=? AND lease_token=? AND state='claimed' AND lease_expires_at > ?").run(expires,principal.workspace,principal.agent,owner,id,token,now.toISOString()); if (!result.changes) return null; return delivery(this.db.prepare("SELECT * FROM bridge_deliveries WHERE id=?").get(id) as Row); }
+  async renewDelivery(principal: BridgePrincipal, id: string, token: string, leaseMs: number): Promise<BridgeDelivery | null> { await this.ready(); return this.write(() => { const now = new Date(); const expires = new Date(now.getTime() + leaseMs).toISOString(); const owner = principal.instance ?? principal.agent; const result = this.db.prepare("UPDATE bridge_deliveries SET lease_expires_at=? WHERE workspace=? AND recipient=? AND lease_owner=? AND id=? AND lease_token=? AND state='claimed' AND lease_expires_at > ?").run(expires,principal.workspace,principal.agent,owner,id,token,now.toISOString()); if (!result.changes) return null; return delivery(this.db.prepare("SELECT * FROM bridge_deliveries WHERE id=?").get(id) as Row); }); }
   async settleDelivery(principal: BridgePrincipal, id: string, token: string, state: "acked" | "retrying" | "dead", error?: string, _retryPolicy?: import("./bridge-domain.js").RetryPolicy): Promise<BridgeDelivery | null> {
     await this.ready(); const now = new Date(); const owner = principal.instance ?? principal.agent;
-    this.db.exec("BEGIN IMMEDIATE");
+    return this.write(() => { this.db.exec("BEGIN IMMEDIATE");
     try {
       const current = this.db.prepare("SELECT delivery.*,message.delivery_policy FROM bridge_deliveries delivery JOIN bridge_messages message ON message.workspace=delivery.workspace AND message.id=delivery.message_id WHERE delivery.workspace=? AND delivery.recipient=? AND delivery.lease_owner=? AND delivery.id=? AND delivery.lease_token=? AND delivery.state='claimed' AND delivery.lease_expires_at>?").get(principal.workspace,principal.agent,owner,id,token,now.toISOString()) as Row | undefined;
       if (!current) { this.db.exec("COMMIT"); return null; }
@@ -381,7 +439,7 @@ export class SQLiteBridgeStore implements BridgeStore {
       const action = state === "acked" ? "ack" : state === "dead" ? "nack_dead" : exhausted ? "attempts_exhausted" : "nack_retry";
       this.db.prepare("UPDATE bridge_deliveries SET state=?,available_at=?,last_error=?,lease_token=NULL,lease_owner=NULL,lease_expires_at=NULL,last_actor=?,last_action=? WHERE id=?").run(nextState,available,error?.slice(0,1024) ?? null,principal.agent,action,id);
       const result = delivery(this.db.prepare("SELECT * FROM bridge_deliveries WHERE id=?").get(id) as Row); this.db.exec("COMMIT"); return result;
-    } catch (caught) { this.db.exec("ROLLBACK"); throw caught; }
+    } catch (caught) { this.db.exec("ROLLBACK"); throw caught; } });
   }
   async diagnostics(principal: BridgePrincipal): Promise<BridgeDiagnostics> {
     await this.ready();
@@ -407,7 +465,7 @@ export class SQLiteBridgeStore implements BridgeStore {
     const now = new Date();
     const nowText = now.toISOString();
     const expires = new Date(now.getTime() + leaseMs).toISOString();
-    this.db.exec("BEGIN IMMEDIATE");
+    return this.write(() => { this.db.exec("BEGIN IMMEDIATE");
     try {
       this.db.prepare("DELETE FROM bridge_presence WHERE workspace=? AND lease_expires_at<=?")
         .run(principal.workspace, nowText);
@@ -432,13 +490,13 @@ export class SQLiteBridgeStore implements BridgeStore {
     } catch (error) {
       this.db.exec("ROLLBACK");
       throw error;
-    }
+    } });
   }
   async listPresence(principal: BridgePrincipal): Promise<AgentPresence[]> {
     await this.ready();
     const now = new Date().toISOString();
-    this.db.prepare("DELETE FROM bridge_presence WHERE workspace=? AND lease_expires_at<=?")
-      .run(principal.workspace, now);
+    await this.write(() => this.db.prepare("DELETE FROM bridge_presence WHERE workspace=? AND lease_expires_at<=?")
+      .run(principal.workspace, now));
     const rows = this.db.prepare("SELECT * FROM bridge_presence WHERE workspace=? ORDER BY agent,instance")
       .all(principal.workspace) as Row[];
     return rows.map(presence);
@@ -471,7 +529,7 @@ export class SQLiteBridgeStore implements BridgeStore {
     return { events, cursor: events.length === limit && last ? encodeScopedCursor(scope, last.sequence) : undefined };
   }
   async cancelDelivery(principal: BridgePrincipal,id:string) {
-    await this.ready(); this.db.exec("BEGIN IMMEDIATE");
+    await this.ready(); return this.write(() => { this.db.exec("BEGIN IMMEDIATE");
     try {
       const current = this.db.prepare("SELECT delivery.* FROM bridge_deliveries delivery JOIN bridge_messages message ON message.workspace=delivery.workspace AND message.id=delivery.message_id WHERE delivery.id=? AND delivery.workspace=? AND message.source=?").get(id,principal.workspace,principal.agent) as Row | undefined;
       if (!current) { this.db.exec("COMMIT"); return null; }
@@ -479,10 +537,10 @@ export class SQLiteBridgeStore implements BridgeStore {
       if (!["pending","retrying","claimed"].includes(String(current.state))) throw new DeliveryStateConflictError(`cannot cancel a ${current.state} delivery`);
       this.db.prepare("UPDATE bridge_deliveries SET state='cancelled',lease_token=NULL,lease_owner=NULL,lease_expires_at=NULL,last_error=NULL,last_actor=?,last_action='cancel' WHERE id=?").run(principal.agent,id);
       const result = delivery(this.db.prepare("SELECT * FROM bridge_deliveries WHERE id=?").get(id) as Row); this.db.exec("COMMIT"); return result;
-    } catch (error) { this.db.exec("ROLLBACK"); throw error; }
+    } catch (error) { this.db.exec("ROLLBACK"); throw error; } });
   }
   async requeueDelivery(principal: BridgePrincipal,id:string) {
-    await this.ready(); this.db.exec("BEGIN IMMEDIATE");
+    await this.ready(); return this.write(() => { this.db.exec("BEGIN IMMEDIATE");
     try {
       const current = this.db.prepare("SELECT delivery.*,message.expires_at,message.delivery_policy FROM bridge_deliveries delivery JOIN bridge_messages message ON message.workspace=delivery.workspace AND message.id=delivery.message_id WHERE delivery.id=? AND delivery.workspace=? AND message.source=?").get(id,principal.workspace,principal.agent) as Row | undefined;
       if (!current) { this.db.exec("COMMIT"); return null; }
@@ -491,7 +549,7 @@ export class SQLiteBridgeStore implements BridgeStore {
       const policy = parse(current.delivery_policy); const availableAt = policy.notBefore && policy.notBefore > now ? policy.notBefore : now;
       this.db.prepare("UPDATE bridge_deliveries SET state='pending',available_at=?,cycle_attempt=0,requeue_count=requeue_count+1,lease_token=NULL,lease_owner=NULL,lease_expires_at=NULL,last_error=NULL,last_actor=?,last_action='requeue' WHERE id=?").run(availableAt,principal.agent,id);
       const result = delivery(this.db.prepare("SELECT * FROM bridge_deliveries WHERE id=?").get(id) as Row); this.db.exec("COMMIT"); return result;
-    } catch (error) { this.db.exec("ROLLBACK"); throw error; }
+    } catch (error) { this.db.exec("ROLLBACK"); throw error; } });
   }
   async close(): Promise<void> { this.db.close(); }
 }

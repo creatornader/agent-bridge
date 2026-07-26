@@ -8,6 +8,10 @@ export const EDGE_SQLITE_APPLICATION_ID = 0x41424745;
 export const SQLITE_DATABASE_SCHEMA_VERSION = 1;
 export const SQLITE_METADATA_TABLE = "agent_bridge_metadata";
 export const LOCAL_SQLITE_SCHEMA_CONTRACTS = Object.freeze([
+  Object.freeze({ id: "current-upgraded-write-coordinator", sha256: "d8504fc1092045ac5dc50aa64b0291a68ccb57af1cfebe5d1997b79f433b2eab" }),
+  Object.freeze({ id: "current-upgraded-project-column-write-coordinator", sha256: "37845f7e49b4c56dffe40295ffb31320d4b33c2acc2873e48514a1b8e36a490b" }),
+  Object.freeze({ id: "current-upgraded-delivery-policy-write-coordinator", sha256: "a0079dfe925a529b613425f779b5d978464a4c6b23e6cb7439fbf74f70da89bb" }),
+  Object.freeze({ id: "current-upgraded-delivery-events-write-coordinator", sha256: "a7de84c001b5f467a10c3aefdb6a92c86c7ce621cb5889cde90bc3c9f0b2f2ab" }),
   Object.freeze({ id: "current-created-schema", sha256: "e2f978c27ea5d151a4b4b3ec349166833441e42401fedfe60dc3ba20f3d713aa" }),
   Object.freeze({ id: "current-upgraded-project-column", sha256: "cb0975bbc1ccc7a2a66d8f4d76df619804449cf81119972337afad6cdab64451" }),
   Object.freeze({ id: "current-upgraded-delivery-policy", sha256: "d4fd8905ea73057b27662454c16c038834f5a1bf017db9cfc041792104aa2e6d" }),
@@ -55,6 +59,7 @@ const localColumns: Record<string, readonly string[]> = {
     "requeue_count", "lease_owner", "error", "actor", "action", "created_at",
   ],
   bridge_presence: ["workspace", "agent", "instance", "runtime_type", "capabilities", "lease_expires_at", "last_seen_at"],
+  bridge_write_gates: ["gate_key", "lease_token", "lease_expires_at"],
 };
 
 const localObjects = new Map<string, [string, string]>([
@@ -64,6 +69,7 @@ const localObjects = new Map<string, [string, string]>([
   ["bridge_messages", ["table", "bridge_messages"]],
   ["bridge_presence", ["table", "bridge_presence"]],
   ["bridge_receipts", ["table", "bridge_receipts"]],
+  ["bridge_write_gates", ["table", "bridge_write_gates"]],
   ["bridge_deliveries_claim", ["index", "bridge_deliveries"]],
   ["bridge_deliveries_publisher", ["index", "bridge_deliveries"]],
   ["bridge_deliveries_terminal", ["index", "bridge_deliveries"]],
