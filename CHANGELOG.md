@@ -4,6 +4,14 @@ All notable changes to agent-bridge are documented in this file.
 
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and the project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## Unreleased
+
+### Fixed
+
+- Serialize concurrent gateway edge mutations through a token-checked lease stored in
+  SQLite. The coordinator recovers an expired crashed-writer lease without releasing a
+  newer owner, and keeps gateway calls outside the local write boundary.
+
 ## [0.6.2] - 2026-07-21
 
 ### Fixed

@@ -115,6 +115,11 @@ CREATE INDEX IF NOT EXISTS edge_inbox_thread
   ON edge_inbox(scope_key, thread_id, sequence_key);
 CREATE INDEX IF NOT EXISTS edge_inbox_created
   ON edge_inbox(scope_key, created_at, sequence_key);
+CREATE TABLE IF NOT EXISTS edge_write_gates (
+  gate_key TEXT PRIMARY KEY,
+  lease_token TEXT,
+  lease_expires_at TEXT
+);
 `;
 
 type Row = Record<string, unknown>;
@@ -153,14 +158,17 @@ export function inspectEdgeScopeReadOnly(path: string, scope: EdgeScope, now = n
   }
   const db = openReadOnlyDatabase(path);
   try {
-    const tables = db.prepare("SELECT name FROM sqlite_master WHERE type='table' AND name IN ('edge_scopes','edge_migration_gates','edge_outbox','edge_inbox') ORDER BY name")
+    const tables = db.prepare("SELECT name FROM sqlite_master WHERE type='table' AND name IN ('edge_scopes','edge_migration_gates','edge_outbox','edge_inbox','edge_write_gates') ORDER BY name")
       .all() as Row[];
     if (tables.length === 0) {
       const userTables = db.prepare("SELECT count(*) AS count FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%'").get() as Row;
       if (Number(userTables.count) !== 0) throw new EdgeConflictError("edge database is not an Agent Bridge edge store");
       return { exists: true, gate: { scopeKey: edgeScopeKey(scope), state: "active", operationId: undefined, leaseExpiresAt: undefined, updatedAt: new Date(0).toISOString() }, pending: 0, due: 0, scheduled: 0, leased: 0, blocked: 0, cached: 0 };
     }
-    if (tables.length !== 4) throw new EdgeConflictError("edge database schema is incomplete");
+    const names = new Set(tables.map((table) => String(table.name)));
+    for (const name of ["edge_scopes", "edge_migration_gates", "edge_outbox", "edge_inbox"]) {
+      if (!names.has(name)) throw new EdgeConflictError("edge database schema is incomplete");
+    }
     const key = edgeScopeKey(scope);
     const scopeRow = db.prepare("SELECT 1 AS present FROM edge_scopes WHERE scope_key=?").get(key) as Row | undefined;
     if (!scopeRow) {
@@ -346,7 +354,14 @@ export class SQLiteEdgeStore {
   private initialized = false;
   private initialization?: Promise<void>;
 
-  constructor(private readonly path: string, private readonly scope: EdgeScope, private readonly busyTimeoutMs = 2_000) {
+  constructor(
+    private readonly path: string,
+    private readonly scope: EdgeScope,
+    private readonly busyTimeoutMs = 2_000,
+    private readonly writeGateLeaseMs = 30_000,
+    // Windows first-open ACL work is materially slower with many concurrent clients.
+    private readonly writeGateWaitMs = process.platform === "win32" ? 60_000 : SQLITE_INITIALIZATION_BUSY_TIMEOUT_MS,
+  ) {
     const selected = preparePrivateSqliteLocation(path, true, "defer");
     this.databasePath = selected;
     this.preexistingFiles = new Set(selected === ":memory:" ? [] : [selected, `${selected}-wal`, `${selected}-shm`].filter(existsSync));
@@ -361,6 +376,42 @@ export class SQLiteEdgeStore {
       }
     } catch (error) { this.db.close(); throw error; }
     this.key = edgeScopeKey(scope);
+  }
+
+  private async write<T>(work: () => T | Promise<T>): Promise<T> {
+    if (this.databasePath === ":memory:") return work();
+    const token = randomUUID();
+    const deadline = Date.now() + Math.max(1, Math.trunc(this.writeGateWaitMs));
+    let pause = 2;
+    while (true) {
+      const now = new Date();
+      const claimed = await retrySqliteBusy(() => {
+        this.db.exec("BEGIN IMMEDIATE");
+        try {
+          this.db.prepare("INSERT INTO edge_write_gates (gate_key,lease_token,lease_expires_at) VALUES ('edge',NULL,NULL) ON CONFLICT(gate_key) DO NOTHING").run();
+          const update = this.db.prepare(`UPDATE edge_write_gates SET lease_token=?,lease_expires_at=?
+            WHERE gate_key='edge' AND (lease_token IS NULL OR lease_expires_at<=?)`).run(
+            token, new Date(now.getTime() + Math.max(1, Math.trunc(this.writeGateLeaseMs))).toISOString(), now.toISOString(),
+          );
+          this.db.exec("COMMIT");
+          return update.changes === 1;
+        } catch (error) { this.db.exec("ROLLBACK"); throw error; }
+      }, Math.max(1, deadline - Date.now()));
+      if (claimed) break;
+      if (Date.now() >= deadline) throw new EdgeConflictError("edge write coordinator remained busy");
+      await new Promise((resolve) => setTimeout(resolve, pause));
+      pause = Math.min(Math.ceil(pause * 1.7), 25);
+    }
+    try { return await work(); }
+    finally {
+      await retrySqliteBusy(() => {
+        this.db.exec("BEGIN IMMEDIATE");
+        try {
+          this.db.prepare("UPDATE edge_write_gates SET lease_token=NULL,lease_expires_at=NULL WHERE gate_key='edge' AND lease_token=?").run(token);
+          this.db.exec("COMMIT");
+        } catch (error) { this.db.exec("ROLLBACK"); throw error; }
+      }, Math.max(1, Math.trunc(this.writeGateWaitMs)));
+    }
   }
 
   private restrictFiles(includeSidecars = true): void {
@@ -452,8 +503,9 @@ export class SQLiteEdgeStore {
     assertEdgeUpgradeCandidate(this.db);
     const initializationTimeoutMs = Math.max(this.busyTimeoutMs, SQLITE_INITIALIZATION_BUSY_TIMEOUT_MS);
     await retrySqliteBusy(() => this.db.exec(schema), initializationTimeoutMs);
-    await retrySqliteBusy(() => this.db.exec("BEGIN IMMEDIATE"), initializationTimeoutMs);
-    try {
+    await this.write(async () => {
+      await retrySqliteBusy(() => this.db.exec("BEGIN IMMEDIATE"), initializationTimeoutMs);
+      try {
       const scopeColumns = this.db.prepare("PRAGMA table_info(edge_scopes)").all() as Row[];
       if (!scopeColumns.some((column) => column.name === "cache_contract")) {
         this.db.exec("ALTER TABLE edge_scopes ADD COLUMN cache_contract INTEGER NOT NULL DEFAULT 0");
@@ -473,29 +525,30 @@ export class SQLiteEdgeStore {
         this.db.exec("ALTER TABLE edge_outbox ADD COLUMN blocked_at TEXT");
       }
       installEdgeMarkers(this.db);
-      this.db.exec("COMMIT");
-    } catch (error) {
-      this.db.exec("ROLLBACK");
-      throw error;
-    }
-    this.restrictFiles();
-    const endpointHash = createHash("sha256").update(this.scope.endpoint.replace(/\/$/, "")).digest("hex");
-    this.db.prepare(`INSERT INTO edge_scopes (scope_key, endpoint_hash, workspace, agent)
+        this.db.exec("COMMIT");
+      } catch (error) {
+        this.db.exec("ROLLBACK");
+        throw error;
+      }
+      this.restrictFiles();
+      const endpointHash = createHash("sha256").update(this.scope.endpoint.replace(/\/$/, "")).digest("hex");
+      this.db.prepare(`INSERT INTO edge_scopes (scope_key, endpoint_hash, workspace, agent)
       VALUES (?, ?, ?, ?) ON CONFLICT(scope_key) DO NOTHING`)
-      .run(this.key, endpointHash, this.scope.principal.workspace, this.scope.principal.agent);
-    this.db.prepare(`INSERT INTO edge_migration_gates
+        .run(this.key, endpointHash, this.scope.principal.workspace, this.scope.principal.agent);
+      this.db.prepare(`INSERT INTO edge_migration_gates
       (scope_key,state,operation_id,lease_token,lease_expires_at,updated_at)
       SELECT scope_key,'active',NULL,NULL,NULL,? FROM edge_scopes
       WHERE scope_key=? ON CONFLICT(scope_key) DO NOTHING`)
-      .run(new Date().toISOString(), this.key);
-    const contract = this.db.prepare("SELECT cache_contract FROM edge_scopes WHERE scope_key=?").get(this.key) as Row;
-    if (Number(contract.cache_contract) < 1) {
-      this.db.exec("BEGIN IMMEDIATE");
-      try {
-        this.db.prepare("UPDATE edge_scopes SET pull_cursor=NULL, cache_contract=1 WHERE scope_key=?").run(this.key);
-        this.db.exec("COMMIT");
-      } catch (error) { this.db.exec("ROLLBACK"); throw error; }
-    }
+        .run(new Date().toISOString(), this.key);
+      const contract = this.db.prepare("SELECT cache_contract FROM edge_scopes WHERE scope_key=?").get(this.key) as Row;
+      if (Number(contract.cache_contract) < 1) {
+        this.db.exec("BEGIN IMMEDIATE");
+        try {
+          this.db.prepare("UPDATE edge_scopes SET pull_cursor=NULL, cache_contract=1 WHERE scope_key=?").run(this.key);
+          this.db.exec("COMMIT");
+        } catch (error) { this.db.exec("ROLLBACK"); throw error; }
+      }
+    });
   }
 
   private async ready(): Promise<void> {
@@ -510,6 +563,7 @@ export class SQLiteEdgeStore {
   /** Refuse new normal-client writes before any remote attempt begins. */
   async assertScopeActive(): Promise<void> {
     await this.ready();
+    await this.write(() => {
     this.db.exec("BEGIN IMMEDIATE");
     try {
       this.assertScopeActiveInTransaction();
@@ -518,12 +572,14 @@ export class SQLiteEdgeStore {
       this.db.exec("ROLLBACK");
       throw error;
     }
+    });
   }
 
   /** Refuse remote publication unless this worker still owns the durable drain lease. */
   async assertDrainLease(lease: EdgeDrainLease, now = new Date()): Promise<void> {
     await this.ready();
     if (lease.scopeKey !== this.key) throw new EdgeMigrationLeaseError();
+    await this.write(() => {
     this.db.exec("BEGIN IMMEDIATE");
     try {
       this.assertDrainLeaseInTransaction(lease, now);
@@ -532,6 +588,7 @@ export class SQLiteEdgeStore {
       this.db.exec("ROLLBACK");
       throw error;
     }
+    });
   }
 
   private async claimDrainLease(
@@ -540,6 +597,7 @@ export class SQLiteEdgeStore {
     await this.ready();
     const normalizedOperationId = safeOperationId(operationId);
     const duration = Math.max(1, Math.trunc(leaseMs));
+    return this.write(() => {
     this.db.exec("BEGIN IMMEDIATE");
     try {
       const gate = this.gateInTransaction();
@@ -565,6 +623,7 @@ export class SQLiteEdgeStore {
       this.db.exec("ROLLBACK");
       throw error;
     }
+    });
   }
 
   /** Start a new durable drain only from an active edge scope. */
@@ -588,6 +647,7 @@ export class SQLiteEdgeStore {
   async assertDrainComplete(lease: EdgeDrainLease, now = new Date()): Promise<void> {
     await this.ready();
     if (lease.scopeKey !== this.key) throw new EdgeMigrationLeaseError();
+    await this.write(() => {
     this.db.exec("BEGIN IMMEDIATE");
     try {
       this.assertDrainLeaseInTransaction(lease, now);
@@ -610,12 +670,14 @@ export class SQLiteEdgeStore {
       this.db.exec("ROLLBACK");
       throw error;
     }
+    });
   }
 
   async renewDrainLease(lease: EdgeDrainLease, now = new Date(), leaseMs = 30_000): Promise<EdgeDrainLease> {
     await this.ready();
     if (lease.scopeKey !== this.key) throw new EdgeMigrationLeaseError();
     const duration = Math.max(1, Math.trunc(leaseMs));
+    return this.write(() => {
     this.db.exec("BEGIN IMMEDIATE");
     try {
       this.assertDrainLeaseInTransaction(lease, now);
@@ -632,11 +694,13 @@ export class SQLiteEdgeStore {
       this.db.exec("ROLLBACK");
       throw error;
     }
+    });
   }
 
   async retireScope(lease: EdgeDrainLease, now = new Date()): Promise<void> {
     await this.ready();
     if (lease.scopeKey !== this.key) throw new EdgeMigrationLeaseError();
+    await this.write(() => {
     this.db.exec("BEGIN IMMEDIATE");
     try {
       this.assertDrainLeaseInTransaction(lease, now);
@@ -654,6 +718,7 @@ export class SQLiteEdgeStore {
       this.db.exec("ROLLBACK");
       throw error;
     }
+    });
   }
 
   async enqueue(input: PendingMessage, now = new Date()): Promise<EdgeEnqueueResult> {
@@ -662,6 +727,7 @@ export class SQLiteEdgeStore {
     const payloadHash = edgeMessageFingerprint(draft);
     const serialized = canonical(draft as unknown as JsonValue);
     const nowText = now.toISOString();
+    return this.write(() => {
     this.db.exec("BEGIN IMMEDIATE");
     try {
       this.assertScopeActiveInTransaction();
@@ -685,11 +751,13 @@ export class SQLiteEdgeStore {
       this.db.exec("ROLLBACK");
       throw error;
     }
+    });
   }
 
   async claimNext(now = new Date(), leaseMs = 30_000, migrationLease?: EdgeDrainLease): Promise<EdgeOutboxRecord | undefined> {
     await this.ready();
     const nowText = now.toISOString();
+    return this.write(() => {
     this.db.exec("BEGIN IMMEDIATE");
     try {
       this.assertClaimAuthorityInTransaction(now, migrationLease);
@@ -724,23 +792,24 @@ export class SQLiteEdgeStore {
       this.db.exec("ROLLBACK");
       throw error;
     }
+    });
   }
 
   async retry(record: EdgeOutboxRecord, error: string, availableAt: Date): Promise<void> {
     await this.ready();
-    this.db.prepare(`UPDATE edge_outbox SET attempts=attempts+1, available_at=?,
+    await this.write(() => this.db.prepare(`UPDATE edge_outbox SET attempts=attempts+1, available_at=?,
       lease_token=NULL, lease_expires_at=NULL, last_error=?
       WHERE scope_key=? AND position=? AND lease_token=?`)
-      .run(availableAt.toISOString(), error.slice(0, 256), this.key, record.position, record.leaseToken);
+      .run(availableAt.toISOString(), error.slice(0, 256), this.key, record.position, record.leaseToken));
     await this.noteError(error);
   }
 
   async block(record: EdgeOutboxRecord, error: string, now = new Date()): Promise<void> {
     await this.ready();
-    this.db.prepare(`UPDATE edge_outbox SET state='blocked', attempts=attempts+1,
+    await this.write(() => this.db.prepare(`UPDATE edge_outbox SET state='blocked', attempts=attempts+1,
       lease_token=NULL, lease_expires_at=NULL, last_error=?, blocked_at=?
       WHERE scope_key=? AND position=? AND lease_token=?`)
-      .run(error.slice(0, 256), now.toISOString(), this.key, record.position, record.leaseToken);
+      .run(error.slice(0, 256), now.toISOString(), this.key, record.position, record.leaseToken));
     await this.noteError(error);
   }
 
@@ -750,6 +819,7 @@ export class SQLiteEdgeStore {
     now = new Date(),
   ): Promise<void> {
     await this.ready();
+    await this.write(() => {
     this.db.exec("BEGIN IMMEDIATE");
     try {
       this.cacheOne(message);
@@ -766,6 +836,7 @@ export class SQLiteEdgeStore {
       this.db.exec("ROLLBACK");
       throw error;
     }
+    });
   }
 
   private cacheOne(message: BridgeMessage): void {
@@ -797,6 +868,7 @@ export class SQLiteEdgeStore {
   async cachePage(messages: BridgeMessage[], cursor: string | undefined, now = new Date()): Promise<void> {
     await this.ready();
     const scope = cursorScope(this.scope.principal, { mailbox: "all", includeExpired: true });
+    await this.write(() => {
     this.db.exec("BEGIN IMMEDIATE");
     try {
       for (const message of messages) this.cacheOne(message);
@@ -817,10 +889,12 @@ export class SQLiteEdgeStore {
       this.db.exec("ROLLBACK");
       throw error;
     }
+    });
   }
 
   async cacheLatest(messages: BridgeMessage[], now = new Date()): Promise<void> {
     await this.ready();
+    await this.write(() => {
     this.db.exec("BEGIN IMMEDIATE");
     try {
       for (const message of messages) this.cacheOne(message);
@@ -833,6 +907,7 @@ export class SQLiteEdgeStore {
       this.db.exec("ROLLBACK");
       throw error;
     }
+    });
   }
 
   async list(query: MessageQuery = {}): Promise<MessagePage> {
@@ -927,14 +1002,14 @@ export class SQLiteEdgeStore {
 
   async noteError(error: string): Promise<void> {
     await this.ready();
-    this.db.prepare("UPDATE edge_scopes SET last_error=? WHERE scope_key=?")
-      .run(error.slice(0, 256), this.key);
+    await this.write(() => this.db.prepare("UPDATE edge_scopes SET last_error=? WHERE scope_key=?")
+      .run(error.slice(0, 256), this.key));
   }
 
   async noteAttempt(now = new Date()): Promise<void> {
     await this.ready();
-    this.db.prepare("UPDATE edge_scopes SET last_attempt_at=? WHERE scope_key=?")
-      .run(now.toISOString(), this.key);
+    await this.write(() => this.db.prepare("UPDATE edge_scopes SET last_attempt_at=? WHERE scope_key=?")
+      .run(now.toISOString(), this.key));
   }
 
   async stats(now = new Date()): Promise<EdgeStats> {
