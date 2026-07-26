@@ -453,10 +453,16 @@ describe("configFromEnv", () => {
       AGENT_BRIDGE_PROVIDER: "gatewy",
       AGENT_BRIDGE_AGENT: "codex",
     })).toThrow("Unsupported AGENT_BRIDGE_PROVIDER: gatewy");
-    expect(() => configFromEnv({
-      AGENT_BRIDGE_PROVIDER: "gateway",
-      AGENT_BRIDGE_AGENT: "codex",
-    })).toThrow("gateway requires AGENT_BRIDGE_URL and AGENT_BRIDGE_TOKEN");
+    const home = withBridgeConfig("");
+    try {
+      expect(() => configFromEnv({
+        HOME: home,
+        AGENT_BRIDGE_PROVIDER: "gateway",
+        AGENT_BRIDGE_AGENT: "codex",
+      })).toThrow("gateway requires AGENT_BRIDGE_URL and AGENT_BRIDGE_TOKEN");
+    } finally {
+      rmSync(home, { recursive: true, force: true });
+    }
   });
 
   it("supports an explicit local config path", () => {
