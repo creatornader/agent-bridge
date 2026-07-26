@@ -81,6 +81,22 @@ Queued sends retain their idempotency keys. Long-lived MCP clients retry them, a
 `agent-bridge sync` triggers the same bounded replay manually. Claims, lease changes,
 delivery settlement, presence, and read-receipt writes still require the gateway.
 
+## Local edge database is locked
+
+Gateway clients share an owner-private local edge database for their outbox and inbox
+cache. Several active MCP processes may use that database at once. Agent Bridge
+serializes local mutations with a short-lived crash-recoverable write gate. It does not
+hold that gate while it calls the gateway.
+
+If an older installed executable reports `fatal local edge failure: database is locked`,
+upgrade the package and restart only the affected MCP host. Do not delete
+`edge.sqlite3`, its `-wal` or `-shm` sidecars, or a write-lock file while clients are
+running. Those files carry durable queued work and may be open in another session.
+
+Use `lsof` to identify the host before restarting it. Multiple Codex task processes are
+normal. A stale child is one whose parent host has exited, not simply one that has been
+running for a long time.
+
 ## Legacy Supabase provider was removed
 
 Agent Bridge 0.6.0 rejects `legacy`, `supabase`, `legacy-supabase`, and key-only
