@@ -1014,7 +1014,7 @@ describe("offline SQLite synchronization", () => {
     await upgraded.close();
     const verified = new DatabaseSync(path, { readOnly: true });
     expect(sqliteSchemaContractHash(verified)).toBe(EDGE_SQLITE_SCHEMA_CONTRACTS.find(
-      (contract) => contract.id === "current-upgraded-project-column-migration-gate",
+      (contract) => contract.id === "current-upgraded-project-column-migration-gate-write-coordinator",
     )!.sha256);
     verified.close();
   });
@@ -1106,7 +1106,7 @@ describe("offline SQLite synchronization", () => {
     }>;
     expect(columns.filter((column) => column.name === "project")).toHaveLength(1);
     expect(sqliteSchemaContractHash(upgraded)).toBe(EDGE_SQLITE_SCHEMA_CONTRACTS.find(
-      (contract) => contract.id === "current-upgraded-project-column-migration-gate",
+      (contract) => contract.id === "current-upgraded-project-column-migration-gate-write-coordinator",
     )!.sha256);
     upgraded.close();
   }, process.platform === "win32" ? 45_000 : 15_000);
