@@ -158,6 +158,13 @@ The published npm version is the authority for whether this package line has shi
 - Production proof guidance records the deployed 0.6.1 evidence and uses a
   release-specific workspace for fresh proof principals.
 
+### 0.6.3 package contents
+
+- Local SQLite and gateway-edge SQLite mutations coordinate through a durable,
+  token-checked lease. Concurrent MCP processes serialize writes, recover an
+  expired crashed-writer lease safely, and keep gateway calls outside the local
+  write boundary.
+
 ### Production validation and adoption
 
 Completed through the published and deployed 0.6.1 package:
