@@ -36,11 +36,12 @@ const path=process.argv[1];const worker=Number(process.argv[2]);const edge=new S
   it("recovers a crashed writer lease and survives a WAL checkpoint and restart", async () => {
     const path = edgePath();
     const crashedWriter = `import { DatabaseSync } from 'node:sqlite';
-const db=new DatabaseSync(process.argv[1]);db.prepare(\"UPDATE edge_write_gates SET lease_token='crashed',lease_expires_at=? WHERE gate_key='edge'\").run('1970-01-01T00:00:00.000Z');db.close();`;
+const db=new DatabaseSync(process.argv[1]);db.prepare(\"UPDATE edge_write_gates SET lease_token='crashed',lease_expires_at=? WHERE gate_key='edge'\").run(new Date(Date.now()+100).toISOString());process.kill(process.pid,'SIGKILL');`;
     const initial = new SQLiteEdgeStore(path, { endpoint: "https://bridge.test", principal: { workspace: "w", agent: "codex" } });
     await initial.initialize();
     await initial.close();
-    await execFileAsync(process.execPath, ["--input-type=module", "--eval", crashedWriter, path]);
+    await execFileAsync(process.execPath, ["--input-type=module", "--eval", crashedWriter, path]).catch(() => undefined);
+    await new Promise((resolve) => setTimeout(resolve, 120));
 
     const recovered = new SQLiteEdgeStore(path, { endpoint: "https://bridge.test", principal: { workspace: "w", agent: "codex" } });
     await recovered.enqueue({ id: "recovered", source: "codex", targets: [], type: "context", content: "x", contentType: "text/plain", priority: "info", deliveryPolicy: { mode: "mailbox" }, idempotencyKey: "recovered" });
@@ -56,21 +57,27 @@ const db=new DatabaseSync(process.argv[1]);db.prepare(\"UPDATE edge_write_gates 
     await restarted.close();
   });
 
-  it("waits behind a live writer lease without returning SQLITE_BUSY", async () => {
+  it("waits for a long transaction after its writer lease expires", async () => {
     const path = edgePath();
     const initial = new SQLiteEdgeStore(path, { endpoint: "https://bridge.test", principal: { workspace: "w", agent: "codex" } });
     await initial.initialize();
     await initial.close();
     const { DatabaseSync } = require("node:sqlite") as typeof import("node:sqlite");
     const blocker = new DatabaseSync(path);
+    blocker.exec("BEGIN IMMEDIATE");
     blocker.prepare("UPDATE edge_write_gates SET lease_token='live',lease_expires_at=? WHERE gate_key='edge'")
       .run(new Date(Date.now() + 100).toISOString());
-    blocker.close();
 
-    const edge = new SQLiteEdgeStore(path, { endpoint: "https://bridge.test", principal: { workspace: "w", agent: "codex" } }, 2_000, 100, 1_000);
+    const edge = new SQLiteEdgeStore(path, { endpoint: "https://bridge.test", principal: { workspace: "w", agent: "codex" } }, 2_000, 100, 5_000);
     const startedAt = Date.now();
-    await edge.enqueue({ id: "after-live-lease", source: "codex", targets: [], type: "context", content: "x", contentType: "text/plain", priority: "info", deliveryPolicy: { mode: "mailbox" }, idempotencyKey: "after-live-lease" });
-    expect(Date.now() - startedAt).toBeGreaterThanOrEqual(50);
+    const pending = edge.enqueue({ id: "after-live-lease", source: "codex", targets: [], type: "context", content: "x", contentType: "text/plain", priority: "info", deliveryPolicy: { mode: "mailbox" }, idempotencyKey: "after-live-lease" })
+      .then(() => undefined, (error: unknown) => error);
+    await new Promise((resolve) => setTimeout(resolve, 250));
+    blocker.exec("COMMIT");
+    blocker.close();
+    const error = await pending;
+    if (error) throw error;
+    expect(Date.now() - startedAt).toBeGreaterThanOrEqual(200);
     await edge.close();
   });
 

@@ -82,6 +82,12 @@ SQLite WAL provides local-only operation, a durable outbox, an inbox cache, curs
 
 The gateway outbox queues immutable message publication. Receipt and lease mutations still require the remote authority because replaying them after ownership or identity changes can settle the wrong work.
 
+Every file-backed local authority and gateway edge database has a durable, token-checked
+write lease. It serializes mutations across independently launched MCP processes,
+expires after a crash, and is released only by its current token holder. The lease
+covers local transactions, never gateway calls. This keeps one shared local database
+correct without a daemon or per-client replicas.
+
 Long-lived gateway MCP clients own a cancellable transport loop that replays publications and refreshes the inbox cache with bounded exponential backoff. It is transport maintenance, not agent monitoring. Manual MCP and CLI sync use the same replay path. A publication timeout after the gateway may have committed remains queued under its stable idempotency key. A retry resolves to the original immutable message instead of publishing a duplicate.
 
 Local initialization must be idempotent. Concurrent initialization and schema upgrade

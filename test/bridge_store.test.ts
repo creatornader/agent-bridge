@@ -709,7 +709,7 @@ describe("SQLite project schema upgrade", () => {
     });
     expect(page.messages[0]?.project).toBeUndefined();
     const upgraded = new DatabaseSync(path);
-    expectUpgradedMessageInsertContract(upgraded, "current-upgraded-project-column");
+    expectUpgradedMessageInsertContract(upgraded, "current-upgraded-project-column-write-coordinator");
     upgraded.close();
   });
 
@@ -818,7 +818,7 @@ describe("SQLite project schema upgrade", () => {
       mode: "leased", maxAttempts: 4, retryBaseDelayMs: 2_000,
       retryMaxDelayMs: 70_000, retryJitterRatio: 0.3, futureLeased: "keep",
     });
-    expectUpgradedMessageInsertContract(upgraded, "current-upgraded-delivery-policy");
+    expectUpgradedMessageInsertContract(upgraded, "current-upgraded-delivery-policy-write-coordinator");
     upgraded.close();
   });
 
@@ -904,7 +904,7 @@ describe("SQLite project schema upgrade", () => {
       { action: "nack_dead", actor: "worker-instance" },
       { action: "attempts_exhausted", actor: "agent-bridge" },
     ]);
-    expectUpgradedMessageInsertContract(upgraded, "current-upgraded-delivery-events");
+    expectUpgradedMessageInsertContract(upgraded, "current-upgraded-delivery-events-write-coordinator");
     upgraded.close();
   }, process.platform === "win32" ? 45_000 : 15_000);
 });
