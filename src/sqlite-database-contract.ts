@@ -14,6 +14,8 @@ export const LOCAL_SQLITE_SCHEMA_CONTRACTS = Object.freeze([
   Object.freeze({ id: "current-upgraded-delivery-events", sha256: "35bdab0cbdf4ce619ba1c7d36032379ae4d9692bd7509e49bb90b409bbbcf632" }),
 ] as const);
 export const EDGE_SQLITE_SCHEMA_CONTRACTS = Object.freeze([
+  Object.freeze({ id: "current-upgraded-write-coordinator", sha256: "973d010ff81a726d6520dc482a4450697ef2295f58f42a45dee30b6174b7b9f9" }),
+  Object.freeze({ id: "current-upgraded-project-column-migration-gate-write-coordinator", sha256: "06c159fe10fade817b211197dea14f178e75f54c2f55b69d63f8fafb629e731c" }),
   Object.freeze({ id: "current-created-schema", sha256: "27f22b2f4024585c87e8d6f76f8999a8df92bb1f585d46594a7a1e852fd53c4c" }),
   Object.freeze({ id: "current-upgraded-project-column", sha256: "171ae11f520b4963f517d3102de64cb8a5f45c080078ff02e20aeb17891b585c" }),
   Object.freeze({ id: "current-upgraded-project-column-migration-gate", sha256: "790b4bfed373ff776ba6700065154f7a3cbbecd94f37ea09a654768ac2a8455c" }),
@@ -89,6 +91,7 @@ const edgeColumns: Record<string, readonly string[]> = {
   edge_migration_gates: ["scope_key", "state", "operation_id", "lease_token", "lease_expires_at", "updated_at"],
   edge_outbox: ["position", "scope_key", "message_id", "idempotency_key", "payload_hash", "draft_json", "state", "attempts", "available_at", "lease_token", "lease_expires_at", "last_error", "blocked_at", "created_at"],
   edge_inbox: ["scope_key", "message_id", "remote_sequence", "sequence_key", "workspace", "project", "source", "type", "thread_id", "created_at", "expires_at", "message_json"],
+  edge_write_gates: ["gate_key", "lease_token", "lease_expires_at"],
 };
 
 const edgeObjects = new Map<string, [string, string]>([
@@ -97,6 +100,7 @@ const edgeObjects = new Map<string, [string, string]>([
   ["edge_migration_gates", ["table", "edge_migration_gates"]],
   ["edge_outbox", ["table", "edge_outbox"]],
   ["edge_inbox", ["table", "edge_inbox"]],
+  ["edge_write_gates", ["table", "edge_write_gates"]],
   ["edge_inbox_created", ["index", "edge_inbox"]],
   ["edge_inbox_cursor", ["index", "edge_inbox"]],
   ["edge_inbox_project", ["index", "edge_inbox"]],
