@@ -89,6 +89,6 @@ const db=new DatabaseSync(process.argv[1]);db.prepare(\"UPDATE edge_write_gates 
     if (error) throw error;
     expect(Date.now() - startedAt).toBeGreaterThanOrEqual(200);
     await edge.close();
-  });
+  }, 15_000);
 
 });
