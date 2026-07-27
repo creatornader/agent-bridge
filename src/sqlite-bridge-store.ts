@@ -5,7 +5,7 @@ import type { DatabaseSync as Database, SQLInputValue } from "node:sqlite";
 import { DeliveryStateConflictError, cursorScope, decodeCursor, decodeScopedCursor, encodeCursor, encodeScopedCursor, scopedCursorScope, validateDeliveryCursorPosition, validateEventCursorPosition, type AgentPresence, type BridgeDelivery, type BridgeDeliveryEvent, type BridgeMessage, type BridgePrincipal } from "./bridge-domain.js";
 import type { BridgeDiagnostics, BridgeStore, ClaimOptions, DeliveryQuery, InsertMessageResult, MessagePage, MessageQuery } from "./bridge-store.js";
 import { assertIdempotentReplay } from "./idempotency.js";
-import { retrySqliteBusy, rollbackSqliteTransaction, SQLITE_INITIALIZATION_BUSY_TIMEOUT_MS } from "./sqlite-retry.js";
+import { retryAsyncSqliteBusy, retrySqliteBusy, rollbackSqliteTransaction, SQLITE_INITIALIZATION_BUSY_TIMEOUT_MS } from "./sqlite-retry.js";
 import { preparePrivateSqliteLocation, securePrivatePath, securePrivateSqliteSidecar, verifyPrivatePathAccess } from "./private-path.js";
 import { assertLocalUpgradeCandidate, installLocalAuthorityMarkers } from "./sqlite-database-contract.js";
 
@@ -119,6 +119,13 @@ export class SQLiteBridgeStore implements BridgeStore {
     let pause = 2;
     while (true) {
       const now = new Date();
+      const gate = this.db.prepare("SELECT lease_token,lease_expires_at FROM bridge_write_gates WHERE gate_key='local'").get() as Row | undefined;
+      if (gate?.lease_token && String(gate.lease_expires_at) > now.toISOString()) {
+        if (Date.now() >= deadline) throw new Error("local write coordinator remained busy");
+        await new Promise((resolve) => setTimeout(resolve, pause));
+        pause = Math.min(Math.ceil(pause * 1.7), 25);
+        continue;
+      }
       const claimed = await retrySqliteBusy(() => {
         this.db.exec("BEGIN IMMEDIATE");
         try {
@@ -137,7 +144,7 @@ export class SQLiteBridgeStore implements BridgeStore {
     let completed = false;
     let result: T;
     try {
-      result = await work();
+      result = await retryAsyncSqliteBusy(work, Math.max(1, deadline - Date.now()));
       completed = true;
     }
     finally {

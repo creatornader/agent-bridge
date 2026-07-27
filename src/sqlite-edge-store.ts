@@ -12,7 +12,7 @@ import {
   type JsonValue,
 } from "./bridge-domain.js";
 import type { MessagePage, MessageQuery } from "./bridge-store.js";
-import { retrySqliteBusy, rollbackSqliteTransaction, SQLITE_INITIALIZATION_BUSY_TIMEOUT_MS } from "./sqlite-retry.js";
+import { retryAsyncSqliteBusy, retrySqliteBusy, rollbackSqliteTransaction, SQLITE_INITIALIZATION_BUSY_TIMEOUT_MS } from "./sqlite-retry.js";
 import { preparePrivateSqliteLocation, securePrivatePath, securePrivateSqliteSidecar, verifyPrivatePathAccess } from "./private-path.js";
 import { assertEdgeUpgradeCandidate, installEdgeMarkers } from "./sqlite-database-contract.js";
 
@@ -378,6 +378,13 @@ export class SQLiteEdgeStore {
     let pause = 2;
     while (true) {
       const now = new Date();
+      const gate = this.db.prepare("SELECT lease_token,lease_expires_at FROM edge_write_gates WHERE gate_key='edge'").get() as Row | undefined;
+      if (gate?.lease_token && String(gate.lease_expires_at) > now.toISOString()) {
+        if (Date.now() >= deadline) throw new EdgeConflictError("edge write coordinator remained busy");
+        await new Promise((resolve) => setTimeout(resolve, pause));
+        pause = Math.min(Math.ceil(pause * 1.7), 25);
+        continue;
+      }
       const claimed = await retrySqliteBusy(() => {
         this.db.exec("BEGIN IMMEDIATE");
         try {
@@ -398,7 +405,7 @@ export class SQLiteEdgeStore {
     let completed = false;
     let result: T;
     try {
-      result = await work();
+      result = await retryAsyncSqliteBusy(work, Math.max(1, deadline - Date.now()));
       completed = true;
     }
     finally {

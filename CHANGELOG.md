@@ -4,6 +4,17 @@ All notable changes to agent-bridge are documented in this file.
 
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and the project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.6.5] - 2026-07-27
+
+### Fixed
+
+- Inspect managed clients against the recorded launcher contract. A client updated
+  to an absolute launcher no longer reports false drift when inspected without a
+  launcher override.
+- Read-poll a held SQLite write lease instead of repeatedly opening competing
+  write transactions. Local and edge stores retry a transient busy failure only
+  inside the serialized write boundary.
+
 ## [0.6.4] - 2026-07-27
 
 ### Fixed
