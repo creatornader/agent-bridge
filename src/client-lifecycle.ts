@@ -145,8 +145,15 @@ export function expectedManagedClientMetadata(
   };
 }
 
-function exactObject(actual: unknown, expected: unknown): boolean {
-  return isDeepStrictEqual(actual, expected);
+function exactManagedTarget(actual: ManagedClientMetadata | null | undefined, expected: ManagedClientMetadata): boolean {
+  return actual != null
+    && actual.schema === expected.schema
+    && actual.version === expected.version
+    && actual.runtime === expected.runtime
+    && actual.identity === expected.identity
+    && actual.instance === expected.instance
+    && actual.backendConfigPath === expected.backendConfigPath
+    && isDeepStrictEqual(actual.locator, expected.locator);
 }
 
 const REGISTRATION_ENV_KEYS = [
@@ -657,7 +664,11 @@ export function loadManagedClientMetadata(
   } finally { closeSync(descriptor); }
 }
 
-function readMetadata(path: string, runtime: InstallableRuntime, instance: string): unknown {
+function readMetadata(
+  path: string,
+  runtime: InstallableRuntime,
+  instance: string,
+): ManagedClientMetadata | null | undefined {
   if (!existsSync(path)) return undefined;
   try { return loadManagedClientMetadata(runtime, instance, { HOME: dirname(dirname(dirname(path))) }); }
   catch { return null; }
@@ -741,8 +752,11 @@ export function inspectClient(
   const normalizedIdentity = identity.trim();
   const expected = expectedManagedClientMetadata(runtime, normalizedIdentity, options, env);
   const path = managedClientMetadataPath(runtime, expected.instance, env);
-  const registration = inspectManagedRegistration(expected, execute, env);
   const metadata = readMetadata(path, runtime, expected.instance);
+  // The managed record owns the launch contract after adoption or update. `inspect`
+  // has no launcher flag, so rebuilding the default here would misclassify a valid
+  // custom launcher as drifted.
+  const registration = inspectManagedRegistration(metadata ?? expected, execute, env);
   const backend = backendState(expected.backendConfigPath);
   let state: ClientLifecycleState;
   let reason: string;
@@ -750,7 +764,7 @@ export function inspectClient(
     state = "absent"; reason = "registration is absent";
   } else if (registration === "exact" && backend === "private-file" && metadata === undefined) {
     state = "unmanaged"; reason = "exact registration has no managed metadata";
-  } else if (registration === "exact" && backend === "private-file" && exactObject(metadata, expected)) {
+  } else if (registration === "exact" && backend === "private-file" && exactManagedTarget(metadata, expected)) {
     state = "managed"; reason = "registration and managed metadata are exact";
   } else {
     state = "drifted"; reason = backend !== "private-file"

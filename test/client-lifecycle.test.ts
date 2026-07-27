@@ -434,6 +434,9 @@ describe("client lifecycle", () => {
       ...options, configPath: otherConfigPath,
     }).state).toBe("drifted");
     expect(inspectClient("claude-desktop", "desktop-work", options).state).toBe("managed");
+    expect(inspectClient("claude-desktop", "desktop-work", {
+      instance: "desktop-existing", backendConfigPath, configPath: adoptedConfigPath, env: { HOME: home },
+    }).state).toBe("managed");
     expect(statSync(adoptedConfigPath).mtimeMs).toBe(adoptedBefore.mtimeMs);
     expect(statSync(otherConfigPath).mtimeMs).toBe(otherBefore.mtimeMs);
   });

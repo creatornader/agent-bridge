@@ -170,6 +170,14 @@ The published npm version is the authority for whether this package line has shi
 - Preserve primary SQLite errors when the engine already ended a failed
   transaction, rather than raising a secondary rollback error.
 
+### 0.6.5 package contents
+
+- Inspect managed host registrations against their stored launcher contract, so a
+  supported custom absolute launcher remains managed after an update.
+- Keep local and edge SQLite write-gate waiters read-only while another process
+  owns the lease. This prevents a gate probe from colliding with the holder's
+  actual transaction.
+
 ### Production validation and adoption
 
 Completed through the published and deployed 0.6.1 package:
