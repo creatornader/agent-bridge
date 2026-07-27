@@ -5,6 +5,7 @@ import { join } from "node:path";
 import { promisify } from "node:util";
 import { afterEach, describe, expect, it } from "vitest";
 import { SQLiteEdgeStore } from "../src/sqlite-edge-store.js";
+import { rollbackSqliteTransaction } from "../src/sqlite-retry.js";
 import { privateTestDirectory } from "./private-test-path.js";
 
 const execFileAsync = promisify(execFile);
@@ -19,6 +20,15 @@ function edgePath(): string {
 }
 
 describe("SQLite edge write coordinator", () => {
+  it("does not mask an error after SQLite already ended a transaction", () => {
+    const { DatabaseSync } = require("node:sqlite") as typeof import("node:sqlite");
+    const database = new DatabaseSync(":memory:");
+    database.exec("BEGIN IMMEDIATE");
+    database.exec("ROLLBACK");
+    expect(() => rollbackSqliteTransaction(database)).not.toThrow();
+    database.close();
+  });
+
   it("serializes simultaneous post, get, and ack cache mutations", async () => {
     const path = edgePath();
     const worker = `import { SQLiteEdgeStore } from ${JSON.stringify(new URL("../dist/sqlite.js", import.meta.url).pathname)};

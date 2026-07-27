@@ -4,6 +4,14 @@ All notable changes to agent-bridge are documented in this file.
 
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and the project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.6.4] - 2026-07-27
+
+### Fixed
+
+- Preserve the original SQLite failure when SQLite has already ended a failed
+  transaction. Local and edge stores no longer replace it with a second
+  "cannot rollback" error.
+
 ## [0.6.3] - 2026-07-26
 
 ### Fixed
@@ -453,7 +461,8 @@ First tagged release. Marks the point where agent-bridge has shipped its initial
 - Narrative-leak detection in CI + on commit via `creatornader/textleaks@v0.2.0` (renamed from leakguard).
 
 [0.1.0]: https://github.com/creatornader/agent-bridge/releases/tag/v0.1.0
-[Unreleased]: https://github.com/creatornader/agent-bridge/compare/v0.6.3...HEAD
+[Unreleased]: https://github.com/creatornader/agent-bridge/compare/v0.6.4...HEAD
+[0.6.4]: https://github.com/creatornader/agent-bridge/compare/v0.6.3...v0.6.4
 [0.6.3]: https://github.com/creatornader/agent-bridge/compare/v0.6.2...v0.6.3
 [0.6.2]: https://github.com/creatornader/agent-bridge/compare/v0.6.1...v0.6.2
 [0.6.1]: https://github.com/creatornader/agent-bridge/compare/v0.6.0...v0.6.1
