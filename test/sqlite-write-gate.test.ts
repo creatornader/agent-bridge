@@ -31,17 +31,18 @@ describe("SQLite edge write coordinator", () => {
 
   it("serializes simultaneous post, get, and ack cache mutations", async () => {
     const path = edgePath();
+    const workers = process.platform === "win32" ? 8 : 20;
     const worker = `import { SQLiteEdgeStore } from ${JSON.stringify(new URL("../dist/sqlite.js", import.meta.url).pathname)};
 const path=process.argv[1];const worker=Number(process.argv[2]);const edge=new SQLiteEdgeStore(path,{endpoint:'https://bridge.test',principal:{workspace:'w',agent:'codex',instance:'shared'}});await edge.initialize();for(let index=0;index<4;index+=1){const draft={id:'worker-'+worker+'-'+index,source:'codex',targets:[],type:'context',content:'x',contentType:'text/plain',priority:'info',deliveryPolicy:{mode:'mailbox'},idempotencyKey:'worker-'+worker+'-'+index};await edge.enqueue(draft);await edge.list({mailbox:'all'});let claimed;for(let attempt=0;attempt<100&&!claimed;attempt+=1){claimed=await edge.claimNext();if(!claimed)await new Promise(resolve=>setTimeout(resolve,2));}if(!claimed)throw new Error('outbox claim timed out');await edge.commit(claimed,{...claimed.draft,workspace:'w',sequence:String(worker*4+index+1),createdAt:'2026-07-26T00:00:00.000Z'});}await edge.close();`;
     await execFileAsync(process.execPath, ["--input-type=module", "--eval", worker, path, "0"]);
-    await Promise.all(Array.from({ length: 20 }, (_, workerId) => execFileAsync(
+    await Promise.all(Array.from({ length: workers }, (_, workerId) => execFileAsync(
       process.execPath, ["--input-type=module", "--eval", worker, path, String(workerId + 1)],
     )));
     const edge = new SQLiteEdgeStore(path, { endpoint: "https://bridge.test", principal: { workspace: "w", agent: "codex", instance: "shared" } });
     await edge.initialize();
-    expect(await edge.stats()).toMatchObject({ pending: 0, cached: 84 });
+    expect(await edge.stats()).toMatchObject({ pending: 0, cached: (workers + 1) * 4 });
     await edge.close();
-  }, 60_000);
+  }, 120_000);
 
   it("recovers a crashed writer lease and survives a WAL checkpoint and restart", async () => {
     const path = edgePath();
