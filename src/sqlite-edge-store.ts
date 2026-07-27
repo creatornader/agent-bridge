@@ -12,7 +12,7 @@ import {
   type JsonValue,
 } from "./bridge-domain.js";
 import type { MessagePage, MessageQuery } from "./bridge-store.js";
-import { retrySqliteBusy, SQLITE_INITIALIZATION_BUSY_TIMEOUT_MS } from "./sqlite-retry.js";
+import { retrySqliteBusy, rollbackSqliteTransaction, SQLITE_INITIALIZATION_BUSY_TIMEOUT_MS } from "./sqlite-retry.js";
 import { preparePrivateSqliteLocation, securePrivatePath, securePrivateSqliteSidecar, verifyPrivatePathAccess } from "./private-path.js";
 import { assertEdgeUpgradeCandidate, installEdgeMarkers } from "./sqlite-database-contract.js";
 
@@ -388,7 +388,7 @@ export class SQLiteEdgeStore {
           );
           this.db.exec("COMMIT");
           return update.changes === 1;
-        } catch (error) { this.db.exec("ROLLBACK"); throw error; }
+        } catch (error) { rollbackSqliteTransaction(this.db); throw error; }
       }, Math.max(1, deadline - Date.now()));
       if (claimed) break;
       if (Date.now() >= deadline) throw new EdgeConflictError("edge write coordinator remained busy");
@@ -408,7 +408,7 @@ export class SQLiteEdgeStore {
           try {
             this.db.prepare("UPDATE edge_write_gates SET lease_token=NULL,lease_expires_at=NULL WHERE gate_key='edge' AND lease_token=?").run(token);
             this.db.exec("COMMIT");
-          } catch (error) { this.db.exec("ROLLBACK"); throw error; }
+          } catch (error) { rollbackSqliteTransaction(this.db); throw error; }
         }, Math.max(1, Math.trunc(this.writeGateWaitMs)));
       } catch (error) {
         if (!completed) throw error;
@@ -425,7 +425,7 @@ export class SQLiteEdgeStore {
       if (exists()) return;
       this.db.exec("BEGIN IMMEDIATE");
       try { if (!exists()) this.db.exec(writeGateSchema); this.db.exec("COMMIT"); }
-      catch (error) { this.db.exec("ROLLBACK"); throw error; }
+      catch (error) { rollbackSqliteTransaction(this.db); throw error; }
     }, timeoutMs);
   }
 
@@ -544,7 +544,7 @@ export class SQLiteEdgeStore {
       installEdgeMarkers(this.db);
         this.db.exec("COMMIT");
       } catch (error) {
-        this.db.exec("ROLLBACK");
+        rollbackSqliteTransaction(this.db);
         throw error;
       }
       this.restrictFiles();
@@ -563,7 +563,7 @@ export class SQLiteEdgeStore {
         try {
           this.db.prepare("UPDATE edge_scopes SET pull_cursor=NULL, cache_contract=1 WHERE scope_key=?").run(this.key);
           this.db.exec("COMMIT");
-        } catch (error) { this.db.exec("ROLLBACK"); throw error; }
+        } catch (error) { rollbackSqliteTransaction(this.db); throw error; }
       }
     });
   }
@@ -586,7 +586,7 @@ export class SQLiteEdgeStore {
       this.assertScopeActiveInTransaction();
       this.db.exec("COMMIT");
     } catch (error) {
-      this.db.exec("ROLLBACK");
+      rollbackSqliteTransaction(this.db);
       throw error;
     }
     });
@@ -602,7 +602,7 @@ export class SQLiteEdgeStore {
       this.assertDrainLeaseInTransaction(lease, now);
       this.db.exec("COMMIT");
     } catch (error) {
-      this.db.exec("ROLLBACK");
+      rollbackSqliteTransaction(this.db);
       throw error;
     }
     });
@@ -637,7 +637,7 @@ export class SQLiteEdgeStore {
       this.db.exec("COMMIT");
       return { scopeKey: this.key, operationId: normalizedOperationId, leaseToken, leaseExpiresAt };
     } catch (error) {
-      this.db.exec("ROLLBACK");
+      rollbackSqliteTransaction(this.db);
       throw error;
     }
     });
@@ -684,7 +684,7 @@ export class SQLiteEdgeStore {
       }
       this.db.exec("COMMIT");
     } catch (error) {
-      this.db.exec("ROLLBACK");
+      rollbackSqliteTransaction(this.db);
       throw error;
     }
     });
@@ -708,7 +708,7 @@ export class SQLiteEdgeStore {
       this.db.exec("COMMIT");
       return { ...lease, leaseExpiresAt };
     } catch (error) {
-      this.db.exec("ROLLBACK");
+      rollbackSqliteTransaction(this.db);
       throw error;
     }
     });
@@ -732,7 +732,7 @@ export class SQLiteEdgeStore {
       if (updated.changes !== 1) throw new EdgeMigrationLeaseError();
       this.db.exec("COMMIT");
     } catch (error) {
-      this.db.exec("ROLLBACK");
+      rollbackSqliteTransaction(this.db);
       throw error;
     }
     });
@@ -765,7 +765,7 @@ export class SQLiteEdgeStore {
       this.db.exec("COMMIT");
       return { draft, created: true };
     } catch (error) {
-      this.db.exec("ROLLBACK");
+      rollbackSqliteTransaction(this.db);
       throw error;
     }
     });
@@ -806,7 +806,7 @@ export class SQLiteEdgeStore {
         createdAt: String(head.created_at),
       };
     } catch (error) {
-      this.db.exec("ROLLBACK");
+      rollbackSqliteTransaction(this.db);
       throw error;
     }
     });
@@ -850,7 +850,7 @@ export class SQLiteEdgeStore {
         .run(now.toISOString(), this.key);
       this.db.exec("COMMIT");
     } catch (error) {
-      this.db.exec("ROLLBACK");
+      rollbackSqliteTransaction(this.db);
       throw error;
     }
     });
@@ -903,7 +903,7 @@ export class SQLiteEdgeStore {
         .run(now.toISOString(), this.key);
       this.db.exec("COMMIT");
     } catch (error) {
-      this.db.exec("ROLLBACK");
+      rollbackSqliteTransaction(this.db);
       throw error;
     }
     });
@@ -921,7 +921,7 @@ export class SQLiteEdgeStore {
         .run(now.toISOString(), this.key);
       this.db.exec("COMMIT");
     } catch (error) {
-      this.db.exec("ROLLBACK");
+      rollbackSqliteTransaction(this.db);
       throw error;
     }
     });

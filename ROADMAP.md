@@ -165,6 +165,11 @@ The published npm version is the authority for whether this package line has shi
   expired crashed-writer lease safely, and keep gateway calls outside the local
   write boundary.
 
+### 0.6.4 package contents
+
+- Preserve primary SQLite errors when the engine already ended a failed
+  transaction, rather than raising a secondary rollback error.
+
 ### Production validation and adoption
 
 Completed through the published and deployed 0.6.1 package:

@@ -22,3 +22,9 @@ export async function retrySqliteBusy<T>(
     }
   }
 }
+
+/** SQLite may already have rolled a transaction back after a statement error. */
+export function rollbackSqliteTransaction(database: DatabaseSync): void {
+  if (database.isTransaction) database.exec("ROLLBACK");
+}
+import type { DatabaseSync } from "node:sqlite";
