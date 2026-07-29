@@ -1,5 +1,5 @@
 import { createHash, randomUUID } from "node:crypto";
-import { existsSync, fstatSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, fstatSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -9,6 +9,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import { SQLiteEdgeStore } from "../src/sqlite-edge-store.js";
 import { securePrivatePath, verifyPrivatePathAccess } from "../src/private-path.js";
 import { runDrCommand } from "../src/dr-cli.js";
+import { managedClientMetadataPath } from "../src/client-lifecycle.js";
 import {
   POSTGRES_NATIVE_DR_LEGACY_EXCLUDED_DATA_TABLES, PostgresNativeDrError, type PostgresNativeDrBundleInput,
 } from "../src/postgres-native-dr.js";
@@ -82,6 +83,8 @@ describe("agent-bridge CLI", () => {
       expect(result.stdout).not.toContain("clients migrate reverse");
       expect(result.stdout).toContain("clients migrate finalize <cutover-operation-id> --exclusive-edge [--apply] [--recover-lock]");
       expect(result.stdout).toContain("clients resume <operation-id> [--recover-lock]");
+      expect(result.stdout).toContain("--mcp-url <loopback-url>");
+      expect(result.stdout).toContain("--proxy-command <command> --proxy-args-json <json-array>");
       expect(result.stderr).toBe("");
       expect(existsSync(database)).toBe(false);
     }
@@ -145,6 +148,61 @@ describe("agent-bridge CLI", () => {
     ]);
     expect(resume.status).toBe(1);
     expect(resume.stderr).toContain("--identity is not valid for clients resume");
+
+    const targetOnRepair = run([
+      "clients", "repair", "codex", "--identity", "codex", "--instance", "stable",
+      "--mcp-url", "http://127.0.0.1:8796/mcp",
+    ]);
+    expect(targetOnRepair.status).toBe(1);
+    expect(targetOnRepair.stderr).toContain("target options are not valid for clients repair");
+  });
+
+  it("plans a native managed update to a loopback MCP URL through the CLI", () => {
+    if (process.platform === "win32") return;
+    const home = mkdtempSync(join(tmpdir(), "agent-bridge-cli-http-target-")); homes.push(home);
+    securePrivatePath(home, "directory");
+    const clients = join(home, ".agent-bridge", "clients");
+    mkdirSync(clients, { recursive: true, mode: 0o700 });
+    securePrivatePath(join(home, ".agent-bridge"), "directory");
+    securePrivatePath(clients, "directory");
+    const backend = join(clients, "codex-http.config");
+    writeFileSync(backend, "AGENT_BRIDGE_TOKEN=credential-sentinel\n", { mode: 0o600 });
+    const codexHome = join(home, "codex-home");
+    mkdirSync(codexHome, { mode: 0o700 });
+    const instance = "codex-http";
+    const metadataPath = managedClientMetadataPath("codex", instance, { HOME: home });
+    writeFileSync(metadataPath, `${JSON.stringify({
+      schema: "agent-bridge.client-management", version: 1, runtime: "codex",
+      identity: "codex", instance, backendConfigPath: backend,
+      launch: { command: "agent-bridge-mcp", args: [], scope: null },
+      locator: { kind: "codex-profile", configPath: join(codexHome, "config.toml") },
+    })}\n`, { mode: 0o600 });
+    const bin = join(home, "bin");
+    mkdirSync(bin, { mode: 0o700 });
+    const fakeCodex = join(bin, "codex");
+    writeFileSync(fakeCodex, `#!/bin/sh
+if [ "$2" = "get" ]; then
+  printf '%s\\n' '{"name":"agent-bridge","enabled":true,"transport":{"type":"stdio","command":"agent-bridge-mcp","args":[],"env":{"AGENT_BRIDGE_AGENT":"codex","AGENT_BRIDGE_INSTANCE":"codex-http","AGENT_BRIDGE_CONFIG":"${backend}"}}}'
+  exit 0
+fi
+exit 1
+`);
+    chmodSync(fakeCodex, 0o755);
+
+    const result = runAt(home, [
+      "clients", "update", "codex", "--identity", "codex", "--instance", instance,
+      "--mcp-url", "http://127.0.0.1:8796/mcp",
+    ], { CODEX_HOME: codexHome, PATH: `${bin}:${process.env.PATH}` });
+    expect(result.status, result.stderr).toBe(0);
+    expect(JSON.parse(result.stdout)).toMatchObject({
+      action: "update", applied: false,
+      steps: [
+        { target: "registration", action: "native-remove" },
+        { target: "registration", action: "native-add" },
+        { target: "metadata", action: "metadata" },
+      ],
+    });
+    expect(readFileSync(backend, "utf8")).toContain("credential-sentinel");
   });
 
   it("requires --apply before client migration lock recovery", () => {

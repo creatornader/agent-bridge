@@ -20,6 +20,7 @@ afterEach(() => { for (const home of homes.splice(0)) rmSync(home, { recursive: 
 
 interface NativeRegistration {
   present: boolean;
+  transport: "stdio" | "streamable-http";
   command: string;
   identity: string;
   instance: string;
@@ -27,6 +28,15 @@ interface NativeRegistration {
 }
 
 function codexOutput(registration: NativeRegistration): string {
+  if (registration.transport === "streamable-http") {
+    return JSON.stringify({
+      name: "agent-bridge", enabled: true,
+      transport: {
+        type: "streamable_http", url: registration.command,
+        bearer_token_env_var: null, http_headers: null, env_http_headers: null,
+      },
+    });
+  }
   return JSON.stringify({
     name: "agent-bridge", enabled: true,
     transport: {
@@ -66,7 +76,7 @@ function fixture() {
   writeFileSync(backendConfigPath, "AGENT_BRIDGE_TOKEN=credential-sentinel-must-not-leak\n", { mode: 0o600 });
   securePrivatePath(backendConfigPath, "file");
   const registration: NativeRegistration = {
-    present: true, command: "agent-bridge-mcp", identity: "codex-work",
+    present: true, transport: "stdio", command: "agent-bridge-mcp", identity: "codex-work",
     instance: "codex-existing", backendConfigPath,
   };
   const calls: Array<{ command: string; args: string[]; context?: { cwd?: string; env?: NodeJS.ProcessEnv } }> = [];
@@ -85,10 +95,16 @@ function fixture() {
     if (args[0] === "mcp" && args[1] === "add") {
       if (failAdd) throw new Error("intended add crash");
       registration.present = true;
-      registration.command = args[args.length - 1]!;
-      registration.identity = args.find((arg) => arg.startsWith("AGENT_BRIDGE_AGENT="))!.slice(19);
-      registration.instance = args.find((arg) => arg.startsWith("AGENT_BRIDGE_INSTANCE="))!.slice(22);
-      registration.backendConfigPath = args.find((arg) => arg.startsWith("AGENT_BRIDGE_CONFIG="))!.slice(20);
+      if (args.includes("--url")) {
+        registration.transport = "streamable-http";
+        registration.command = args[args.indexOf("--url") + 1]!;
+      } else {
+        registration.transport = "stdio";
+        registration.command = args[args.length - 1]!;
+        registration.identity = args.find((arg) => arg.startsWith("AGENT_BRIDGE_AGENT="))!.slice(19);
+        registration.instance = args.find((arg) => arg.startsWith("AGENT_BRIDGE_INSTANCE="))!.slice(22);
+        registration.backendConfigPath = args.find((arg) => arg.startsWith("AGENT_BRIDGE_CONFIG="))!.slice(20);
+      }
       return { pid: 1, output: [], stdout: "", stderr: "", status: 0, signal: null };
     }
     throw new Error(`unexpected native command: ${command} ${args.join(" ")}`);
@@ -127,6 +143,117 @@ function desktopFixture() {
 }
 
 describe("managed client repair and update", () => {
+  it("updates a v1 Codex registration to a loopback HTTP target without changing its backend", () => {
+    const state = fixture();
+    const backendBefore = readFileSync(state.backendConfigPath);
+    const endpoint = "http://127.0.0.1:8794/mcp";
+
+    const planned = updateManagedClient({
+      runtime: "codex", instance: "codex-existing", identity: "codex-work",
+      mcpUrl: endpoint, env: { HOME: state.home }, execute: state.execute,
+    });
+    expect(planned).toMatchObject({
+      action: "update", applied: false,
+      steps: [
+        { target: "registration", action: "native-remove" },
+        { target: "registration", action: "native-add" },
+        { target: "metadata", action: "metadata" },
+      ],
+    });
+    expect(state.registration.transport).toBe("stdio");
+
+    const updated = updateManagedClient({
+      runtime: "codex", instance: "codex-existing", identity: "codex-work",
+      mcpUrl: endpoint, apply: true, env: { HOME: state.home }, execute: state.execute,
+    });
+    expect(updated).toMatchObject({ action: "update", applied: true });
+    expect(state.registration).toMatchObject({ transport: "streamable-http", command: endpoint });
+    expect(readFileSync(state.backendConfigPath)).toEqual(backendBefore);
+    const metadata = JSON.parse(readFileSync(state.adopted.metadataPath, "utf8"));
+    expect(metadata).toMatchObject({
+      version: 2,
+      target: { version: 1, transport: "streamable-http", url: endpoint, scope: null },
+      launch: { command: endpoint, args: [], scope: null },
+    });
+    expect(inspectClient("codex", "codex-work", {
+      instance: "codex-existing", backendConfigPath: state.backendConfigPath,
+      env: { HOME: state.home, CODEX_HOME: state.codexHome },
+    }, state.execute).state).toBe("managed");
+  });
+
+  it("rolls a native HTTP target back to its exact v1 stdio registration", () => {
+    const state = fixture();
+    const backendBefore = readFileSync(state.backendConfigPath);
+    const update = updateManagedClient({
+      runtime: "codex", instance: "codex-existing", identity: "codex-work",
+      mcpUrl: "http://127.0.0.1:8794/mcp", apply: true,
+      env: { HOME: state.home }, execute: state.execute,
+    });
+
+    const rolledBack = rollbackManagedClient({
+      sourceOperationId: update.operationId!, identity: "codex-work", apply: true,
+      env: { HOME: state.home }, execute: state.execute,
+    });
+    expect(rolledBack).toMatchObject({ action: "rollback", applied: true });
+    expect(state.registration).toMatchObject({ transport: "stdio", command: "agent-bridge-mcp" });
+    expect(readFileSync(state.backendConfigPath)).toEqual(backendBefore);
+    expect(JSON.parse(readFileSync(state.adopted.metadataPath, "utf8"))).toMatchObject({
+      version: 1,
+      launch: { command: "agent-bridge-mcp", args: [], scope: null },
+    });
+  });
+
+  it("rejects non-loopback and credential-shaped managed HTTP targets before journaling", () => {
+    const state = fixture();
+    for (const endpoint of [
+      "https://127.0.0.1:8794/mcp",
+      "http://example.com/mcp",
+      "http://user@127.0.0.1:8794/mcp",
+      "http://127.0.0.1:8794/mcp?token=secret",
+      "http://127.0.0.1:8794/mcp#fragment",
+    ]) {
+      expect(() => updateManagedClient({
+        runtime: "codex", instance: "codex-existing", identity: "codex-work",
+        mcpUrl: endpoint, apply: true, env: { HOME: state.home }, execute: state.execute,
+      })).toThrow("loopback HTTP MCP URL");
+    }
+    expect(existsSync(join(state.home, ".agent-bridge", "operations"))).toBe(false);
+  });
+
+  it("updates Desktop to an exact stdio proxy target that contains its loopback endpoint", () => {
+    const state = desktopFixture();
+    const endpoint = "http://127.0.0.1:8792/mcp";
+    const proxy = join(state.home, "desktop-http-proxy");
+    writeFileSync(proxy, "#!/bin/sh\n");
+    if (process.platform !== "win32") chmodSync(proxy, 0o755);
+    const backendBefore = readFileSync(state.backendConfigPath);
+
+    updateManagedClient({
+      runtime: "claude-desktop", instance: "desktop-existing", identity: "desktop-work",
+      mcpUrl: endpoint, proxyCommand: proxy,
+      proxyArgs: ["--transport", "stdio-http-proxy", "--endpoint", endpoint],
+      apply: true, env: { HOME: state.home },
+    });
+
+    expect(readFileSync(state.backendConfigPath)).toEqual(backendBefore);
+    expect(JSON.parse(readFileSync(state.configPath, "utf8")).mcpServers["agent-bridge"]).toEqual({
+      command: proxy,
+      args: ["--transport", "stdio-http-proxy", "--endpoint", endpoint],
+      env: {
+        AGENT_BRIDGE_AGENT: "desktop-work",
+        AGENT_BRIDGE_INSTANCE: "desktop-existing",
+        AGENT_BRIDGE_CONFIG: state.backendConfigPath,
+      },
+    });
+    expect(JSON.parse(readFileSync(state.adopted.metadataPath, "utf8"))).toMatchObject({
+      version: 2,
+      target: {
+        version: 1, transport: "stdio", command: proxy,
+        args: ["--transport", "stdio-http-proxy", "--endpoint", endpoint],
+      },
+    });
+  });
+
   it("uses strict metadata authority, leaves plan-only calls untouched, and reports no-op", () => {
     const state = fixture();
     chmodSync(state.backendConfigPath, 0o644);

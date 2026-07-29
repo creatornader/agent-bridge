@@ -35,6 +35,27 @@ export interface ClientLifecycleOptions {
   env?: NodeJS.ProcessEnv;
 }
 
+export type ManagedClientTarget =
+  | {
+      version: 1;
+      transport: "stdio";
+      command: string;
+      args: string[];
+      scope: "local" | "user" | "project" | null;
+    }
+  | {
+      version: 1;
+      transport: "streamable-http";
+      url: string;
+      scope: "local" | "user" | "project" | null;
+    };
+
+type ManagedClientLaunch = {
+  command: string;
+  args: string[];
+  scope: "local" | "user" | "project" | null;
+};
+
 export interface ClientInspection {
   schemaVersion: 1;
   runtime: InstallableRuntime;
@@ -61,12 +82,13 @@ export interface ClientAdoptionPlan {
 
 export interface ManagedClientMetadata {
   schema: "agent-bridge.client-management";
-  version: 1;
+  version: 1 | 2;
   runtime: InstallableRuntime;
   identity: string;
   instance: string;
   backendConfigPath: string;
-  launch: { command: string; args: string[]; scope: "local" | "user" | "project" | null };
+  launch: ManagedClientLaunch;
+  target?: ManagedClientTarget;
   locator: ClientRegistrationLocator;
 }
 
@@ -74,6 +96,37 @@ export type ClientRegistrationLocator =
   | { kind: "codex-profile"; configPath: string }
   | { kind: "claude-code-scope"; scope: "local" | "user" | "project"; contextPath: string | null }
   | { kind: "claude-desktop-config"; configPath: string };
+
+export function validateLoopbackMcpUrl(value: unknown, field = "--mcp-url"): string {
+  const text = strictText(value, field, 2048);
+  let parsed: URL;
+  try { parsed = new URL(text); } catch { throw new Error(`${field} must be a loopback HTTP MCP URL`); }
+  if (parsed.protocol !== "http:" || parsed.username || parsed.password || parsed.search || parsed.hash
+    || !["127.0.0.1", "localhost", "[::1]"].includes(parsed.hostname)
+    || !parsed.port
+    || parsed.pathname !== "/mcp") {
+    throw new Error(`${field} must be a loopback HTTP MCP URL ending in /mcp`);
+  }
+  return parsed.toString();
+}
+
+export function managedClientTarget(metadata: ManagedClientMetadata): ManagedClientTarget {
+  return metadata.version === 2
+    ? metadata.target!
+    : {
+        version: 1,
+        transport: "stdio",
+        command: metadata.launch.command,
+        args: [...metadata.launch.args],
+        scope: metadata.launch.scope,
+      };
+}
+
+function targetLaunchProjection(target: ManagedClientTarget): ManagedClientLaunch {
+  return target.transport === "stdio"
+    ? { command: target.command, args: [...target.args], scope: target.scope }
+    : { command: target.url, args: [], scope: target.scope };
+}
 
 function safeComponent(value: string): string {
   const readable = value.replace(/[^A-Za-z0-9._-]+/g, "_").slice(0, 48) || "client";
@@ -148,7 +201,6 @@ export function expectedManagedClientMetadata(
 function exactManagedTarget(actual: ManagedClientMetadata | null | undefined, expected: ManagedClientMetadata): boolean {
   return actual != null
     && actual.schema === expected.schema
-    && actual.version === expected.version
     && actual.runtime === expected.runtime
     && actual.identity === expected.identity
     && actual.instance === expected.instance
@@ -234,6 +286,12 @@ function exactRegistration(
   args: string[],
   environment: RegistrationEnvironment,
 ): boolean {
+  const target = managedClientTarget(expected);
+  if (target.transport === "streamable-http") {
+    return command === target.url
+      && args.length === 0
+      && Object.keys(environment).length === 0;
+  }
   return command === expected.launch.command
     && isDeepStrictEqual(args, expected.launch.args)
     && isDeepStrictEqual(environment, {
@@ -345,18 +403,37 @@ function observeCodex(
       "name", "enabled", "disabled_reason", "transport", "enabled_tools", "disabled_tools",
       "startup_timeout_sec", "tool_timeout_sec", "status",
     ]);
-    const transportFields = new Set(["type", "command", "args", "env", "env_vars", "cwd"]);
+    const target = managedClientTarget(expected);
+    const transportFields = transport?.type === "streamable_http"
+      ? new Set(["type", "url", "bearer_token_env_var", "http_headers", "env_http_headers"])
+      : new Set(["type", "command", "args", "env", "env_vars", "cwd"]);
     const hasNonNullSetting = (field: string): boolean => field in server && server[field] !== null;
     if (!server || typeof server !== "object" || Array.isArray(server)
       || server.name !== "agent-bridge" || server.enabled !== true
-      || !transport || typeof transport !== "object" || Array.isArray(transport)
-      || transport.type !== "stdio") {
-      throw new Error("Codex MCP registration is not a supported stdio contract");
+      || !transport || typeof transport !== "object" || Array.isArray(transport)) {
+      throw new Error("Codex MCP registration is not a supported contract");
     }
     if (Object.keys(server).some((field) => !serverFields.has(field))
       || Object.keys(transport).some((field) => !transportFields.has(field))
       || hasNonNullSetting("enabled_tools") || hasNonNullSetting("disabled_tools")) {
       throw new Error("Codex MCP registration contains an unsupported execution setting");
+    }
+    if (transport.type === "streamable_http") {
+      if (transport.type !== "streamable_http"
+        || transport.bearer_token_env_var !== null
+        || transport.http_headers !== null
+        || transport.env_http_headers !== null) {
+        throw new Error("Codex MCP registration contains an unsupported HTTP setting");
+      }
+      const url = validateLoopbackMcpUrl(transport.url, "Codex MCP URL");
+      return {
+        state: exactRegistration(expected, url, [], {}) ? "exact" : "inexact",
+        target: registrationTarget(expected),
+        observed: { state: "present", command: url, args: [], env: {} },
+      };
+    }
+    if (transport.type !== "stdio") {
+      throw new Error("Codex MCP registration is not a supported stdio contract");
     }
     if (("cwd" in transport && transport.cwd !== null)
       || ("env_vars" in transport && (!Array.isArray(transport.env_vars) || transport.env_vars.length !== 0))) {
@@ -401,6 +478,28 @@ function observeClaudeCode(
   const lines = result.stdout.replace(/\r\n/g, "\n").trimEnd().split("\n");
   if (lines[0] !== "agent-bridge:" || lines[1] !== scope) {
     throw new Error("Claude Code MCP registration scope is not the recorded scope");
+  }
+  const target = managedClientTarget(expected);
+  const httpTypeIndex = lines.indexOf("  Type: http", 2);
+  if (httpTypeIndex >= 0) {
+    const urlLine = lines[httpTypeIndex + 1];
+    if (!urlLine?.startsWith("  URL: ")) {
+      throw new Error("Claude Code MCP registration cannot be represented safely");
+    }
+    const url = validateLoopbackMcpUrl(urlLine.slice("  URL: ".length), "Claude Code MCP URL");
+    let index = httpTypeIndex + 2;
+    while (lines[index] === "") index += 1;
+    if (lines[index] !== `To remove this server, run: claude mcp remove agent-bridge -s ${expected.launch.scope}`) {
+      throw new Error("Claude Code MCP registration cannot be represented safely");
+    }
+    if (lines.slice(index + 1).some((line) => line !== "")) {
+      throw new Error("Claude Code MCP registration cannot be represented safely");
+    }
+    return {
+      state: target.transport === "streamable-http" && target.url === url ? "exact" : "inexact",
+      target: registrationTarget(expected),
+      observed: { state: "present", command: url, args: [], env: {} },
+    };
   }
   const typeIndex = lines.indexOf("  Type: stdio", 2);
   if (typeIndex < 0 || lines[typeIndex + 1] !== `  Command: ${expected.launch.command}`
@@ -597,9 +696,12 @@ function strictManagedMetadata(
 ): ManagedClientMetadata {
   if (!value || typeof value !== "object" || Array.isArray(value)) throw new Error("managed metadata is invalid");
   const metadata = value as Record<string, unknown>;
-  if (Object.keys(metadata).sort().join(",")
-    !== "backendConfigPath,identity,instance,launch,locator,runtime,schema,version"
-    || metadata.schema !== "agent-bridge.client-management" || metadata.version !== 1
+  const version = metadata.version;
+  const expectedKeys = version === 2
+    ? "backendConfigPath,identity,instance,launch,locator,runtime,schema,target,version"
+    : "backendConfigPath,identity,instance,launch,locator,runtime,schema,version";
+  if (Object.keys(metadata).sort().join(",") !== expectedKeys
+    || metadata.schema !== "agent-bridge.client-management" || (version !== 1 && version !== 2)
     || metadata.runtime !== runtime) throw new Error("managed metadata is invalid");
   const identity = strictText(metadata.identity, "identity", 128);
   const recordedInstance = strictText(metadata.instance, "instance", 128);
@@ -624,13 +726,66 @@ function strictManagedMetadata(
     || ((runtime === "codex" || runtime === "claude-code") && launch.args.length !== 0)
     || (runtime === "claude-desktop" && !isAbsolute(strictText(launch.command, "launch command", 4096)))
     || ((runtime === "codex" || runtime === "claude-code")
+      && !(version === 2 && (metadata.target as Record<string, unknown> | undefined)?.transport === "streamable-http")
       && (() => { try { safeNativeExecutableContract(launch.command, "launch command"); return false; } catch { return true; } })())) {
     throw new Error("managed metadata launch is invalid");
   }
+  let target: ManagedClientTarget | undefined;
+  if (version === 2) {
+    if (!metadata.target || typeof metadata.target !== "object" || Array.isArray(metadata.target)) {
+      throw new Error("managed metadata target is invalid");
+    }
+    const candidate = metadata.target as Record<string, unknown>;
+    const targetScope = candidate.scope as "local" | "user" | "project" | null;
+    if (candidate.version !== 1 || ![null, "local", "user", "project"].includes(targetScope)) {
+      throw new Error("managed metadata target is invalid");
+    }
+    if (candidate.transport === "streamable-http") {
+      if (Object.keys(candidate).sort().join(",") !== "scope,transport,url,version"
+        || runtime === "claude-desktop"
+        || targetScope !== scope) {
+        throw new Error("managed metadata target is invalid");
+      }
+      target = {
+        version: 1, transport: "streamable-http",
+        url: validateLoopbackMcpUrl(candidate.url, "managed metadata target URL"),
+        scope: targetScope,
+      };
+    } else if (candidate.transport === "stdio") {
+      if (Object.keys(candidate).sort().join(",") !== "args,command,scope,transport,version"
+        || !Array.isArray(candidate.args) || candidate.args.length > 16
+        || candidate.args.some((arg) => {
+          try { strictText(arg, "target argument", 1024); return false; } catch { return true; }
+        })) {
+        throw new Error("managed metadata target is invalid");
+      }
+      target = {
+        version: 1, transport: "stdio",
+        command: strictText(candidate.command, "target command", 4096),
+        args: [...candidate.args] as string[],
+        scope: targetScope,
+      };
+      if (runtime === "claude-desktop") {
+        if (!isAbsolute(target.command)) throw new Error("managed metadata target is invalid");
+      } else {
+        safeNativeExecutableContract(target.command, "managed metadata target command");
+      }
+    } else {
+      throw new Error("managed metadata target is invalid");
+    }
+    if (!isDeepStrictEqual(targetLaunchProjection(target), {
+      command: strictText(launch.command, "launch command", 4096),
+      args: [...launch.args] as string[],
+      scope,
+    })) {
+      throw new Error("managed metadata target does not match its launch projection");
+    }
+  }
   return {
-    schema: "agent-bridge.client-management", version: 1, runtime, identity, instance: recordedInstance,
+    schema: "agent-bridge.client-management", version, runtime, identity, instance: recordedInstance,
     backendConfigPath,
     launch: { command: strictText(launch.command, "launch command", 4096), args: [...launch.args] as string[], scope },
+    ...(target ? { target } : {}),
     locator,
   };
 }

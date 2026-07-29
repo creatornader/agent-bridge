@@ -11,6 +11,7 @@ import {
   verifyPrivatePathAccess,
 } from "./private-path.js";
 import type { InstallableRuntime } from "./client-installer.js";
+import { validateLoopbackMcpUrl } from "./client-lifecycle.js";
 
 export const CLIENT_OPERATION_SCHEMA = "agent-bridge.client-operation";
 export const CLIENT_OPERATION_VERSION = 6;
@@ -27,12 +28,24 @@ export interface ClientOperationLaunch {
 }
 export interface ClientOperationManagedMetadata {
   schema: "agent-bridge.client-management";
-  version: 1;
+  version: 1 | 2;
   runtime: InstallableRuntime;
   identity: string;
   instance: string;
   backendConfigPath: string;
   launch: { command: string; args: string[]; scope: "local" | "user" | "project" | null };
+  target?: {
+    version: 1;
+    transport: "stdio";
+    command: string;
+    args: string[];
+    scope: "local" | "user" | "project" | null;
+  } | {
+    version: 1;
+    transport: "streamable-http";
+    url: string;
+    scope: "local" | "user" | "project" | null;
+  };
   locator:
     | { kind: "codex-profile"; configPath: string }
     | { kind: "claude-code-scope"; scope: "local" | "user" | "project"; contextPath: string | null }
@@ -52,11 +65,11 @@ export interface ClientOperationRegistrationProof {
     state: "present";
     command: string;
     args: string[];
-    env: {
+    env: Partial<{
       AGENT_BRIDGE_AGENT: string;
       AGENT_BRIDGE_CONFIG: string;
       AGENT_BRIDGE_INSTANCE: string;
-    };
+    }>;
   };
 }
 export interface ClientOperationRollbackContract {
@@ -499,9 +512,13 @@ function validateOperationMetadata(
 ): ClientOperationManagedMetadata {
   if (!value || typeof value !== "object" || Array.isArray(value)) fail("CORRUPT_OPERATION", "operation manifest is corrupt");
   const metadata = value as Record<string, unknown>;
-  if (Object.keys(metadata).sort().join(",")
-    !== "backendConfigPath,identity,instance,launch,locator,runtime,schema,version"
-    || metadata.schema !== "agent-bridge.client-management" || metadata.version !== 1
+  const metadataVersion = metadata.version;
+  const metadataKeys = metadataVersion === 2
+    ? "backendConfigPath,identity,instance,launch,locator,runtime,schema,target,version"
+    : "backendConfigPath,identity,instance,launch,locator,runtime,schema,version";
+  if (Object.keys(metadata).sort().join(",") !== metadataKeys
+    || metadata.schema !== "agent-bridge.client-management"
+    || (metadataVersion !== 1 && metadataVersion !== 2)
     || !RUNTIMES.includes(metadata.runtime as InstallableRuntime)
     || (runtime !== undefined && metadata.runtime !== runtime)) {
     fail("CORRUPT_OPERATION", "operation manifest is corrupt");
@@ -526,17 +543,51 @@ function validateOperationMetadata(
   const locator = validateOperationLocator(recordedRuntime, metadata.locator);
   const command = safeText(launch.command, "launch command", 4096);
   const scope = launch.scope as "local" | "user" | "project" | null;
+  const httpTarget = metadataVersion === 2
+    && (metadata.target as Record<string, unknown> | undefined)?.transport === "streamable-http";
   if ((recordedRuntime !== "claude-code" && scope !== null)
     || (recordedRuntime === "claude-code"
       && scope !== (locator as Extract<ClientOperationManagedMetadata["locator"], { kind: "claude-code-scope" }>).scope)
     || ((recordedRuntime === "codex" || recordedRuntime === "claude-code") && launch.args.length !== 0)) {
     fail("CORRUPT_OPERATION", "operation manifest is corrupt");
   }
-  if (recordedRuntime === "codex" || recordedRuntime === "claude-code") safeNativeLaunchCommand(command);
+  if ((recordedRuntime === "codex" || recordedRuntime === "claude-code") && !httpTarget) {
+    safeNativeLaunchCommand(command);
+  }
   if (recordedRuntime === "claude-desktop" && !isAbsolute(command)) fail("CORRUPT_OPERATION", "operation manifest is corrupt");
+  let target: ClientOperationManagedMetadata["target"];
+  if (metadataVersion === 2) {
+    if (!metadata.target || typeof metadata.target !== "object" || Array.isArray(metadata.target)) {
+      fail("CORRUPT_OPERATION", "operation manifest is corrupt");
+    }
+    const candidate = metadata.target as Record<string, unknown>;
+    if (candidate.version !== 1 || candidate.scope !== scope) fail("CORRUPT_OPERATION", "operation manifest is corrupt");
+    if (candidate.transport === "streamable-http") {
+      if (recordedRuntime === "claude-desktop"
+        || Object.keys(candidate).sort().join(",") !== "scope,transport,url,version") {
+        fail("CORRUPT_OPERATION", "operation manifest is corrupt");
+      }
+      const url = validateLoopbackMcpUrl(candidate.url, "managed operation target URL");
+      if (command !== url || launch.args.length !== 0) fail("CORRUPT_OPERATION", "operation manifest is corrupt");
+      target = { version: 1, transport: "streamable-http", url, scope };
+    } else if (candidate.transport === "stdio") {
+      if (Object.keys(candidate).sort().join(",") !== "args,command,scope,transport,version"
+        || candidate.command !== command || !sameCanonicalValue(candidate.args, launch.args)) {
+        fail("CORRUPT_OPERATION", "operation manifest is corrupt");
+      }
+      target = {
+        version: 1, transport: "stdio", command,
+        args: [...launch.args] as string[], scope,
+      };
+    } else {
+      fail("CORRUPT_OPERATION", "operation manifest is corrupt");
+    }
+  }
   return {
-    schema: "agent-bridge.client-management", version: 1, runtime: recordedRuntime, identity, instance: recordedInstance,
-    backendConfigPath, launch: { command, args: [...launch.args] as string[], scope }, locator,
+    schema: "agent-bridge.client-management", version: metadataVersion,
+    runtime: recordedRuntime, identity, instance: recordedInstance,
+    backendConfigPath, launch: { command, args: [...launch.args] as string[], scope },
+    ...(target ? { target } : {}), locator,
   };
 }
 
@@ -556,6 +607,7 @@ function canonicalDigest(value: unknown): string {
 }
 
 function exactRegistrationProof(metadata: ClientOperationManagedMetadata): ClientOperationRegistrationProof {
+  const http = metadata.version === 2 && metadata.target?.transport === "streamable-http";
   return {
     state: "exact",
     target: {
@@ -566,7 +618,7 @@ function exactRegistrationProof(metadata: ClientOperationManagedMetadata): Clien
     },
     observed: {
       state: "present", command: metadata.launch.command, args: [...metadata.launch.args],
-      env: {
+      env: http ? {} as ClientOperationRegistrationProof["observed"]["env"] : {
         AGENT_BRIDGE_AGENT: metadata.identity,
         AGENT_BRIDGE_INSTANCE: metadata.instance,
         AGENT_BRIDGE_CONFIG: metadata.backendConfigPath,
@@ -579,9 +631,22 @@ function forwardMetadataFromUpdate(
   prior: ClientOperationManagedMetadata,
   launch: ClientOperationLaunch,
 ): ClientOperationManagedMetadata {
+  const target: NonNullable<ClientOperationManagedMetadata["target"]> =
+    prior.runtime !== "claude-desktop" && launch.command.startsWith("http://")
+      ? {
+          version: 1, transport: "streamable-http",
+          url: validateLoopbackMcpUrl(launch.command, "managed operation target URL"),
+          scope: launch.scope,
+        }
+      : {
+          version: 1, transport: "stdio",
+          command: launch.command, args: [...launch.args], scope: launch.scope,
+        };
   return {
     ...prior,
+    version: 2,
     launch: { command: launch.command, args: [...launch.args], scope: launch.scope },
+    target,
   };
 }
 
@@ -601,9 +666,11 @@ function validateRegistrationProof(
     fail("CORRUPT_OPERATION", "operation manifest is corrupt");
   }
   const targetMetadata = validateOperationMetadata({
-    schema: "agent-bridge.client-management", version: 1,
+    schema: "agent-bridge.client-management", version: metadata.version,
     runtime: target.runtime, identity: target.identity, instance: target.instance,
-    backendConfigPath: target.backendConfigPath, launch: target.launch, locator: target.locator,
+    backendConfigPath: target.backendConfigPath, launch: target.launch,
+    ...(metadata.version === 2 ? { target: metadata.target } : {}),
+    locator: target.locator,
   }, metadata.runtime, metadata.instance);
   if (!sameCanonicalValue(targetMetadata, metadata)) fail("CORRUPT_OPERATION", "operation manifest is corrupt");
   const observed = proof.observed as Record<string, unknown>;
@@ -614,10 +681,12 @@ function validateRegistrationProof(
     fail("CORRUPT_OPERATION", "operation manifest is corrupt");
   }
   const env = observed.env as Record<string, unknown>;
-  if (Object.keys(env).sort().join(",") !== "AGENT_BRIDGE_AGENT,AGENT_BRIDGE_CONFIG,AGENT_BRIDGE_INSTANCE"
-    || env.AGENT_BRIDGE_AGENT !== metadata.identity
-    || env.AGENT_BRIDGE_CONFIG !== metadata.backendConfigPath
-    || env.AGENT_BRIDGE_INSTANCE !== metadata.instance) {
+  const http = metadata.version === 2 && metadata.target?.transport === "streamable-http";
+  if (http ? Object.keys(env).length !== 0
+    : Object.keys(env).sort().join(",") !== "AGENT_BRIDGE_AGENT,AGENT_BRIDGE_CONFIG,AGENT_BRIDGE_INSTANCE"
+      || env.AGENT_BRIDGE_AGENT !== metadata.identity
+      || env.AGENT_BRIDGE_CONFIG !== metadata.backendConfigPath
+      || env.AGENT_BRIDGE_INSTANCE !== metadata.instance) {
     fail("CORRUPT_OPERATION", "operation manifest is corrupt");
   }
   return {
@@ -630,7 +699,7 @@ function validateRegistrationProof(
     },
     observed: {
       state: "present", command: metadata.launch.command, args: [...metadata.launch.args],
-      env: {
+      env: http ? {} as ClientOperationRegistrationProof["observed"]["env"] : {
         AGENT_BRIDGE_AGENT: metadata.identity,
         AGENT_BRIDGE_CONFIG: metadata.backendConfigPath,
         AGENT_BRIDGE_INSTANCE: metadata.instance,
@@ -739,7 +808,10 @@ function validateRequest(
           : launch.scope !== null))) {
       fail("CORRUPT_OPERATION", "operation manifest is corrupt");
     }
-    if (runtime === "codex" || runtime === "claude-code") safeNativeLaunchCommand(command);
+    if (runtime === "codex" || runtime === "claude-code") {
+      if (command.startsWith("http://")) validateLoopbackMcpUrl(command, "managed operation target URL");
+      else safeNativeLaunchCommand(command);
+    }
     if (runtime === "claude-desktop" && (launch.scope !== null || !isAbsolute(command))) {
       fail("CORRUPT_OPERATION", "operation manifest is corrupt");
     }

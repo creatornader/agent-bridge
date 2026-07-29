@@ -93,7 +93,13 @@ For a managed registration, use `clients repair <runtime> --identity <name> --in
 only after reviewing the plan. Use `clients update` with the same metadata-selected
 runtime and instance to validate a replacement launch contract. The same identity must
 match the stored metadata and the immutable request. Native commands are one executable
-contract. Do not pass arguments, URLs, or credential selectors in `--command`. Repair, update, and uninstall reject
+contract. Do not pass arguments, URLs, or credential selectors in `--command`.
+Use `--mcp-url http://127.0.0.1:<port>/mcp` for a managed Codex or Claude Code
+Streamable HTTP target. The URL must stay on loopback and cannot contain user
+information, a query, or a fragment. For Claude Desktop, pair `--mcp-url` with an
+absolute `--proxy-command` and a `--proxy-args-json` string array that contains the
+exact endpoint. Review the plan before applying it. The existing private backend remains
+unchanged and continues to anchor lifecycle recovery. Repair, update, and uninstall reject
 `--backend-config`, `--scope`, and `--config-path`; `--identity` is an assertion, not a
 locator. A no-op exact registration creates no journal. Native updates remove, prove
 absence, add, and prove the target before metadata changes. Desktop updates replace only

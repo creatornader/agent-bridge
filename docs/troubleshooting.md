@@ -46,6 +46,34 @@ The registered environment must contain distinct `AGENT_BRIDGE_AGENT`,
 `AGENT_BRIDGE_INSTANCE`, and `AGENT_BRIDGE_CONFIG` values for that client. Do not copy
 another client's identity or backend file into the entry.
 
+## Move a managed client to a local MCP HTTP host
+
+Preview the update first. Add `--apply` only after the plan names the expected
+registration and metadata steps:
+
+```bash
+agent-bridge clients update codex --identity codex --instance <stable-key> \
+  --mcp-url http://127.0.0.1:8794/mcp
+agent-bridge clients update claude-code --identity claude-code --instance <stable-key> \
+  --mcp-url http://127.0.0.1:8793/mcp
+```
+
+Claude Desktop needs a stdio proxy because its managed entry remains a process launch:
+
+```bash
+agent-bridge clients update claude-desktop \
+  --identity claude-desktop --instance <stable-key> \
+  --mcp-url http://127.0.0.1:8791/mcp \
+  --proxy-command /absolute/path/to/node \
+  --proxy-args-json '["/absolute/path/to/stdio-http-proxy.js","--transport","stdio-http-proxy","--endpoint","http://127.0.0.1:8791/mcp"]'
+```
+
+The endpoint must use plain HTTP on `127.0.0.1`, `localhost`, or `::1`, include an
+explicit port, and end at `/mcp`. User information, query strings, and fragments are
+rejected. The update does not delete or rewrite the private backend file. A failed
+update can resume from its operation UUID, and a committed update can be reversed with
+`clients rollback`.
+
 ## The executable is missing
 
 Install the published package globally, then repeat the normal client installation:

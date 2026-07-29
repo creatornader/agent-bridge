@@ -5,7 +5,10 @@ import {
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
-import { adoptClient, inspectClient, managedClientMetadataPath } from "../src/client-lifecycle.js";
+import {
+  adoptClient, inspectClient, managedClientMetadataPath, observeManagedRegistration,
+  type ManagedClientMetadata,
+} from "../src/client-lifecycle.js";
 import { resolveDesktopLaunchContract } from "../src/client-installer.js";
 import { securePrivatePath } from "../src/private-path.js";
 
@@ -53,6 +56,42 @@ function codexRegistration(identity: string, instance: string, backendConfigPath
 }
 
 describe("client lifecycle", () => {
+  it("recognizes an exact managed Claude Code loopback HTTP registration", () => {
+    const { home, backendConfigPath } = fixture("claude-code");
+    const metadata: ManagedClientMetadata = {
+      schema: "agent-bridge.client-management",
+      version: 2,
+      runtime: "claude-code",
+      identity: "claude-code",
+      instance: "claude-code-existing",
+      backendConfigPath,
+      launch: { command: "http://127.0.0.1:8795/mcp", args: [], scope: "user" },
+      target: {
+        version: 1, transport: "streamable-http",
+        url: "http://127.0.0.1:8795/mcp", scope: "user",
+      },
+      locator: { kind: "claude-code-scope", scope: "user", contextPath: null },
+    };
+    const output = [
+      "agent-bridge:",
+      "  Scope: User config (available in all your projects)",
+      "  Status: ✔ Connected",
+      "  Type: http",
+      "  URL: http://127.0.0.1:8795/mcp",
+      "",
+      "To remove this server, run: claude mcp remove agent-bridge -s user",
+    ].join("\n");
+    const observed = observeManagedRegistration(metadata, () => ({
+      pid: 1, output: [], stdout: output, stderr: "", status: 0, signal: null,
+    }), { HOME: home });
+    expect(observed).toMatchObject({
+      state: "exact",
+      observed: {
+        state: "present", command: "http://127.0.0.1:8795/mcp", args: [], env: {},
+      },
+    });
+  });
+
   it("classifies an absent registration without writing local state", () => {
     const { home, backendConfigPath } = fixture();
     rmSync(backendConfigPath);
