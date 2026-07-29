@@ -530,6 +530,15 @@ agent-bridge clients repair codex --identity codex --instance <stable-key>
 agent-bridge clients repair codex --identity codex --instance <stable-key> --apply
 agent-bridge clients update codex --identity codex --instance <stable-key> \
   --command agent-bridge-mcp --apply
+agent-bridge clients update codex --identity codex --instance <stable-key> \
+  --mcp-url http://127.0.0.1:8794/mcp --apply
+agent-bridge clients update claude-code --identity claude-code --instance <stable-key> \
+  --mcp-url http://127.0.0.1:8793/mcp --apply
+agent-bridge clients update claude-desktop --identity claude-desktop --instance <stable-key> \
+  --mcp-url http://127.0.0.1:8791/mcp \
+  --proxy-command /absolute/path/to/node \
+  --proxy-args-json '["/absolute/path/to/stdio-http-proxy.js","--transport","stdio-http-proxy","--endpoint","http://127.0.0.1:8791/mcp"]' \
+  --apply
 agent-bridge clients repair codex --identity codex --instance <stable-key> \
   --apply --resume <operation-uuid>
 agent-bridge clients uninstall codex --identity codex --instance <stable-key> --apply
@@ -549,7 +558,16 @@ launch contract. Update validates and records a new credential-free launch contr
 before it creates a journal. A native `--command` is one executable contract. Bare
 commands cannot contain arguments or URL-like selectors. Absolute paths must resolve
 to executable files. Native adapters remove, verify absence, add, and verify
-the target registration. Claude Desktop replaces only `mcpServers.agent-bridge`,
+the target registration. `--mcp-url` selects a managed profile-local Streamable HTTP
+target for Codex or Claude Code. It accepts only an explicit `http://` loopback host,
+port, and `/mcp` path, with no user information, query, or fragment. The backend file
+stays in place because it remains lifecycle and rollback authority even though the
+native HTTP registration does not receive backend environment variables.
+
+Claude Desktop represents the endpoint as stdio. For that runtime, `--mcp-url`
+requires an existing absolute `--proxy-command`. `--proxy-args-json` must be a JSON
+array of strings. The arguments must contain the exact endpoint and cannot contain
+credential-like flags or values. Claude Desktop replaces only `mcpServers.agent-bridge`,
 preserves unrelated JSON values in memory, publishes through a private operation-scoped
 temporary file, and verifies the new entry. Node cannot provide an OS transaction with
 an uncooperative same-user Desktop writer. The pre-rename identity checks make this an

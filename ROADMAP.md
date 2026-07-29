@@ -10,6 +10,14 @@ published and the supported clients pass a fresh end-to-end check.
 
 ## Status
 
+### Implemented, awaiting release
+
+- Managed Codex and Claude Code registrations can move from stdio to one loopback MCP
+  Streamable HTTP endpoint per profile. Claude Desktop can use an exact managed stdio
+  proxy launch for its loopback endpoint. The update preserves backend credentials,
+  upgrades v1 managed metadata to a versioned target contract, and keeps restart and
+  rollback classification intact.
+
 ### Released by 0.3.1
 
 - Local SQLite and shared PostgreSQL storage behind provider-neutral interfaces.

@@ -17,10 +17,10 @@ import {
 } from "./client-operation.js";
 import {
   assertNoLinkedPathAncestors, loadManagedClientMetadata, managedClientMetadataPath,
-  newNativeExecutableContract,
+  managedClientTarget, newNativeExecutableContract, validateLoopbackMcpUrl,
   observeManagedRegistration,
   writeManagedClientMetadata, type ClientLifecycleExecutor, type ClientRegistrationLocator,
-  type ManagedClientMetadata, type ManagedRegistrationObservation,
+  type ManagedClientMetadata, type ManagedClientTarget, type ManagedRegistrationObservation,
 } from "./client-lifecycle.js";
 import { resolveDesktopLaunchContract, type InstallableRuntime } from "./client-installer.js";
 import { securePrivatePath, verifyPrivatePathAccess } from "./private-path.js";
@@ -91,6 +91,9 @@ export interface ClientMaintenanceOptions {
   instance: string;
   identity: string;
   command?: string;
+  mcpUrl?: string;
+  proxyCommand?: string;
+  proxyArgs?: string[];
   apply?: boolean;
   resume?: string;
   recoverLock?: boolean;
@@ -158,6 +161,16 @@ function registrationProof(observation: ManagedRegistrationObservation): string 
   return canonical({ role: "registration", observation });
 }
 
+function registrationEnvironment(metadata: ManagedClientMetadata): Record<string, string> {
+  return managedClientTarget(metadata).transport === "streamable-http"
+    ? {}
+    : {
+        AGENT_BRIDGE_AGENT: metadata.identity,
+        AGENT_BRIDGE_INSTANCE: metadata.instance,
+        AGENT_BRIDGE_CONFIG: metadata.backendConfigPath,
+      };
+}
+
 function exactRegistrationObservation(metadata: ManagedClientMetadata): ManagedRegistrationObservation {
   return {
     state: "exact",
@@ -169,11 +182,7 @@ function exactRegistrationObservation(metadata: ManagedClientMetadata): ManagedR
     },
     observed: {
       state: "present", command: metadata.launch.command, args: [...metadata.launch.args],
-      env: {
-        AGENT_BRIDGE_AGENT: metadata.identity,
-        AGENT_BRIDGE_INSTANCE: metadata.instance,
-        AGENT_BRIDGE_CONFIG: metadata.backendConfigPath,
-      },
+      env: registrationEnvironment(metadata),
     },
   };
 }
@@ -228,29 +237,103 @@ function operationLaunch(metadata: ManagedClientMetadata): ClientOperationLaunch
   };
 }
 
-function updateMetadata(metadata: ManagedClientMetadata, launch: ClientOperationLaunch): ManagedClientMetadata {
+function updateMetadata(
+  metadata: ManagedClientMetadata,
+  launch: ClientOperationLaunch,
+  target: ManagedClientTarget,
+): ManagedClientMetadata {
   return {
     ...metadata,
+    version: 2,
     launch: { command: launch.command, args: [...launch.args], scope: launch.scope },
+    target,
   };
 }
 
-function resolveUpdateLaunch(
-  metadata: ManagedClientMetadata,
-  command: string | undefined,
-  env: NodeJS.ProcessEnv,
-): ClientOperationLaunch {
-  if (metadata.runtime === "claude-desktop") {
-    const launch = resolveDesktopLaunchContract(command, env);
-    return { command: launch.command, args: [...launch.args], scope: null, envKeys: fixedEnvKeys() };
+function safeProxyArgs(args: string[], endpoint: string): string[] {
+  if (args.length === 0 || args.length > 16
+    || args.some((arg) => !arg || arg.length > 1024 || arg.trim() !== arg
+      || /[\u0000-\u001f\u007f]/.test(arg))
+    || !args.includes(endpoint)) {
+    throw new Error("--proxy-args-json must include the exact --mcp-url value");
   }
-  const requested = command === undefined ? "agent-bridge-mcp" : command;
+  if (args.some((arg, index) => {
+    const previous = index > 0 ? args[index - 1]! : "";
+    const sensitive = /^--?(?:token|key|secret|password|authorization|credential)(?:=.*)?$/i;
+    return sensitive.test(arg) || sensitive.test(previous) || /\bBearer\s+\S+/i.test(arg)
+      || /^https?:\/\/\S*[?#]\S+/i.test(arg);
+  })) {
+    throw new Error("--proxy-args-json cannot contain credential-like values");
+  }
+  return [...args];
+}
+
+function resolveUpdateTarget(
+  metadata: ManagedClientMetadata,
+  options: Pick<ClientMaintenanceOptions, "command" | "mcpUrl" | "proxyCommand" | "proxyArgs">,
+  env: NodeJS.ProcessEnv,
+): { launch: ClientOperationLaunch; target: ManagedClientTarget } {
+  if (options.mcpUrl !== undefined) {
+    const url = validateLoopbackMcpUrl(options.mcpUrl);
+    if (metadata.runtime !== "claude-desktop") {
+      if (options.command !== undefined || options.proxyCommand !== undefined || options.proxyArgs?.length) {
+        throw new Error("--command, --proxy-command, and --proxy-args-json are not valid for a native HTTP target");
+      }
+      const scope = metadata.runtime === "claude-code" ? metadata.launch.scope : null;
+      return {
+        launch: { command: url, args: [], scope, envKeys: fixedEnvKeys() },
+        target: { version: 1, transport: "streamable-http", url, scope },
+      };
+    }
+    if (options.command !== undefined) throw new Error("--command cannot be combined with --mcp-url");
+    if (!options.proxyCommand) throw new Error("--proxy-command is required for a Desktop HTTP target");
+    const command = newNativeExecutableContract(options.proxyCommand, "--proxy-command");
+    const args = safeProxyArgs(options.proxyArgs ?? [], url);
+    return {
+      launch: { command, args, scope: null, envKeys: fixedEnvKeys() },
+      target: { version: 1, transport: "stdio", command, args, scope: null },
+    };
+  }
+  if (options.proxyCommand !== undefined || options.proxyArgs?.length) {
+    throw new Error("--proxy-command and --proxy-args-json require --mcp-url");
+  }
+  if (metadata.runtime === "claude-desktop") {
+    const launch = resolveDesktopLaunchContract(options.command, env);
+    return {
+      launch: { command: launch.command, args: [...launch.args], scope: null, envKeys: fixedEnvKeys() },
+      target: {
+        version: 1, transport: "stdio",
+        command: launch.command, args: [...launch.args], scope: null,
+      },
+    };
+  }
+  const requested = options.command === undefined ? "agent-bridge-mcp" : options.command;
   newNativeExecutableContract(requested, "--command");
+  const scope = metadata.runtime === "claude-code" ? metadata.launch.scope : null;
   return {
-    command: requested,
-    args: [],
-    scope: metadata.runtime === "claude-code" ? metadata.launch.scope : null,
-    envKeys: fixedEnvKeys(),
+    launch: { command: requested, args: [], scope, envKeys: fixedEnvKeys() },
+    target: { version: 1, transport: "stdio", command: requested, args: [], scope },
+  };
+}
+
+function targetFromRecordedLaunch(
+  metadata: ManagedClientMetadata,
+  launch: ClientOperationLaunch,
+): ManagedClientTarget {
+  if (metadata.runtime !== "claude-desktop" && launch.command.startsWith("http://")) {
+    return {
+      version: 1,
+      transport: "streamable-http",
+      url: validateLoopbackMcpUrl(launch.command, "recorded MCP URL"),
+      scope: launch.scope,
+    };
+  }
+  return {
+    version: 1,
+    transport: "stdio",
+    command: launch.command,
+    args: [...launch.args],
+    scope: launch.scope,
   };
 }
 
@@ -502,19 +585,27 @@ function nativeExecute(
 ): void {
   const context = nativeContext(metadata, env);
   const executable = metadata.runtime === "codex" ? "codex" : "claude";
+  const target = managedClientTarget(metadata);
   const args = action === "remove"
     ? metadata.runtime === "codex"
       ? ["mcp", "remove", "agent-bridge"]
       : ["mcp", "remove", "agent-bridge", "-s", metadata.launch.scope!]
-    : metadata.runtime === "codex"
-      ? [
+    : target.transport === "streamable-http"
+      ? metadata.runtime === "codex"
+        ? ["mcp", "add", "agent-bridge", "--url", target.url]
+        : [
+            "mcp", "add", "--scope", metadata.launch.scope!, "--transport", "http",
+            "agent-bridge", target.url,
+          ]
+      : metadata.runtime === "codex"
+        ? [
           "mcp", "add", "agent-bridge",
           "--env", `AGENT_BRIDGE_AGENT=${metadata.identity}`,
           "--env", `AGENT_BRIDGE_INSTANCE=${metadata.instance}`,
           "--env", `AGENT_BRIDGE_CONFIG=${metadata.backendConfigPath}`,
           "--", metadata.launch.command,
         ]
-      : [
+        : [
           "mcp", "add", "--scope", metadata.launch.scope!, "agent-bridge",
           "-e", `AGENT_BRIDGE_AGENT=${metadata.identity}`,
           "-e", `AGENT_BRIDGE_INSTANCE=${metadata.instance}`,
@@ -732,11 +823,7 @@ function buildPlan(
     state: "exact", target: registration.target,
     observed: {
       state: "present", command: target.launch.command, args: [...target.launch.args],
-      env: {
-        AGENT_BRIDGE_AGENT: target.identity,
-        AGENT_BRIDGE_INSTANCE: target.instance,
-        AGENT_BRIDGE_CONFIG: target.backendConfigPath,
-      },
+      env: registrationEnvironment(target),
     },
   };
   if (target.runtime === "claude-desktop") {
@@ -761,7 +848,9 @@ function buildPlan(
       before: registrationProof(absentRegistration), after: registrationProof(exactRegistration),
     });
   }
-  if (!isDeepStrictEqual(metadata.launch, target.launch)) {
+  if (metadata.version !== target.version
+    || !isDeepStrictEqual(metadata.launch, target.launch)
+    || !isDeepStrictEqual(metadata.target, target.target)) {
     steps.push({
       kind: "metadata", target: "metadata", locator: "managed-client-metadata",
       before: metadataProof(metadata), after: metadataProof(target),
@@ -943,6 +1032,15 @@ function assertForwardRollbackMetadataState(
   if (digest(metadataProof(forward)) !== contract.forwardMetadataSha256) {
     throw new Error("managed client no longer matches the forward update metadata state");
   }
+}
+
+function loadForwardRollbackMetadata(
+  runtime: InstallableRuntime,
+  instance: string,
+  env: NodeJS.ProcessEnv,
+): ManagedClientMetadata {
+  try { return loadManagedClientMetadata(runtime, instance, env); }
+  catch { throw new Error("managed client no longer matches the forward update metadata state"); }
 }
 
 function assertForwardRollbackRegistrationState(
@@ -1142,7 +1240,7 @@ export function switchManagedClientMetadata(
 function resumeAction(
   metadata: ManagedClientMetadata,
   manifest: ClientOperationManifest,
-  command: string | undefined,
+  options: Pick<ClientMaintenanceOptions, "command" | "mcpUrl" | "proxyCommand" | "proxyArgs">,
   env: NodeJS.ProcessEnv,
   action: "repair" | "update" | "uninstall",
 ): ManagedClientMetadata {
@@ -1157,7 +1255,10 @@ function resumeAction(
       || manifest.request.identity !== metadata.identity) {
       throw new Error("--resume does not match this client action, runtime, or instance");
     }
-    if (command !== undefined) throw new Error("--command is not valid for clients repair");
+    if (options.command !== undefined || options.mcpUrl !== undefined
+      || options.proxyCommand !== undefined || options.proxyArgs?.length) {
+      throw new Error("target options are not valid for clients repair");
+    }
     return metadata;
   }
   if (action === "uninstall") {
@@ -1165,7 +1266,10 @@ function resumeAction(
       || manifest.request.identity !== metadata.identity) {
       throw new Error("--resume does not match this client action, runtime, or instance");
     }
-    if (command !== undefined) throw new Error("--command is not valid for clients uninstall");
+    if (options.command !== undefined || options.mcpUrl !== undefined
+      || options.proxyCommand !== undefined || options.proxyArgs?.length) {
+      throw new Error("target options are not valid for clients uninstall");
+    }
     return metadata;
   }
   if (!manifest.request || manifest.request.kind !== "update" || !("identity" in manifest.request)
@@ -1182,13 +1286,14 @@ function resumeAction(
       throw new Error("recorded Desktop update launch is invalid");
     }
   }
-  if (command !== undefined) {
-    const supplied = resolveUpdateLaunch(metadata, command, env);
-    if (!isDeepStrictEqual(supplied, recorded)) {
-      throw new Error("--command does not match the recorded update request");
+  if (options.command !== undefined || options.mcpUrl !== undefined
+    || options.proxyCommand !== undefined || options.proxyArgs?.length) {
+    const supplied = resolveUpdateTarget(metadata, options, env);
+    if (!isDeepStrictEqual(supplied.launch, recorded)) {
+      throw new Error("target options do not match the recorded update request");
     }
   }
-  return updateMetadata(metadata, recorded);
+  return updateMetadata(metadata, recorded, targetFromRecordedLaunch(metadata, recorded));
 }
 
 function planResult(
@@ -1220,9 +1325,12 @@ export function maintainManagedClient(options: ClientMaintenanceOptions): Client
   if (requestedAction === "uninstall") assertUninstallPathIsolation(metadata, env);
   const manifest = options.resume ? readClientOperation(options.resume, env) : undefined;
   const target = manifest
-    ? resumeAction(metadata, manifest, options.command, env, requestedAction)
+    ? resumeAction(metadata, manifest, options, env, requestedAction)
     : requestedAction === "update"
-      ? updateMetadata(metadata, resolveUpdateLaunch(metadata, options.command, env))
+      ? (() => {
+          const resolved = resolveUpdateTarget(metadata, options, env);
+          return updateMetadata(metadata, resolved.launch, resolved.target);
+        })()
       : metadata;
   const steps = options.resume && options.apply ? []
     : requestedAction === "uninstall"
@@ -1456,7 +1564,7 @@ function runManagedClientRollback(
     throw new Error("rollback request no longer matches its committed source");
   }
   const metadataStepApplied = rollbackMetadataReachedAfterState(reverse, prior, env);
-  const forward = metadataStepApplied ? prior : loadManagedClientMetadata(source.runtime, source.instance, env);
+  const forward = metadataStepApplied ? prior : loadForwardRollbackMetadata(source.runtime, source.instance, env);
   const registrationHasProgress = rollbackRegistrationHasProgress(reverse);
   if (!metadataStepApplied) {
     assertForwardRollbackMetadataState(forward, contract);
@@ -1493,7 +1601,7 @@ function runManagedClientRollback(
       throw new Error("rollback source changed while acquiring the client lock");
     }
     const metadataApplied = rollbackMetadataReachedAfterState(current, prior, env);
-    const currentForward = metadataApplied ? prior : loadManagedClientMetadata(source.runtime, source.instance, env);
+    const currentForward = metadataApplied ? prior : loadForwardRollbackMetadata(source.runtime, source.instance, env);
     const currentRegistrationHasProgress = rollbackRegistrationHasProgress(current);
     if (!metadataApplied) {
       assertForwardRollbackMetadataState(currentForward, contract);

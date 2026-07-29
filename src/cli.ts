@@ -43,6 +43,7 @@ const SUPPORTED_OPTIONS = new Set([
   "target", "target-agent", "target-agents", "thread-id", "token", "type",
   "unacked-by", "url", "workspace", "mailbox", "receipt-state",
   "identity", "command", "scope", "backend-config", "config-path",
+  "mcp-url", "proxy-command", "proxy-args-json",
   "recipient", "retry-base-ms", "retry-jitter", "retry-max-ms", "role", "runtime", "capability", "state",
   "max-pages", "max-push",
   "latest",
@@ -157,7 +158,7 @@ function watchCursorPath(path: string, project: string | undefined): string {
   return `${path}.project-${scope}`;
 }
 function help(): void {
-  process.stdout.write(`agent-bridge: messaging and work handoff for AI agents\n\nCommands:\n  init, doctor, status, capabilities, pending, migrate, reconcile-legacy-projects, sync, demo, join, presence\n  send (post), inbox (get), sent, history, acknowledge, claim, extend, ack, nack, watch\n  deliveries, dead-letters, delivery-events, cancel, requeue\n  owner <provision|inventory|rotate|revoke>\n  archive <export|verify|import>\n  dr <backup|verify|restore>\n  clients install <codex|claude-code|claude-desktop> --identity <name>\n  clients inspect <codex|claude-code|claude-desktop> --identity <name> --instance <key> --backend-config <path>\n  clients adopt <codex|claude-code|claude-desktop> --identity <name> --instance <key> --backend-config <path> [--apply]\n  clients repair <codex|claude-code|claude-desktop> --identity <name> --instance <key> [--apply] [--resume <uuid>] [--recover-lock]\n  clients update <codex|claude-code|claude-desktop> --identity <name> --instance <key> [--command <command>] [--apply] [--resume <uuid>] [--recover-lock]\n  clients uninstall <codex|claude-code|claude-desktop> --identity <name> --instance <key> [--apply] [--resume <uuid>] [--recover-lock]\n  clients rollback <source-operation-id> --identity <name> [--apply] [--recover-lock]\n  clients migrate stage <codex|claude-code|claude-desktop> --identity <name> --instance <key> --enrollment-file <path> [--apply] [--recover-lock]\n  clients migrate cutover <stage-operation-id> --exclusive-edge [--apply] [--recover-lock]\n  clients migrate finalize <cutover-operation-id> --exclusive-edge [--apply] [--recover-lock]\n  clients resume <operation-id> [--recover-lock]\n  clients operations [<operation-id>]\n\nOptions:\n  -V, --version  Print the installed package version\n  -h, --help     Show this help\n`);
+  process.stdout.write(`agent-bridge: messaging and work handoff for AI agents\n\nCommands:\n  init, doctor, status, capabilities, pending, migrate, reconcile-legacy-projects, sync, demo, join, presence\n  send (post), inbox (get), sent, history, acknowledge, claim, extend, ack, nack, watch\n  deliveries, dead-letters, delivery-events, cancel, requeue\n  owner <provision|inventory|rotate|revoke>\n  archive <export|verify|import>\n  dr <backup|verify|restore>\n  clients install <codex|claude-code|claude-desktop> --identity <name>\n  clients inspect <codex|claude-code|claude-desktop> --identity <name> --instance <key> --backend-config <path>\n  clients adopt <codex|claude-code|claude-desktop> --identity <name> --instance <key> --backend-config <path> [--apply]\n  clients repair <codex|claude-code|claude-desktop> --identity <name> --instance <key> [--apply] [--resume <uuid>] [--recover-lock]\n  clients update <codex|claude-code|claude-desktop> --identity <name> --instance <key> [--command <command> | --mcp-url <loopback-url>] [--proxy-command <command> --proxy-args-json <json-array>] [--apply] [--resume <uuid>] [--recover-lock]\n  clients uninstall <codex|claude-code|claude-desktop> --identity <name> --instance <key> [--apply] [--resume <uuid>] [--recover-lock]\n  clients rollback <source-operation-id> --identity <name> [--apply] [--recover-lock]\n  clients migrate stage <codex|claude-code|claude-desktop> --identity <name> --instance <key> --enrollment-file <path> [--apply] [--recover-lock]\n  clients migrate cutover <stage-operation-id> --exclusive-edge [--apply] [--recover-lock]\n  clients migrate finalize <cutover-operation-id> --exclusive-edge [--apply] [--recover-lock]\n  clients resume <operation-id> [--recover-lock]\n  clients operations [<operation-id>]\n\nOptions:\n  -V, --version  Print the installed package version\n  -h, --help     Show this help\n`);
 }
 function rejectUnknownOptions(options: Options): void {
   const unknown = Object.keys(options).filter((key) => !SUPPORTED_OPTIONS.has(key));
@@ -441,10 +442,12 @@ export async function runCli(argv = process.argv.slice(2)): Promise<void> {
     }
     if (action === "repair" || action === "update" || action === "uninstall") {
       rejectOptionsOutside(options, new Set([
-        "identity", "instance", "command", "apply", "resume", "recover-lock",
+        "identity", "instance", "command", "mcp-url", "proxy-command", "proxy-args-json",
+        "apply", "resume", "recover-lock",
       ]), `clients ${action}`);
-      if (action !== "update" && options.command !== undefined) {
-        throw new Error(`--command is not valid for clients ${action}`);
+      if (action !== "update" && (options.command !== undefined || options["mcp-url"] !== undefined
+        || options["proxy-command"] !== undefined || options["proxy-args-json"] !== undefined)) {
+        throw new Error(`target options are not valid for clients ${action}`);
       }
       if (!boolean(options, "apply") && (options.resume !== undefined || options["recover-lock"] !== undefined)) {
         throw new Error("--resume and --recover-lock require --apply");
@@ -452,6 +455,15 @@ export async function runCli(argv = process.argv.slice(2)): Promise<void> {
       const maintenance = {
         runtime: runtime!, identity: one(options, "identity") ?? "", instance: one(options, "instance") ?? "",
         command: one(options, "command"), apply: boolean(options, "apply"),
+        mcpUrl: one(options, "mcp-url"), proxyCommand: one(options, "proxy-command"),
+        proxyArgs: (() => {
+          const value = json(options, "proxy-args-json");
+          if (value === undefined) return [];
+          if (!Array.isArray(value) || value.some((item) => typeof item !== "string")) {
+            throw new Error("--proxy-args-json must be a JSON array of strings");
+          }
+          return value;
+        })(),
         resume: one(options, "resume"), recoverLock: boolean(options, "recover-lock"), env: process.env,
       };
       output(action === "repair"

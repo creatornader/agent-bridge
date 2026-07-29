@@ -355,8 +355,12 @@ Managed-client repair, update, and uninstall use a local crash-safe substrate. S
 owner-private metadata is the mutation authority. Runtime plus stable instance locate
 the metadata, and identity must match both the record and the immutable repair or
 update request. Uninstall also binds the identity. Repair restores its launch contract. Update validates a new launch
-before it creates the journal and stores only the identity, normalized command,
-arguments, scope, and fixed Agent Bridge environment key names.
+before it creates the journal. Managed metadata version 2 adds a versioned target
+union. A target is either stdio with a normalized command, arguments, and scope, or
+Streamable HTTP with a normalized URL and scope. Version 1 stdio metadata stays
+readable and becomes version 2 on the next update. The launch projection remains in
+version 2 so bounded registration proofs and v4 rollback records keep their released
+shape.
 Caller backend, scope, and host-config flags are rejected. Owner-private revisioned
 manifests live under
 `~/.agent-bridge/operations/<uuid>` with private snapshots and an exclusive lock keyed
@@ -395,7 +399,15 @@ and change metadata last when the launch changes. A native update command is one
 executable contract. Bare commands cannot contain argument separators, while absolute
 paths must resolve to executable files before an update is journaled. Codex runs get,
 remove, and add with the recorded profile home over the supplied environment. Claude
-Code uses its recorded scope, working directory, and supplied environment. Claude
+Code uses its recorded scope, working directory, and supplied environment. Codex and
+Claude Code may instead use a managed Streamable HTTP target. That target must be an
+explicit loopback HTTP URL with a port and `/mcp` path, without user information,
+query, fragment, bearer-token setting, or custom header. Backend credentials remain in
+their existing private file and do not enter the native HTTP registration.
+
+Claude Desktop represents an endpoint-backed target as an exact stdio proxy launch.
+The proxy command must be an existing absolute executable. Its bounded arguments must
+contain the exact loopback endpoint and no credential-like flags or values. Claude
 Desktop reads its recorded config without following links or link ancestors, replaces
 only `mcpServers.agent-bridge`, writes through an operation-scoped private temporary
 file, and verifies the published entry. Node cannot make that update atomic with an

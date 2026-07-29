@@ -48,7 +48,7 @@ services can call the CLI or HTTPS API or embed the Node library without a host 
 - agent-bridge clients inspect <runtime> --identity <principal> --instance <stable-key> --backend-config <absolute path>
 - agent-bridge clients adopt <runtime> --identity <principal> --instance <stable-key> --backend-config <absolute path> [--apply]
 - agent-bridge clients repair <runtime> --identity <principal> --instance <stable-key> [--apply] [--resume <uuid>] [--recover-lock]
-- agent-bridge clients update <runtime> --identity <principal> --instance <stable-key> [--command <command>] [--apply] [--resume <uuid>] [--recover-lock]
+- agent-bridge clients update <runtime> --identity <principal> --instance <stable-key> [--command <command> | --mcp-url <loopback-url>] [--proxy-command <command> --proxy-args-json <json-array>] [--apply] [--resume <uuid>] [--recover-lock]
 - agent-bridge clients uninstall <runtime> --identity <principal> --instance <stable-key> [--apply] [--resume <uuid>] [--recover-lock]
 - agent-bridge clients rollback <update-operation-id> --identity <principal> [--apply] [--recover-lock]
 - agent-bridge clients migrate stage <runtime> --identity <principal> --instance <stable-key> --enrollment-file <private-path> [--apply] [--recover-lock]

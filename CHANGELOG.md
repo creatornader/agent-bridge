@@ -4,6 +4,17 @@ All notable changes to agent-bridge are documented in this file.
 
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and the project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Added
+
+- Let exact managed Codex and Claude Code registrations move from stdio to a
+  profile-local MCP Streamable HTTP endpoint. Claude Desktop can record an exact
+  stdio proxy command and arguments for the same topology. The update keeps the
+  existing private backend and credentials, rejects non-loopback or credential-shaped
+  URLs, upgrades v1 managed metadata to a versioned target contract, and retains the
+  existing journal, resume, and rollback guarantees.
+
 ## [0.6.5] - 2026-07-27
 
 ### Fixed
