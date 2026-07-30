@@ -150,7 +150,9 @@ The authenticated check compares the running package and Git revision with the
 intended release. It also requires protocol 2.1, request authority, and row isolation.
 It prints no credential. A missing or different revision stops the rollout.
 
-Release tags run this deployment gate before npm publication. The release environment
+Release tags run this deployment gate before npm publication. After the package is
+published, the workflow creates the immutable GitHub Release for the same tag with
+the canonical title `Agent Bridge v<version>`. The release environment
 must define `AGENT_BRIDGE_FLY_APP` and `AGENT_BRIDGE_GATEWAY_ORIGIN`, and keep
 `FLY_API_TOKEN` plus `RELEASE_VERIFY_TOKEN` as protected secrets. The manual `gateway
 production proof` workflow tests the deployed gateway after this gate passes. GitHub

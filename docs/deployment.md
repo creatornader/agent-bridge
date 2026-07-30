@@ -271,7 +271,9 @@ messages before choosing one authority. If schema or data recovery is required,
 restore the verified native DR bundle into a fresh target and switch authority once.
 Do not run the source and restored database as active authorities at the same time.
 
-Release tags deploy the exact tagged revision before npm publication. The release job
+Release tags deploy the exact tagged revision before npm publication. After successful
+package publication, the release job creates the immutable GitHub Release for that
+same tag. The release job
 uses the approval-protected `agent-bridge-production-proof` environment. Configure
 `AGENT_BRIDGE_FLY_APP` and `AGENT_BRIDGE_GATEWAY_ORIGIN` as environment variables, and
 configure `PROOF_SENDER_TOKEN`, `PROOF_RECEIVER_TOKEN`, `PROOF_HOST_SALT`, and
