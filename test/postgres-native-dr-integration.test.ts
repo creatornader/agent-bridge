@@ -4,7 +4,7 @@ import {
   chmodSync, closeSync, constants, fstatSync, mkdtempSync, openSync, readdirSync, readFileSync,
   rmSync, writeFileSync,
 } from "node:fs";
-import { join } from "node:path";
+import { basename, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import pg from "pg";
 import { afterEach, describe, expect, it } from "vitest";
@@ -27,19 +27,23 @@ import {
 } from "../src/postgres-native-dr.js";
 
 const enabled = process.env.AGENT_BRIDGE_POSTGRES_NATIVE_DR_INTEGRATION === "1";
-// Every case owns the selected major's fixed host port and the shared residue tracker.
-// Keep cases sequential inside a matrix job so cleanup completes before the next bind.
+// Keep cases sequential so each one can clean up its Docker resources.
 const integration = enabled ? describe.sequential : describe.skip;
 const migrationDirectory = fileURLToPath(new URL("../sql/migrations", import.meta.url));
 const password = "agent-bridge-native-dr-test";
 const residues = new Set<string>();
 const descriptors = new Set<number>();
+const publishedPorts = new Map<string, number>();
 
 afterEach(async () => {
   for (const descriptor of descriptors) closeSync(descriptor);
   descriptors.clear();
   for (const residue of [...residues]) {
-    if (residue.startsWith("container:")) docker(["rm", "-f", residue.slice("container:".length)], true);
+    if (residue.startsWith("container:")) {
+      const name = residue.slice("container:".length);
+      docker(["rm", "-f", name], true);
+      publishedPorts.delete(name);
+    }
     else rmSync(residue, { recursive: true, force: true });
     residues.delete(residue);
   }
@@ -109,7 +113,6 @@ async function runMigrationsThrough(pool: pg.Pool, maximumVersion: number): Prom
 async function startDatabase(
   name: string,
   image: string,
-  port: number,
   user: string,
   directory: string,
 ): Promise<string> {
@@ -124,10 +127,16 @@ async function startDatabase(
   docker([
     "run", "--rm", "--detach", "--name", name,
     "--env-file", environmentFile,
-    "--publish", `127.0.0.1:${port}:${port}`,
-    image, "-p", String(port),
+    "--publish", "127.0.0.1::5432",
+    image,
   ]);
   residues.add(`container:${name}`);
+  const published = docker(["port", name, "5432/tcp"]).trim().split(/\r?\n/u)
+    .map((entry) => entry.trim())
+    .find((entry) => /^127\.0\.0\.1:\d+$/u.test(entry));
+  if (!published) throw new Error(`docker did not report a loopback port for ${name}`);
+  const port = Number(published.slice("127.0.0.1:".length));
+  publishedPorts.set(name, port);
   const url = `postgresql://${encodeURIComponent(user)}:${encodeURIComponent(password)}@127.0.0.1:${port}/agent_bridge`;
   await waitForDatabase(url);
   return url;
@@ -138,10 +147,32 @@ function dockerToolDependencies(
   databaseContainer: string,
   stagingDirectory: string,
 ): Pick<PostgresNativeDrDependencies, "resolveTool" | "runTool"> {
+  const publishedPort = publishedPorts.get(databaseContainer);
+  if (!publishedPort) throw new Error(`missing published port for ${databaseContainer}`);
+  const containerLibpqFile = (path: string, kind: "service" | "pass"): string => {
+    const target = join(stagingDirectory, `.container-${databaseContainer}-${randomUUID()}-${basename(path)}`);
+    const source = readFileSync(path, "utf8");
+    const rewritten = kind === "service"
+      ? source.replace(`port=${publishedPort}`, "port=5432")
+      : source.replace(`127.0.0.1:${publishedPort}:`, "127.0.0.1:5432:");
+    writeFileSync(target, rewritten, { encoding: "utf8", mode: 0o600, flag: "wx" });
+    chmodSync(target, 0o600);
+    return target;
+  };
   return {
     resolveTool: (tool) => tool,
     runTool: async (command, args, environment, inputFileDescriptor): Promise<PostgresDrToolResult> => {
-      const forwarded = Object.keys(environment).sort().flatMap((name) => ["--env", name]);
+      const containerEnvironment = Object.fromEntries(Object.entries(environment).map(([name, value]) => {
+        if (value === undefined) return [name, value];
+        if (name === "PGPORT" && value === String(publishedPort)) return [name, "5432"];
+        if (name === "PGSERVICEFILE") return [name, containerLibpqFile(value, "service")];
+        if (name === "PGPASSFILE") return [name, containerLibpqFile(value, "pass")];
+        if (!name.endsWith("DATABASE_URL")) return [name, value];
+        const url = new URL(value);
+        if (url.hostname === "127.0.0.1" && url.port === String(publishedPort)) url.port = "5432";
+        return [name, url.toString()];
+      }));
+      const forwarded = Object.keys(containerEnvironment).sort().flatMap((name) => ["--env", name]);
       const result = spawnSync("docker", [
         "run", "--rm",
         ...(inputFileDescriptor === undefined ? [] : ["--interactive"]),
@@ -153,7 +184,7 @@ function dockerToolDependencies(
         ...args,
       ], {
         encoding: "utf8",
-        env: { ...process.env, ...environment },
+        env: { ...process.env, ...containerEnvironment },
         stdio: [inputFileDescriptor ?? "ignore", "pipe", "pipe"],
         maxBuffer: 4 * 1024 * 1024,
         timeout: 120_000,
@@ -164,23 +195,23 @@ function dockerToolDependencies(
 }
 
 const allMajors = [
-  { major: 15, image: "postgres:15", port: 55_515 },
-  { major: 16, image: "postgres:16-alpine", port: 55_516 },
-  { major: 17, image: "postgres:17-alpine", port: 55_517 },
-  { major: 18, image: "postgres:18", port: 55_518 },
+  { major: 15, image: "postgres:15" },
+  { major: 16, image: "postgres:16-alpine" },
+  { major: 17, image: "postgres:17-alpine" },
+  { major: 18, image: "postgres:18" },
 ] as const;
 const selectedMajor = process.env.AGENT_BRIDGE_TEST_POSTGRES_MAJOR;
 const matrix = selectedMajor
   ? allMajors.filter(({ major }) => String(major) === selectedMajor)
   : allMajors;
 
-integration.each(matrix)("PostgreSQL $major native DR", ({ major, image, port }) => {
+integration.each(matrix)("PostgreSQL $major native DR", ({ major, image }) => {
   it("roundtrips global, scoped, revoked, and grantable default ACLs", async () => {
     const directory = mkdtempSync(join(process.cwd(), `.agent-bridge-pg${major}-acl-`));
     residues.add(directory);
     const sourceName = `agent-bridge-native-dr-${major}-acl-source`;
     const targetName = `agent-bridge-native-dr-${major}-acl-target`;
-    const sourceUrl = await startDatabase(sourceName, image, port, "source_admin", directory);
+    const sourceUrl = await startDatabase(sourceName, image, "source_admin", directory);
     const source = new pg.Client({ connectionString: sourceUrl });
     await source.connect();
     let inventory: Awaited<ReturnType<typeof collectPostgresRoleInventory>>;
@@ -222,7 +253,7 @@ integration.each(matrix)("PostgreSQL $major native DR", ({ major, image, port })
       residues.delete(`container:${sourceName}`);
     }
 
-    const targetUrl = await startDatabase(targetName, image, port, "target_admin", directory);
+    const targetUrl = await startDatabase(targetName, image, "target_admin", directory);
     const target = new pg.Client({ connectionString: targetUrl });
     await target.connect();
     try {
@@ -244,7 +275,7 @@ integration.each(matrix)("PostgreSQL $major native DR", ({ major, image, port })
     residues.add(directory);
     const sourceName = `agent-bridge-native-dr-${major}-source`;
     const targetName = `agent-bridge-native-dr-${major}-target`;
-    const sourceUrl = await startDatabase(sourceName, image, port, "source_admin", directory);
+    const sourceUrl = await startDatabase(sourceName, image, "source_admin", directory);
     const sourcePool = new pg.Pool({ connectionString: sourceUrl, max: 4 });
     let backup: Awaited<ReturnType<typeof backupPostgresNativeDr>>;
     let sourceGatewayAuthorityId: string;
@@ -317,7 +348,7 @@ integration.each(matrix)("PostgreSQL $major native DR", ({ major, image, port })
       residues.delete(`container:${sourceName}`);
     }
 
-    const targetUrl = await startDatabase(targetName, image, port, "target_admin", directory);
+    const targetUrl = await startDatabase(targetName, image, "target_admin", directory);
     let restored: Awaited<ReturnType<typeof restorePostgresNativeDr>>;
     try {
       const artifactAnchors = {
@@ -459,7 +490,7 @@ integration.each(matrix)("PostgreSQL $major native DR", ({ major, image, port })
     residues.add(directory);
     const sourceName = "agent-bridge-native-dr-17-managed-owner-source";
     const targetName = "agent-bridge-native-dr-17-managed-owner-target";
-    const sourceAdminUrl = await startDatabase(sourceName, image, port, "source_admin", directory);
+    const sourceAdminUrl = await startDatabase(sourceName, image, "source_admin", directory);
     const sourceAdmin = new pg.Client({ connectionString: sourceAdminUrl });
     await sourceAdmin.connect();
     await sourceAdmin.query(`
@@ -544,7 +575,7 @@ integration.each(matrix)("PostgreSQL $major native DR", ({ major, image, port })
       residues.delete(`container:${sourceName}`);
     }
 
-    const targetUrl = await startDatabase(targetName, image, port, "postgres", directory);
+    const targetUrl = await startDatabase(targetName, image, "postgres", directory);
     const artifactAnchors = {
       dump: anchorFor(backup.entries[0].path),
       roles: anchorFor(backup.entries[1].path),
@@ -596,7 +627,7 @@ integration.each(matrix)("PostgreSQL $major native DR", ({ major, image, port })
     const directory = mkdtempSync(join(process.cwd(), `.agent-bridge-pg${major}-dr-readiness-`));
     residues.add(directory);
     const sourceName = `agent-bridge-native-dr-${major}-readiness`;
-    const sourceUrl = await startDatabase(sourceName, image, port, "source_admin", directory);
+    const sourceUrl = await startDatabase(sourceName, image, "source_admin", directory);
     const source = new pg.Pool({ connectionString: sourceUrl, max: 2 });
     try {
       await runMigrations(source, migrationDirectory);
@@ -639,7 +670,7 @@ integration.each(matrix)("PostgreSQL $major native DR", ({ major, image, port })
     residues.add(directory);
     const sourceName = `agent-bridge-native-dr-${major}-cli-source`;
     const targetName = `agent-bridge-native-dr-${major}-cli-target`;
-    const sourceUrl = await startDatabase(sourceName, image, port, "source_admin", directory);
+    const sourceUrl = await startDatabase(sourceName, image, "source_admin", directory);
     const sourcePool = new pg.Pool({ connectionString: sourceUrl, max: 4 });
     const bundle = join(directory, "native-dr.abdr");
     const backupId = `018f4a70-0000-7000-8000-${String(major).padStart(12, "0")}`;
@@ -672,7 +703,7 @@ integration.each(matrix)("PostgreSQL $major native DR", ({ major, image, port })
       residues.delete(`container:${sourceName}`);
     }
 
-    const targetUrl = await startDatabase(targetName, image, port, "target_admin", directory);
+    const targetUrl = await startDatabase(targetName, image, "target_admin", directory);
     const targetTools = dockerToolDependencies(image, targetName, directory);
     const restored = await runDrCommand([
       "restore", "--provider", "postgres", "--bundle", bundle, "--request-id", requestId,

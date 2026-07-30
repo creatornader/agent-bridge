@@ -107,6 +107,12 @@ the Agent Bridge entry and retain unrelated JSON values in memory. It publishes 
 a private operation-scoped temporary file. A concurrent same-user Desktop writer can
 still race this advisory single-file update because Node cannot provide an OS transaction.
 
+For a long-lived HTTP target, run the public `agent-bridge-loopback-host` with the
+same private backend path, identity, and stable instance that the managed registration
+records. On macOS, `--install-launchd` writes the public lifecycle contract. Verify
+`/mcp/health` before applying a client update. A private wrapper may observe this host,
+but must never be the only client route.
+
 Use `clients uninstall <runtime> --identity <name> --instance <key>` to preview a
 forward-only removal. With `--apply`, it proves and removes the managed registration,
 deletes the already private backend file, then deletes metadata. It refuses a backend
