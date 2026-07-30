@@ -48,6 +48,24 @@ another client's identity or backend file into the entry.
 
 ## Move a managed client to a local MCP HTTP host
 
+The public package owns the long-lived host. Do not depend on a wrapper from another
+repository for normal MCP availability. On macOS, install the host for one exact client
+identity and prove the listening socket before changing that client's registration:
+
+```bash
+agent-bridge-loopback-host --install-launchd \
+  --service-name codex \
+  --config ~/.agent-bridge/clients/<codex-backend>.config \
+  --agent codex --instance <stable-key> --port 8794
+curl --fail http://127.0.0.1:8794/mcp/health
+```
+
+The install returns success only after it receives a healthy HTTP response from the
+new listener. Each host receives one private backend file, identity, and stable
+instance. Do not point several identities at one host process.
+The generated plist omits `ProcessType` and `LowPriorityIO`; these macOS hints have
+previously left a Node process running without a bound socket.
+
 Preview the update first. Add `--apply` only after the plan names the expected
 registration and metadata steps:
 
@@ -64,8 +82,8 @@ Claude Desktop needs a stdio proxy because its managed entry remains a process l
 agent-bridge clients update claude-desktop \
   --identity claude-desktop --instance <stable-key> \
   --mcp-url http://127.0.0.1:8791/mcp \
-  --proxy-command /absolute/path/to/node \
-  --proxy-args-json '["/absolute/path/to/stdio-http-proxy.js","--transport","stdio-http-proxy","--endpoint","http://127.0.0.1:8791/mcp"]'
+  --proxy-command "$(command -v agent-bridge-stdio-http-proxy)" \
+  --proxy-args-json '["--endpoint","http://127.0.0.1:8791/mcp"]'
 ```
 
 The endpoint must use plain HTTP on `127.0.0.1`, `localhost`, or `::1`, include an
@@ -73,6 +91,10 @@ explicit port, and end at `/mcp`. User information, query strings, and fragments
 rejected. The update does not delete or rewrite the private backend file. A failed
 update can resume from its operation UUID, and a committed update can be reversed with
 `clients rollback`.
+
+`agent-bridge-atrib` is an optional private observation wrapper. It must not be the
+only route to a public Agent Bridge host. If it becomes unhealthy, keep clients on the
+public host and inspect the wrapper separately.
 
 ## The executable is missing
 

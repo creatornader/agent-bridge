@@ -405,6 +405,17 @@ explicit loopback HTTP URL with a port and `/mcp` path, without user information
 query, fragment, bearer-token setting, or custom header. Backend credentials remain in
 their existing private file and do not enter the native HTTP registration.
 
+The public loopback host is an optional client-side process boundary for native HTTP
+targets. One host process owns one exact client identity, private backend file, stable
+instance, and local edge store. It binds only an explicit loopback address and exposes
+`/mcp/health` as socket-backed liveness. It creates an MCP server per transport session
+and closes that server when the session closes or becomes idle. The host does not share
+one credential across client identities, hold SQLite's write lease during gateway I/O,
+or replace the durable edge outbox and inbox semantics. On macOS, its public launchd
+installer avoids scheduler priority hints and requires a successful health request
+before a client registration may depend on the endpoint. Optional wrappers belong above
+this host boundary and cannot be required for client availability.
+
 Claude Desktop represents an endpoint-backed target as an exact stdio proxy launch.
 The proxy command must be an existing absolute executable. Its bounded arguments must
 contain the exact loopback endpoint and no credential-like flags or values. Claude

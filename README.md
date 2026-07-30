@@ -45,6 +45,36 @@ Restart the client, then run `agent-bridge doctor --json` if the MCP server does
 attach. The [troubleshooting guide](docs/troubleshooting.md) covers executable paths,
 client configuration, and recovery steps.
 
+## Long-lived loopback MCP host
+
+The normal adapters start Agent Bridge through stdio. A machine with many long-lived
+agent sessions can instead run one public Agent Bridge loopback host for each client
+identity. This reduces duplicate edge-store writers without turning the host into a
+shared identity or credential boundary.
+
+On macOS, use the public package to install the host with the backend path and stable
+instance returned by `clients install` or `clients inspect`:
+
+```bash
+agent-bridge-loopback-host --install-launchd \
+  --service-name codex \
+  --config ~/.agent-bridge/clients/<codex-backend>.config \
+  --agent codex \
+  --instance <stable-key> \
+  --port 8794
+curl --fail http://127.0.0.1:8794/mcp/health
+agent-bridge clients update codex --identity codex --instance <stable-key> \
+  --mcp-url http://127.0.0.1:8794/mcp --apply
+```
+
+Run the same command with a distinct service name, backend file, identity, stable
+instance, and port for Claude Code. The readiness check is the health request, not a
+launchd process state or a log line. The launchd contract intentionally omits priority
+and background process hints because macOS can keep a Node process alive without
+letting it bind its socket under those hints. Use `--uninstall-launchd --service-name
+<name> --port <port>` only after the client has moved back to a direct stdio
+registration or another verified host. It waits for the listener to close.
+
 ## Run the gateway with Compose
 
 The repository includes a loopback-only Compose stack for development and evaluation.
@@ -539,8 +569,8 @@ agent-bridge clients update claude-code --identity claude-code --instance <stabl
   --mcp-url http://127.0.0.1:8793/mcp --apply
 agent-bridge clients update claude-desktop --identity claude-desktop --instance <stable-key> \
   --mcp-url http://127.0.0.1:8791/mcp \
-  --proxy-command /absolute/path/to/node \
-  --proxy-args-json '["/absolute/path/to/stdio-http-proxy.js","--transport","stdio-http-proxy","--endpoint","http://127.0.0.1:8791/mcp"]' \
+  --proxy-command "$(command -v agent-bridge-stdio-http-proxy)" \
+  --proxy-args-json '["--endpoint","http://127.0.0.1:8791/mcp"]' \
   --apply
 agent-bridge clients repair codex --identity codex --instance <stable-key> \
   --apply --resume <operation-uuid>
@@ -568,8 +598,9 @@ stays in place because it remains lifecycle and rollback authority even though t
 native HTTP registration does not receive backend environment variables.
 
 Claude Desktop represents the endpoint as stdio. For that runtime, `--mcp-url`
-requires an existing absolute `--proxy-command`. `--proxy-args-json` must be a JSON
-array of strings. The arguments must contain the exact endpoint and cannot contain
+requires the public absolute `agent-bridge-stdio-http-proxy` command.
+`--proxy-args-json` must be a JSON array of strings. The arguments must contain the
+exact endpoint and cannot contain
 credential-like flags or values. Claude Desktop replaces only `mcpServers.agent-bridge`,
 preserves unrelated JSON values in memory, publishes through a private operation-scoped
 temporary file, and verifies the new entry. Node cannot provide an OS transaction with

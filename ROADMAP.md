@@ -17,6 +17,9 @@ published and the supported clients pass a fresh end-to-end check.
   proxy launch for its loopback endpoint. The update preserves backend credentials,
   upgrades v1 managed metadata to a versioned target contract, and keeps restart and
   rollback classification intact.
+- The published package can own one socket-checked loopback MCP host per client
+  identity. macOS lifecycle installation stays in the public package, and private
+  observation wrappers are no longer a client availability dependency.
 
 ### Released by 0.3.1
 
