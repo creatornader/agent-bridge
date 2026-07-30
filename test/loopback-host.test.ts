@@ -6,6 +6,7 @@ import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { launchdPlist, startLoopbackHost, type LoopbackHost } from "../src/loopback-host.js";
+import { securePrivatePath } from "../src/private-path.js";
 import { createStdioHttpProxyRuntime } from "../src/stdio-http-proxy.js";
 
 const previous = new Map<string, string | undefined>();
@@ -22,12 +23,14 @@ function setEnv(values: Record<string, string>): void {
 function localConfig(agent = "loopback-test"): string {
   const root = mkdtempSync(join(tmpdir(), "agent-bridge-loopback-host-"));
   roots.push(root);
+  securePrivatePath(root, "directory");
   const config = join(root, "client.config");
   writeFileSync(config, [
     "AGENT_BRIDGE_PROVIDER=local",
     "AGENT_BRIDGE_WORKSPACE=loopback-test",
     `AGENT_BRIDGE_DB=${join(root, "bridge.sqlite3")}`,
   ].join("\n"));
+  securePrivatePath(config, "file");
   setEnv({ AGENT_BRIDGE_CONFIG: config, AGENT_BRIDGE_AGENT: agent, AGENT_BRIDGE_INSTANCE: "host-test" });
   return config;
 }
