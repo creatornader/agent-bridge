@@ -2,17 +2,19 @@
 
 ## Status
 
-Resolved for basic Codex, Claude Code, and Claude Desktop availability.
+Resolved for Codex, Claude Code, and Claude Desktop availability.
 
-Codex, Claude Code, and Claude Desktop now launch the source repo MCP server
-directly from its built `dist/index.js` entrypoint with a pinned Node binary.
-The direct server reads credentials from `~/.agent-bridge/config`, so client
-configs no longer need to duplicate the Supabase URL or anon key.
+The public package now owns the local MCP path. Each client has a public
+`agent-bridge-loopback-host` launchd service that binds only its assigned
+loopback port and serves `/mcp/health` plus Streamable HTTP MCP. Claude Desktop
+uses the public `agent-bridge-stdio-http-proxy` to reach its local host. The
+client services read owner-private backend files, so registrations do not need
+to duplicate gateway credentials.
 
 The broken Codex, Claude Code, and Claude Desktop signed-wrapper launchd jobs
 were removed after their labels stayed loaded while `/mcp/health` refused
-connections. The wrapper code still exists as an optional signed attribution
-layer.
+connections. The wrapper remains an optional signed attribution layer outside
+the public Agent Bridge runtime.
 
 ## Impact
 
@@ -40,43 +42,56 @@ it required `AGENT_BRIDGE_URL` and `AGENT_BRIDGE_KEY` in process env. The CLI
 already read `~/.agent-bridge/config`, so the two source-repo entrypoints had
 drifted.
 
+The first public-host release also exposed a package-distribution defect. npm
+executes package bins through a symlink, while the host and proxy used a source
+file entrypoint check that compared the unresolved `argv[1]` path. Their
+install commands therefore returned success without starting a service.
+
+The release workflow published valid npm versions but did not create matching
+GitHub Release objects. This made the release page incomplete and left older
+titles inconsistent.
+
 During recovery, the wrapper installer also selected `node` from ambient
 `PATH`. That allowed restarts to drift to a local Node shim instead of the
 Homebrew Node binary that had previously run the service.
 
 ## Fixes
 
-- `src/server.ts` now reads `~/.agent-bridge/config` when env credentials are
-  absent. Env values still take precedence.
-- `test/server_factory.test.ts` covers config-file fallback, env precedence,
-  quoted config values, explicit config paths, and missing credentials.
-- Local Codex, Claude Code, and Claude Desktop configs now launch the source
-  MCP server directly with `/opt/homebrew/bin/node` and only set
-  `AGENT_BRIDGE_AGENT`.
-- The dead Codex, Claude Code, and Claude Desktop wrapper launchd jobs were
+- The public package provides a long-lived loopback host, health endpoint, and
+  Claude Desktop stdio proxy. It installs launchd services only after health
+  proves the socket is listening, and uninstalls them only after the socket
+  closes.
+- The host and proxy resolve the invoked file before deciding whether to run as
+  a CLI. Their global npm bins now work through npm's symlink layout.
+- Package-install smoke invokes both public binaries. This catches a silent
+  entrypoint failure before publication.
+- Local Codex, Claude Code, and Claude Desktop registrations now point to the
+  public client-owned loopback services. The dead private wrapper jobs were
   uninstalled.
-- The internal wrapper installer now prefers `/opt/homebrew/bin/node` by default
-  while still honoring `NODE_BIN`.
+- Tagged releases now create one immutable GitHub Release after the gateway and
+  npm gates pass. New release pages use `Agent Bridge v<version>`. A tag-based
+  recovery verifies the immutable package already in npm before continuing.
 
 ## Wrapper Policy
 
-Keep the signed wrapper for attribution receipts and local-substrate metadata.
-Do not make it the only Agent Bridge path for Codex, Claude Code, or Claude
-Desktop.
+Agent Bridge must run fully from its public package. Keep the signed wrapper
+for attribution receipts and local-substrate metadata only. Do not make it an
+availability boundary for Codex, Claude Code, Claude Desktop, or another MCP
+client.
 
-Only reinstall those wrapper jobs as active client targets after the wrapper has
-health-based supervision. A loaded launchd label is not proof that Agent Bridge
-MCP is available. The proof is a successful `/mcp/health` probe and a real MCP
-tool call.
+An active launchd label is not proof that Agent Bridge MCP is available. The
+proof is a successful public `/mcp/health` probe and a real MCP tool call. New
+versions use an immutable `v<version>` tag and the GitHub Release title `Agent
+Bridge v<version>`.
 
 ## Verification
 
-- `npm test`: 24 tests passed.
-- `npm run build`: passed.
-- Direct stdio MCP smoke: listed `post_context`, `get_context`, and
-  `ack_context`, then read live context.
-- CLI status: returned `{"status":"ok","message":"Agent Bridge is connected to Supabase"}`.
-- Claude Desktop launch proof: fresh Desktop log showed `initialize` and
-  `tools/list` succeeding against the direct source MCP entrypoint.
-- Wrapper cleanup: Codex, Claude Code, and Claude Desktop wrapper labels are
-  absent, and their launchd plist files are absent.
+- A global-package launchd install bound a disposable loopback port, passed
+  `/mcp/health`, then unbound the port after uninstall.
+- Each production Codex, Claude Code, and Claude Desktop public host passed
+  `/mcp/health`, completed an MCP handshake, listed 17 tools, and accepted a
+  `post_context` write.
+- Each client registration and its identity, instance, and private backend file
+  passed managed-client inspection.
+- The three private wrapper labels are absent. The three public launchd labels
+  are running and own ports 8794, 8793, and 8791.
