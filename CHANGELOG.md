@@ -11,6 +11,8 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and 
 - Create a canonical immutable GitHub Release only after the tagged gateway and npm
   publication gates succeed. Release pages now use the same tag and `Agent Bridge
   v<version>` title for every new version.
+- Make release recovery verify an already published package from the packed artifact
+  instead of failing on an immutable npm version.
 
 ## [0.7.4] - 2026-07-30
 

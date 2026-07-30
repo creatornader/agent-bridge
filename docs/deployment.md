@@ -282,6 +282,12 @@ for the release job. It runs the read-only Fly preflight, deploys the image with
 checked-out revision, requires `/readyz`, and verifies the running package version and
 revision. A failed deployment or identity check stops npm publication.
 
+To recover a release workflow, dispatch it from the release tag itself and provide the
+same tag as the input. The workflow verifies an already published package by its name
+and version from the packed artifact, then leaves that immutable npm version intact.
+It also leaves an existing GitHub Release intact. A recovery run cannot publish a
+different package under the tag.
+
 The manual `gateway production proof` GitHub Actions workflow runs its acceptance
 proof against that deployed HTTPS gateway. GitHub restricts it to `main`, and every job
 uses the same approval-protected environment. Use a release-specific proof workspace
