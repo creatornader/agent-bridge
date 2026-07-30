@@ -4,6 +4,14 @@ All notable changes to agent-bridge are documented in this file.
 
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and the project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.7.4] - 2026-07-30
+
+### Fixed
+
+- Resolve npm-managed executable symlinks before checking whether the loopback host
+  or stdio proxy is the invoked module. Packed-install smoke coverage now invokes
+  both public executables.
+
 ## [0.7.3] - 2026-07-30
 
 ### Added

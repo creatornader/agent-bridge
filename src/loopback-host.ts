@@ -1,5 +1,5 @@
 import { randomUUID } from "node:crypto";
-import { chmodSync, existsSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { createServer, type IncomingMessage, type Server as HttpServer, type ServerResponse } from "node:http";
 import { connect, type AddressInfo } from "node:net";
 import { homedir } from "node:os";
@@ -386,7 +386,16 @@ export async function uninstallLaunchdHost(
   return { label, plistPath };
 }
 
-if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
+function isMainModule(): boolean {
+  if (!process.argv[1]) return false;
+  try {
+    return import.meta.url === pathToFileURL(realpathSync(process.argv[1])).href;
+  } catch {
+    return false;
+  }
+}
+
+if (isMainModule()) {
   const args = process.argv.slice(2);
   if (args.includes("--help") || args.includes("-h")) process.stdout.write(usage());
   else if (args.includes("--install-launchd")) {
