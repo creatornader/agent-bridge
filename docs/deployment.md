@@ -271,11 +271,19 @@ messages before choosing one authority. If schema or data recovery is required,
 restore the verified native DR bundle into a fresh target and switch authority once.
 Do not run the source and restored database as active authorities at the same time.
 
-The manual `gateway production proof` GitHub Actions workflow runs this acceptance
-proof against an existing HTTPS gateway. GitHub restricts it to `main`, and every job
+Release tags deploy the exact tagged revision before npm publication. The release job
 uses the approval-protected `agent-bridge-production-proof` environment. Configure
-`PROOF_SENDER_TOKEN`, `PROOF_RECEIVER_TOKEN`, `PROOF_HOST_SALT`, and `FLY_API_TOKEN` as
-environment secrets. Use a release-specific proof workspace for every run. Owner
+`AGENT_BRIDGE_FLY_APP` and `AGENT_BRIDGE_GATEWAY_ORIGIN` as environment variables, and
+configure `PROOF_SENDER_TOKEN`, `PROOF_RECEIVER_TOKEN`, `PROOF_HOST_SALT`, and
+`FLY_API_TOKEN` as environment secrets. It runs the read-only Fly preflight, deploys
+the image with the checked-out revision, requires `/readyz`, and verifies the running
+package version and revision with the sender credential. A failed deployment or
+identity check stops npm publication.
+
+The manual `gateway production proof` GitHub Actions workflow runs its acceptance
+proof against that deployed HTTPS gateway. GitHub restricts it to `main`, and every job
+uses the same approval-protected environment. Use a release-specific proof workspace
+for every run. Owner
 provisioning refuses a second agent with the same principal in one workspace, and a
 revoked credential cannot serve as a rotation predecessor. The sender and receiver
 credentials must bind the requested workspace to the dedicated `proof-sender` and

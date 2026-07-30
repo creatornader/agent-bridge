@@ -98,9 +98,63 @@ jobs:
           path: ${{ runner.temp }}/*.tgz
           if-no-files-found: error
 
+  deploy-gateway:
+    name: deploy and verify gateway
+    needs: package
+    if: github.ref_type == 'tag' || github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    environment: agent-bridge-production-proof
+    timeout-minutes: 20
+    env:
+      FLY_APP: ${{ vars.AGENT_BRIDGE_FLY_APP }}
+      GATEWAY_ORIGIN: ${{ vars.AGENT_BRIDGE_GATEWAY_ORIGIN }}
+      FLY_API_TOKEN: ${{ secrets.FLY_API_TOKEN }}
+      AGENT_BRIDGE_TOKEN: ${{ secrets.PROOF_SENDER_TOKEN }}
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          fetch-depth: 0
+          ref: ${{ github.event_name == 'workflow_dispatch' && inputs.tag || github.ref }}
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: "24"
+          cache: npm
+      - uses: superfly/flyctl-actions/setup-flyctl@ed8efb33836e8b2096c7fd3ba1c8afe303ebbff1 # v1.6
+        with:
+          version: "0.4.71"
+      - run: npm ci
+      - name: Validate release deployment configuration
+        shell: bash
+        run: |
+          set -euo pipefail
+          [[ "$FLY_APP" =~ ^[a-z0-9][a-z0-9-]{0,62}$ ]]
+          [[ "$FLY_APP" != *- ]]
+          node --input-type=module -e '
+            const origin = new URL(process.env.GATEWAY_ORIGIN);
+            if (origin.protocol !== "https:" || origin.username || origin.password || origin.pathname !== "/" || origin.search || origin.hash) process.exit(1);
+          '
+      - name: Preflight production gateway
+        run: npm run preflight:fly -- --app "$FLY_APP" --json
+      - name: Deploy the tagged gateway revision
+        shell: bash
+        run: |
+          set -euo pipefail
+          revision="$(git rev-parse HEAD)"
+          flyctl deploy --config deploy/fly.toml --app "$FLY_APP" \
+            --build-arg AGENT_BRIDGE_BUILD_REVISION="$revision"
+      - name: Require readiness and exact release identity
+        shell: bash
+        run: |
+          set -euo pipefail
+          curl --fail-with-body --retry 5 --retry-all-errors --retry-delay 2 \
+            --silent --show-error --output /dev/null "$GATEWAY_ORIGIN/readyz"
+          AGENT_BRIDGE_URL="$GATEWAY_ORIGIN" npm run verify:gateway:release -- \
+            --version "$(node -p "require('./package.json').version")" \
+            --revision "$(git rev-parse HEAD)"
+
   publish:
     name: publish npm package
-    needs: package
+    needs: deploy-gateway
     if: (github.ref_type == 'tag' || github.event_name == 'workflow_dispatch') && vars.NPM_PUBLISH_ENABLED == 'true'
     runs-on: ubuntu-latest
     environment: npm

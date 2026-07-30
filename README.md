@@ -120,8 +120,11 @@ The authenticated check compares the running package and Git revision with the
 intended release. It also requires protocol 2.1, request authority, and row isolation.
 It prints no credential. A missing or different revision stops the rollout.
 
-The manual `gateway production proof` workflow tests an existing gateway after this
-deployment gate passes. GitHub must run it from `main` in the protected
+Release tags run this deployment gate before npm publication. The release environment
+must define `AGENT_BRIDGE_FLY_APP` and `AGENT_BRIDGE_GATEWAY_ORIGIN`, and keep the
+Fly token plus the verification credential as protected secrets. The manual `gateway
+production proof` workflow tests the deployed gateway after this gate passes. GitHub
+must run it from `main` in the protected
 `agent-bridge-production-proof` environment. Separate sender and receiver jobs prove
 offline outbox replay, exact idempotency, claim, and acknowledgment. The workflow then
 restarts the single Fly machine, requires a later successful machine start event, and
