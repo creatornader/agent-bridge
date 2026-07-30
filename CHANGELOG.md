@@ -4,6 +4,26 @@ All notable changes to agent-bridge are documented in this file.
 
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and the project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.7.3] - 2026-07-30
+
+### Added
+
+- Add a public loopback Streamable HTTP MCP host for one exact client identity and
+  private backend, plus the public Claude Desktop stdio proxy for the same endpoint.
+  The macOS lifecycle installer requires a socket-backed health check before a managed
+  Codex or Claude Code registration can depend on that endpoint.
+
+### Changed
+
+- Make private wrappers optional observation layers. The published Agent Bridge package
+  now owns the client-critical HTTP host and its launchd contract omits the macOS
+  scheduler hints that can leave Node running without a listening socket.
+
+### Fixed
+
+- Keep the native SQLite backup worker termination check bounded while allowing an
+  in-flight SQLite backup enough time to release its worker before cleanup proceeds.
+
 ## [0.7.2] - 2026-07-30
 
 ### Fixed

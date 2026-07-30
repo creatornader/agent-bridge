@@ -6,6 +6,8 @@ CLI, Node, and HTTPS interfaces provide access.
 ### Key files
 
 - `src/server.ts`: MCP server with v1 compatibility and v2 messaging, delivery, and presence tools
+- `src/loopback-host.ts`: Public per-identity Streamable HTTP MCP host and macOS lifecycle installer
+- `src/stdio-http-proxy.ts`: Public Claude Desktop stdio bridge for a loopback HTTP host
 - `src/index.ts`: Entry point
 - `src/gateway.ts`: Authenticated v2 HTTP boundary
 - `src/postgres-bridge-store.ts`: Canonical shared PostgreSQL store
@@ -117,7 +119,7 @@ Sync triggers:
 - Permissive RLS belongs only to the historical schema. The private v2 schema denies Supabase Data API roles.
 - `ack_context` uses a Postgres RPC function (`security definer`, `set search_path`) for atomic `array_append`: avoids race conditions and reduces network calls from 2 to 1
 - `bridge-meta` category enables agents to suggest improvements to the bridge itself
-- `agent-bridge-atrib` is an optional signed HTTP wrapper, not the canonical implementation; clients should keep a direct source-repo MCP path available when wrapper liveness is uncertain
+- `agent-bridge-atrib` is an optional signed observation wrapper, not the canonical implementation. The public loopback host owns direct HTTP MCP availability and each instance binds one exact identity, backend file, and stable instance.
 - `src/contracts/registry.ts` is the canonical v2 operation contract. Generated schema, OpenAPI, MCP, and capability artifacts must pass `npm run contracts:check`.
 - HTTP protocol 2.1 is current. The gateway accepts exactly 2.0 and 2.1; a missing request header selects the 2.0 compatibility shape, and every other version returns 426. Package, MCP implementation, protocol, and migration versions are independent.
 - Upgraded gateways preserve released 2.0 clients. New 2.1 clients require complete, consistent 2.1 negotiation before mutation and reject headerless or selected 2.0 gateways instead of downgrading. Upgrade the gateway before 2.1 clients.

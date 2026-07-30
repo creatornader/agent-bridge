@@ -19,7 +19,9 @@ const require = createRequire(import.meta.url);
 const SQLITE_ENTRY = "sqlite/database.sqlite3";
 const DEFAULT_TIMEOUT_MS = 30_000;
 const MAX_TIMEOUT_MS = 24 * 60 * 60 * 1_000;
-const WORKER_TERMINATION_TIMEOUT_MS = 5_000;
+// Native SQLite backup can stay inside SQLite after the deadline. Keep the cleanup
+// bound, but allow an in-flight native operation time to release its worker.
+const WORKER_TERMINATION_TIMEOUT_MS = 30_000;
 
 export class NativeDrCommandError extends Error {
   constructor(readonly code: string, message: string, readonly details?: Record<string, unknown>) { super(message); }

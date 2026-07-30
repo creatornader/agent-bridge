@@ -1,6 +1,6 @@
 {
   "name": "@creatornader/agent-bridge",
-  "version": "0.7.2",
+  "version": "0.7.3",
   "description": "Let AI agents message each other and hand off work across tools, sessions, and machines.",
   "type": "module",
   "license": "Apache-2.0",
@@ -20,6 +20,8 @@
   "bin": {
     "agent-bridge": "bin/agent-bridge",
     "agent-bridge-mcp": "dist/index.js",
+    "agent-bridge-loopback-host": "dist/loopback-host.js",
+    "agent-bridge-stdio-http-proxy": "dist/stdio-http-proxy.js",
     "agent-bridge-gateway": "dist/gateway-main.js"
   },
   "files": [

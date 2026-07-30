@@ -49,6 +49,9 @@ services can call the CLI or HTTPS API or embed the Node library without a host 
 - agent-bridge clients adopt <runtime> --identity <principal> --instance <stable-key> --backend-config <absolute path> [--apply]
 - agent-bridge clients repair <runtime> --identity <principal> --instance <stable-key> [--apply] [--resume <uuid>] [--recover-lock]
 - agent-bridge clients update <runtime> --identity <principal> --instance <stable-key> [--command <command> | --mcp-url <loopback-url>] [--proxy-command <command> --proxy-args-json <json-array>] [--apply] [--resume <uuid>] [--recover-lock]
+- agent-bridge-loopback-host [--host 127.0.0.1] [--port <port>] [--path /mcp]: public long-lived MCP host for one client identity.
+- agent-bridge-loopback-host --install-launchd --service-name <name> --config <private-backend> --agent <identity> --instance <stable-key> --port <port>: macOS lifecycle install. Prove /mcp/health before routing a client to it.
+- agent-bridge-stdio-http-proxy --endpoint http://127.0.0.1:<port>/mcp: public stdio bridge for a Claude Desktop loopback target.
 - agent-bridge clients uninstall <runtime> --identity <principal> --instance <stable-key> [--apply] [--resume <uuid>] [--recover-lock]
 - agent-bridge clients rollback <update-operation-id> --identity <principal> [--apply] [--recover-lock]
 - agent-bridge clients migrate stage <runtime> --identity <principal> --instance <stable-key> --enrollment-file <private-path> [--apply] [--recover-lock]
