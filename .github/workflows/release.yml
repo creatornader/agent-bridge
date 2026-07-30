@@ -173,10 +173,60 @@ jobs:
           package-manager-cache: false
       - name: Install OIDC-capable npm
         run: npm install --global npm@latest
-      - name: Publish with provenance
+      - name: Publish or verify the immutable npm package
         shell: bash
         run: |
+          set -euo pipefail
           shopt -s nullglob
           tarballs=(./package/*.tgz)
           test "${#tarballs[@]}" -eq 1
+          read -r package_name package_version < <(
+            tar -xOf "${tarballs[0]}" package/package.json | \
+              node --input-type=module -e '
+                let input = "";
+                for await (const chunk of process.stdin) input += chunk;
+                const packageJson = JSON.parse(input);
+                if (typeof packageJson.name !== "string" || typeof packageJson.version !== "string") process.exit(1);
+                console.log(packageJson.name, packageJson.version);
+              '
+          )
+          existing_version="$(npm view "${package_name}@${package_version}" version --json 2>/dev/null || true)"
+          if [[ -n "${existing_version}" ]]; then
+            actual_version="$(node -e '
+              const version = JSON.parse(process.argv[1]);
+              if (typeof version !== "string") process.exit(1);
+              process.stdout.write(version);
+            ' "${existing_version}")"
+            test "${actual_version}" = "${package_version}"
+            echo "Verified published ${package_name}@${package_version}"
+            exit 0
+          fi
           npm publish "${tarballs[0]}" --access public --provenance
+
+  github-release:
+    name: publish GitHub release
+    needs: [deploy-gateway, publish]
+    if: >-
+      always() && (github.ref_type == 'tag' || github.event_name == 'workflow_dispatch') &&
+      needs.deploy-gateway.result == 'success' &&
+      (needs.publish.result == 'success' || needs.publish.result == 'skipped')
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          fetch-depth: 0
+          ref: ${{ github.event_name == 'workflow_dispatch' && inputs.tag || github.ref }}
+      - name: Publish the tagged GitHub release
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ github.event_name == 'workflow_dispatch' && inputs.tag || github.ref_name }}
+        run: |
+          set -euo pipefail
+          if gh release view "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            exit 0
+          fi
+          gh release create "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" \
+            --title "Agent Bridge $RELEASE_TAG" --generate-notes --verify-tag --latest

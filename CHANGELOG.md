@@ -4,6 +4,16 @@ All notable changes to agent-bridge are documented in this file.
 
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and the project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Fixed
+
+- Create a canonical immutable GitHub Release only after the tagged gateway and npm
+  publication gates succeed. Release pages now use the same tag and `Agent Bridge
+  v<version>` title for every new version.
+- Make release recovery verify an already published package from the packed artifact
+  instead of failing on an immutable npm version.
+
 ## [0.7.4] - 2026-07-30
 
 ### Fixed
@@ -528,7 +538,11 @@ First tagged release. Marks the point where agent-bridge has shipped its initial
 - Narrative-leak detection in CI + on commit via `creatornader/textleaks@v0.2.0` (renamed from leakguard).
 
 [0.1.0]: https://github.com/creatornader/agent-bridge/releases/tag/v0.1.0
-[Unreleased]: https://github.com/creatornader/agent-bridge/compare/v0.6.4...HEAD
+[Unreleased]: https://github.com/creatornader/agent-bridge/compare/v0.7.4...HEAD
+[0.7.4]: https://github.com/creatornader/agent-bridge/compare/v0.7.3...v0.7.4
+[0.7.3]: https://github.com/creatornader/agent-bridge/compare/v0.7.2...v0.7.3
+[0.7.2]: https://github.com/creatornader/agent-bridge/compare/v0.7.1...v0.7.2
+[0.7.1]: https://github.com/creatornader/agent-bridge/compare/v0.7.0...v0.7.1
 [0.6.4]: https://github.com/creatornader/agent-bridge/compare/v0.6.3...v0.6.4
 [0.6.3]: https://github.com/creatornader/agent-bridge/compare/v0.6.2...v0.6.3
 [0.6.2]: https://github.com/creatornader/agent-bridge/compare/v0.6.1...v0.6.2

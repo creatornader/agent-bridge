@@ -271,7 +271,9 @@ messages before choosing one authority. If schema or data recovery is required,
 restore the verified native DR bundle into a fresh target and switch authority once.
 Do not run the source and restored database as active authorities at the same time.
 
-Release tags deploy the exact tagged revision before npm publication. The release job
+Release tags deploy the exact tagged revision before npm publication. After successful
+package publication, the release job creates the immutable GitHub Release for that
+same tag. The release job
 uses the approval-protected `agent-bridge-production-proof` environment. Configure
 `AGENT_BRIDGE_FLY_APP` and `AGENT_BRIDGE_GATEWAY_ORIGIN` as environment variables, and
 configure `PROOF_SENDER_TOKEN`, `PROOF_RECEIVER_TOKEN`, `PROOF_HOST_SALT`, and
@@ -279,6 +281,12 @@ configure `PROOF_SENDER_TOKEN`, `PROOF_RECEIVER_TOKEN`, `PROOF_HOST_SALT`, and
 for the release job. It runs the read-only Fly preflight, deploys the image with the
 checked-out revision, requires `/readyz`, and verifies the running package version and
 revision. A failed deployment or identity check stops npm publication.
+
+To recover a release workflow, dispatch it from the release tag itself and provide the
+same tag as the input. The workflow verifies an already published package by its name
+and version from the packed artifact, then leaves that immutable npm version intact.
+It also leaves an existing GitHub Release intact. A recovery run cannot publish a
+different package under the tag.
 
 The manual `gateway production proof` GitHub Actions workflow runs its acceptance
 proof against that deployed HTTPS gateway. GitHub restricts it to `main`, and every job
