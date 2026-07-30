@@ -4,6 +4,16 @@ All notable changes to agent-bridge are documented in this file.
 
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and the project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.7.1] - 2026-07-30
+
+### Fixed
+
+- Keep a long-lived edge client available after a remote protocol mismatch. The
+  affected publication remains blocked, while background synchronization re-probes
+  the gateway without replaying that publication.
+- Deploy and verify the exact gateway revision before npm publication. A release now
+  stops when the production gateway and package release do not match.
+
 ## [0.7.0] - 2026-07-29
 
 ### Added

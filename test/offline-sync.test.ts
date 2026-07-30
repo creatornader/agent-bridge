@@ -780,6 +780,50 @@ describe("offline SQLite synchronization", () => {
     await syncing.close();
   });
 
+  it("re-probes a repaired protocol mismatch without poisoning the MCP process", async () => {
+    vi.useFakeTimers();
+    try {
+      const root = directory();
+      const principal = { workspace: "acme", agent: "sender" };
+      const remote = new SwitchableRemote();
+      remote.online = true;
+      remote.initializeFailure = Object.assign(new Error("gateway protocol is incompatible"), {
+        status: 502,
+        code: "protocol_mismatch",
+      });
+      const syncing = new SyncingBridgeStore(
+        edge(join(root, "edge.sqlite3"), principal), remote, principal,
+        { baseDelayMs: 100, idleDelayMs: 1_000, random: () => 0.5 },
+      );
+      await syncing.initialize();
+
+      await vi.advanceTimersByTimeAsync(100);
+      await expect(syncing.diagnostics(principal)).resolves.toMatchObject({
+        syncLoopState: "backoff",
+        syncLoopError: undefined,
+        lastSyncError: "protocol_mismatch",
+      });
+      await expect(syncing.insertMessage(draft(principal))).rejects.toMatchObject({
+        code: "protocol_mismatch",
+      });
+
+      remote.initializeFailure = undefined;
+      await vi.advanceTimersByTimeAsync(1_000);
+      await expect(syncing.insertMessage(draft(
+        principal,
+        "018f4a70-0000-7000-8000-000000000104",
+      ))).resolves.toMatchObject({ disposition: "committed", authoritative: true });
+      await expect(syncing.diagnostics(principal)).resolves.toMatchObject({
+        syncLoopState: "idle",
+        outboxPending: 0,
+        outboxBlocked: 0,
+      });
+      await syncing.close();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it("blocks permanent publication errors instead of retrying them", async () => {
     const root = directory();
     const principal = { workspace: "acme", agent: "sender" };

@@ -238,12 +238,14 @@ export class SyncingBridgeStore implements BridgeStore {
         continue;
       }
       if (report.failureRetryable === false) {
-        this.backgroundError = Object.assign(
-          new Error(`gateway synchronization failed permanently: ${report.lastError ?? "sync_error"}`),
-          { code: report.lastError ?? "sync_error" },
-        );
-        this.loopState = "failed";
-        return;
+        // A remote contract rejection blocks the affected publication, but it
+        // must not poison this process. A gateway can be repaired or upgraded
+        // while a long-lived MCP client remains alive. Keep the durable blocked
+        // record for operator inspection and re-probe before later work.
+        failures = Math.min(failures + 1, 20);
+        this.loopState = "backoff";
+        await this.wait(this.idleDelayMs);
+        continue;
       }
       failures = report.online ? 0 : Math.min(failures + 1, 20);
       this.loopState = report.online ? "idle" : "backoff";
