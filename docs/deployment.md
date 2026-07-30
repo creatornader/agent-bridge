@@ -275,10 +275,10 @@ Release tags deploy the exact tagged revision before npm publication. The releas
 uses the approval-protected `agent-bridge-production-proof` environment. Configure
 `AGENT_BRIDGE_FLY_APP` and `AGENT_BRIDGE_GATEWAY_ORIGIN` as environment variables, and
 configure `PROOF_SENDER_TOKEN`, `PROOF_RECEIVER_TOKEN`, `PROOF_HOST_SALT`, and
-`FLY_API_TOKEN` as environment secrets. It runs the read-only Fly preflight, deploys
-the image with the checked-out revision, requires `/readyz`, and verifies the running
-package version and revision with the sender credential. A failed deployment or
-identity check stops npm publication.
+`FLY_API_TOKEN` as environment secrets. Configure `RELEASE_VERIFY_TOKEN` separately
+for the release job. It runs the read-only Fly preflight, deploys the image with the
+checked-out revision, requires `/readyz`, and verifies the running package version and
+revision. A failed deployment or identity check stops npm publication.
 
 The manual `gateway production proof` GitHub Actions workflow runs its acceptance
 proof against that deployed HTTPS gateway. GitHub restricts it to `main`, and every job
