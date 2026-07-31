@@ -1,6 +1,6 @@
 {
   "name": "@creatornader/agent-bridge",
-  "version": "0.7.4",
+  "version": "0.7.5",
   "description": "Let AI agents message each other and hand off work across tools, sessions, and machines.",
   "type": "module",
   "license": "Apache-2.0",
