@@ -180,16 +180,8 @@ jobs:
           shopt -s nullglob
           tarballs=(./package/*.tgz)
           test "${#tarballs[@]}" -eq 1
-          read -r package_name package_version < <(
-            tar -xOf "${tarballs[0]}" package/package.json | \
-              node --input-type=module -e '
-                let input = "";
-                for await (const chunk of process.stdin) input += chunk;
-                const packageJson = JSON.parse(input);
-                if (typeof packageJson.name !== "string" || typeof packageJson.version !== "string") process.exit(1);
-                console.log(packageJson.name, packageJson.version);
-              '
-          )
+          package_name="$(tar -xOf "${tarballs[0]}" package/package.json | jq -er '.name | strings')"
+          package_version="$(tar -xOf "${tarballs[0]}" package/package.json | jq -er '.version | strings')"
           existing_version="$(npm view "${package_name}@${package_version}" version --json 2>/dev/null || true)"
           if [[ -n "${existing_version}" ]]; then
             actual_version="$(node -e '
