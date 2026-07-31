@@ -182,18 +182,20 @@ jobs:
           test "${#tarballs[@]}" -eq 1
           package_name="$(tar -xOf "${tarballs[0]}" package/package.json | jq -er '.name | strings')"
           package_version="$(tar -xOf "${tarballs[0]}" package/package.json | jq -er '.version | strings')"
-          existing_version="$(npm view "${package_name}@${package_version}" version --json 2>/dev/null || true)"
-          if [[ -n "${existing_version}" ]]; then
-            actual_version="$(node -e '
-              const version = JSON.parse(process.argv[1]);
-              if (typeof version !== "string") process.exit(1);
-              process.stdout.write(version);
-            ' "${existing_version}")"
-            test "${actual_version}" = "${package_version}"
+          if npm publish "${tarballs[0]}" --access public --provenance; then
+            exit 0
+          fi
+          existing_version="$(npm view "${package_name}@${package_version}" version --json --silent 2>/dev/null || true)"
+          actual_version="$(node -e '
+            const version = JSON.parse(process.argv[1]);
+            if (typeof version !== "string") process.exit(1);
+            process.stdout.write(version);
+          ' "${existing_version}")"
+          if [[ "${actual_version}" == "${package_version}" ]]; then
             echo "Verified published ${package_name}@${package_version}"
             exit 0
           fi
-          npm publish "${tarballs[0]}" --access public --provenance
+          exit 1
 
   github-release:
     name: publish GitHub release
