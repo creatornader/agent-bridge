@@ -6,6 +6,13 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and 
 
 ## [Unreleased]
 
+## [0.7.6] - 2026-07-30
+
+### Fixed
+
+- Read release package metadata directly from the verified tarball before checking
+  the immutable npm version during recovery.
+
 ## [0.7.5] - 2026-07-30
 
 ### Fixed
@@ -540,7 +547,8 @@ First tagged release. Marks the point where agent-bridge has shipped its initial
 - Narrative-leak detection in CI + on commit via `creatornader/textleaks@v0.2.0` (renamed from leakguard).
 
 [0.1.0]: https://github.com/creatornader/agent-bridge/releases/tag/v0.1.0
-[Unreleased]: https://github.com/creatornader/agent-bridge/compare/v0.7.5...HEAD
+[Unreleased]: https://github.com/creatornader/agent-bridge/compare/v0.7.6...HEAD
+[0.7.6]: https://github.com/creatornader/agent-bridge/compare/v0.7.5...v0.7.6
 [0.7.5]: https://github.com/creatornader/agent-bridge/compare/v0.7.4...v0.7.5
 [0.7.4]: https://github.com/creatornader/agent-bridge/compare/v0.7.3...v0.7.4
 [0.7.3]: https://github.com/creatornader/agent-bridge/compare/v0.7.2...v0.7.3
