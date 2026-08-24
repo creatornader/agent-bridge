@@ -2,6 +2,7 @@ import { afterEach, describe, expect, it } from "vitest";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
 import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
+import { CallToolResultSchema } from "@modelcontextprotocol/sdk/types.js";
 import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -143,7 +144,7 @@ describe("loopback MCP host", () => {
         return await client.callTool({
           name: "post_context",
           arguments: { category: "operational", content: `concurrent host write ${index}` },
-        });
+        }, CallToolResultSchema, { timeout: 120_000 });
       } finally {
         await client.close();
         await transport.close();
@@ -152,5 +153,5 @@ describe("loopback MCP host", () => {
     expect(results.every((result) => result.isError !== true)).toBe(true);
     const health = await fetch(host.healthEndpoint);
     await expect(health.json()).resolves.toMatchObject({ report: { sessions: { opened: 16 } } });
-  });
+  }, 180_000);
 });

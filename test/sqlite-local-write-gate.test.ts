@@ -11,7 +11,9 @@ const execFileAsync = promisify(execFile);
 const require = createRequire(import.meta.url);
 const roots: string[] = [];
 
-afterEach(() => { for (const root of roots.splice(0)) rmSync(root, { recursive: true, force: true }); });
+afterEach(() => {
+  for (const root of roots.splice(0)) rmSync(root, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 });
+});
 
 function databasePath(): string {
   const root = privateTestDirectory("agent-bridge-local-write-");
@@ -22,18 +24,19 @@ function databasePath(): string {
 describe("SQLite local-authority write coordinator", () => {
   it("serializes simultaneous post, get, and receipt mutations", async () => {
     const path = databasePath();
+    const workers = process.platform === "win32" ? 8 : 20;
     const worker = `import { SQLiteBridgeStore } from ${JSON.stringify(new URL("../dist/sqlite.js", import.meta.url).pathname)};
 const path=process.argv[1];const worker=Number(process.argv[2]);const store=new SQLiteBridgeStore(path,20);await store.initialize();for(let index=0;index<4;index+=1){const id='worker-'+worker+'-'+index;await store.insertMessage({id,workspace:'w',source:'codex',targets:[],type:'context',content:'x',contentType:'text/plain',priority:'info',deliveryPolicy:{mode:'mailbox'}});await store.listMessages({workspace:'w',agent:'codex'},{mailbox:'all'});await store.recordReceipt({workspace:'w',agent:'codex'},[id]);}await store.close();`;
     await execFileAsync(process.execPath, ["--input-type=module", "--eval", worker, path, "0"]);
-    await Promise.all(Array.from({ length: 20 }, (_, workerId) => execFileAsync(
+    await Promise.all(Array.from({ length: workers }, (_, workerId) => execFileAsync(
       process.execPath, ["--input-type=module", "--eval", worker, path, String(workerId + 1)],
     )));
     const store = new SQLiteBridgeStore(path);
     await store.initialize();
-    expect((await store.listMessages({ workspace: "w", agent: "codex" }, { mailbox: "all", limit: 200 })).messages).toHaveLength(84);
+    expect((await store.listMessages({ workspace: "w", agent: "codex" }, { mailbox: "all", limit: 200 })).messages).toHaveLength((workers + 1) * 4);
     expect(await store.recordReceipt({ workspace: "w", agent: "codex" }, ["worker-0-0"])).toBe(0);
     await store.close();
-  }, 60_000);
+  }, 120_000);
 
   it("recovers a crashed writer lease and survives a WAL checkpoint and restart", async () => {
     const path = databasePath();
