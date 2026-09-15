@@ -28,7 +28,7 @@ import {
 
 const enabled = process.env.AGENT_BRIDGE_POSTGRES_NATIVE_DR_INTEGRATION === "1";
 // Keep cases sequential so each one can clean up its Docker resources.
-const integration = enabled ? describe.sequential : describe.skip;
+const integration = enabled ? describe : describe.skip;
 const migrationDirectory = fileURLToPath(new URL("../sql/migrations", import.meta.url));
 const password = "agent-bridge-native-dr-test";
 const residues = new Set<string>();
