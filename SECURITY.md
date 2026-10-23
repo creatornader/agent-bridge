@@ -4,13 +4,19 @@
 
 | Version | Security updates |
 | --- | --- |
-| 0.3.x | Supported |
+| 0.7.x | Supported |
+| 0.6.x | Not supported |
+| 0.5.x | Not supported |
+| 0.4.x | Not supported |
+| 0.3.x | Not supported |
 | 0.2.x | Not supported |
 | 0.1.x | Not supported |
 | Unreleased development code | No public support guarantee |
 
 Upgrade to the latest published package before reporting a defect that may already be
 fixed. The npm package and GitHub release page are the public version authorities.
+Projects that install Agent Bridge as a dependency must update and commit their own
+lockfile. This repository's overrides do not apply to downstream npm projects.
 
 ## Release integrity
 

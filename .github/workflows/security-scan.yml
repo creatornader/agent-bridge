@@ -4,8 +4,9 @@ name: security-scan
 #
 # Caller for the reusable workflow at creatornader/oss-security-scan,
 # which runs typos + gitleaks + trufflehog + osv-scanner. OSV-Scanner
-# runs on main pushes, the Sunday scheduled run, and manual dispatch.
-# It remains disabled on pull requests to keep review feedback fast.
+# runs on main pushes, the Sunday schedule, manual dispatch, and pull requests.
+# SARIF uploads from pull_request runs attach results to the PR, including for
+# Dependabot runs with read-only tokens.
 #
 # pre-commit job runs textleaks + oss-twin-check at PR time as the
 # CI-side enforcement of the local hooks in .pre-commit-config.yaml.
@@ -32,7 +33,7 @@ jobs:
     with:
       gitleaks-version: '8.30.1'
       gitleaks-config: '.gitleaks.toml'
-      run-osv-scanner: ${{ github.event_name != 'pull_request' }}
+      run-osv-scanner: true
 
   pre-commit:
     name: pre-commit (textleaks + oss-twin-check)

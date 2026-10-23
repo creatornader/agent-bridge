@@ -31,6 +31,8 @@ CLI, Node, and HTTPS interfaces provide access.
 - `deploy/bootstrap-runtime.sql`: Idempotent restricted runtime-login bootstrap
 - `scripts/compose-smoke.sh`: Disposable authenticated gateway and persistence proof
 - `scripts/postgres-preflight.mjs`: Disposable local PostgreSQL 15-18 contract runner
+- `scripts/npm-view-version.mjs`: Parses npm registry version responses during
+  release recovery
 - `src/postgres-production-preflight.ts`: Read-only live PostgreSQL migration preflight
 - `docs/postmortems/2026-07-08-wrapper-source-drift.md`: Incident note for wrapper/source drift
 - `docs/decisions/0001-protocol-layers-and-acknowledgment-semantics.md`: Protocol boundary and acknowledgment semantics

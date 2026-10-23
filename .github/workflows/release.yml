@@ -162,6 +162,11 @@ jobs:
       contents: read
       id-token: write
     steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 1
+          persist-credentials: false
+          ref: ${{ github.event_name == 'workflow_dispatch' && inputs.tag || github.ref }}
       - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
           name: npm-package
@@ -186,11 +191,7 @@ jobs:
             exit 0
           fi
           existing_version="$(npm view "${package_name}@${package_version}" version --json --silent 2>/dev/null || true)"
-          actual_version="$(node -e '
-            const version = JSON.parse(process.argv[1]);
-            if (typeof version !== "string") process.exit(1);
-            process.stdout.write(version);
-          ' "${existing_version}")"
+          actual_version="$(node scripts/npm-view-version.mjs "${existing_version}")"
           if [[ "${actual_version}" == "${package_version}" ]]; then
             echo "Verified published ${package_name}@${package_version}"
             exit 0

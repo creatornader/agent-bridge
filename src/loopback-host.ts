@@ -15,6 +15,7 @@ const DEFAULT_HOST = "127.0.0.1";
 const DEFAULT_PORT = 8794;
 const DEFAULT_PATH = "/mcp";
 const DEFAULT_SESSION_IDLE_MS = 12 * 60 * 60 * 1000;
+// The low-level Server API does not expose McpServer's input-element limit.
 const MAX_BODY_BYTES = 1024 * 1024;
 
 export interface LoopbackHostOptions {
