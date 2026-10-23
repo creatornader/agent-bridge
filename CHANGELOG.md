@@ -11,7 +11,8 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and 
 ### Security
 
 - Bump `@modelcontextprotocol/sdk` to 1.32.2, `vitest` to 5.0.5, `zod` to 4.6.7,
-  `ip-address` to 10.7.4, `fast-uri` to 3.1.8, and `hono` to 4.13.11.
+  `ip-address` to 10.7.4, `fast-uri` to 3.1.8, `hono` to 4.13.11, and
+  `body-parser` to 2.4.0.
 - Run OSV scans on all pull requests, including Dependabot and fork updates.
   SARIF results attach to the pull request and fail the check when vulnerabilities
   remain.
