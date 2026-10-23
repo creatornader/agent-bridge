@@ -39,6 +39,16 @@ also record this boundary. Recovery dispatches must run at the release tag. The
 workflow also requires a successful `test.yml` run from `main` for the exact package
 commit before packaging.
 
+## Automated dependency scans
+
+The `security-scan` workflow runs OSV on pull requests, pushes to `main`, the
+Sunday schedule, and manual dispatches. OSV uploads SARIF and fails the check
+when it finds a known vulnerable dependency. GitHub branch protection requires
+`scan / OSV-Scanner (CVE scan)` from the GitHub Actions app before a pull request
+can merge into `main`. Keep that required check aligned with the workflow job
+name. A new advisory can fail a scan until the affected dependency is updated;
+do not suppress the finding to restore a green run.
+
 ## Report a vulnerability
 
 Use [GitHub private vulnerability reporting](https://github.com/creatornader/agent-bridge/security/advisories/new).

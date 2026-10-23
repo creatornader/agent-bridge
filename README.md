@@ -1229,6 +1229,7 @@ durability behavior has not yet been proved on a dedicated Windows host.
 - [SKILL.md](SKILL.md): runtime-neutral agent operating instructions.
 - [llms.txt](llms.txt): compact machine-readable project map.
 - [docs/postmortems/2026-07-08-wrapper-source-drift.md](docs/postmortems/2026-07-08-wrapper-source-drift.md): wrapper and source-identity incident.
+- [docs/postmortems/2026-10-23-dependency-scan-recurrence.md](docs/postmortems/2026-10-23-dependency-scan-recurrence.md): repeated OSV findings and the required merge check.
 - [CLAUDE.md](CLAUDE.md): repository rules, architecture constraints, and documentation ownership.
 - [CHANGELOG.md](CHANGELOG.md): released and pending changes.
 

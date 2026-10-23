@@ -35,6 +35,7 @@ CLI, Node, and HTTPS interfaces provide access.
   release recovery
 - `src/postgres-production-preflight.ts`: Read-only live PostgreSQL migration preflight
 - `docs/postmortems/2026-07-08-wrapper-source-drift.md`: Incident note for wrapper/source drift
+- `docs/postmortems/2026-10-23-dependency-scan-recurrence.md`: Repeated OSV findings and required-check policy
 - `docs/decisions/0001-protocol-layers-and-acknowledgment-semantics.md`: Protocol boundary and acknowledgment semantics
 - `docs/decisions/0002-canonical-operation-contract-registry.md`: Canonical v2 contracts and version negotiation
 - `docs/decisions/0003-host-adapters-and-consumer-instance-keys.md`: Host integration layers and consumer instance-key semantics
@@ -140,6 +141,7 @@ Sync triggers:
 - PostgreSQL control and archive readiness accept a true-superuser schema owner or a managed-provider schema owner with `CREATEROLE`. PostgreSQL 16 and newer may split schema-owner admin authority from inherit and set authority across the bootstrap grant and a self-grant. Native DR may restore the same authority as one combined bootstrap-superuser grant. Readiness aggregates effective options while validating each allowed raw shape. Registered principals must still be non-superuser logins with the exact direct membership graph.
 - Client `status` is passive and reports unknown remote reachability without claiming a connection. `doctor` performs explicit checks. It exits 0, 2, or 1 for ok, degraded, or failed. Diagnostics preserve blocked edge-outbox evidence across later successful synchronization and distinguish due, scheduled, and leased work.
 - GitHub immutable releases are enabled, and GitHub reports release `v0.3.1` as immutable. The active `Protect release tags` ruleset also blocks update and deletion of `v*` tags without bypass actors. Recovery dispatches must use the release tag as the workflow ref so provenance identifies the checked-out source commit. Release packaging also requires a successful `test.yml` run from `main` for the exact package commit.
+- The security-scan workflow runs OSV on pull requests, pushes to `main`, the Sunday schedule, and manual dispatches. GitHub branch protection requires `scan / OSV-Scanner (CVE scan)` from the GitHub Actions app before a pull request can merge into `main`. Keep the required check aligned with the workflow job name.
 
 ### Providers
 
