@@ -6,6 +6,12 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and 
 
 ## [Unreleased]
 
+## [0.7.9] - 2026-10-23
+
+### Security
+
+- Upgrade `fast-uri` to 3.1.9 to address four new URI parsing advisories.
+
 ## [0.7.8] - 2026-10-23
 
 ### Security
