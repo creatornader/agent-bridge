@@ -29,7 +29,7 @@ permissions:
 
 jobs:
   scan:
-    uses: creatornader/oss-security-scan/.github/workflows/oss-security-scan.yml@8aa840764a462cb1d0195c33539a835c64f8dfa5 # v0.2.0
+    uses: creatornader/oss-security-scan/.github/workflows/oss-security-scan.yml@cfe13638376e4fbd2165f38c482ad9b66102de37 # v0.3.0
     with:
       gitleaks-version: '8.30.1'
       gitleaks-config: '.gitleaks.toml'
